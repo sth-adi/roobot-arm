@@ -176,14 +176,16 @@ void applyToArm(const ArmInput &i, bool log) {
 // Settings commands from USB serial: "!rate 5", "!range 180", "!show".
 void handleCommand(const String &s) {
   float v;
-  if (sscanf(s.c_str(), "!rate %f", &v) == 1 && v >= 0 && v <= 1000) {
+  if (sscanf(s.c_str(), "!live %f", &v) == 1 && v >= 0 && v <= 1000) {
+    maxRateDegS = v;                                   // RAM only, silent: used while dragging the GUI slider
+  } else if (sscanf(s.c_str(), "!rate %f", &v) == 1 && v >= 0 && v <= 1000) {
     maxRateDegS = v; prefs.putFloat("rate", v); showSettings();
   } else if (sscanf(s.c_str(), "!range %f", &v) == 1 && v >= 10 && v <= 720) {
     rangeDeg = v; prefs.putFloat("range", v); showSettings();
   } else if (s.startsWith("!show")) {
     showSettings();
   } else {
-    Serial.println("commands: !rate <deg/s, 0=unlimited> | !range <deg> | !show");
+    Serial.println("commands: !rate <deg/s, 0=unlimited> (saved) | !live <deg/s> (not saved) | !range <deg> | !show");
   }
 }
 

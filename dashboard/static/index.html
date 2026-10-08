@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arm Hub</title>
+<meta name="description" content="Local control hub for the robot arm: watch, control and launch everything from one place.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%235e9bdb'/%3E%3Crect x='4' y='4' width='8' height='8' fill='%230e1013'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<!--ICONS-->
+<a class="skip" href="#main">Skip to content</a>
+<div id="app">
+  <aside class="rail">
+    <div class="brand"><svg class="ic"><use href="#i-robot"/></svg><span>Arm Hub</span></div>
+    <nav id="nav" aria-label="Pages"></nav>
+    <div class="rail-foot">
+      <div id="hubState" class="st idle" role="status">Connecting</div>
+      <button id="themeBtn" class="btn sm" type="button"><svg class="ic sm"><use href="#i-sun"/></svg><span>Theme</span></button>
+    </div>
+  </aside>
+  <div class="main">
+    <header class="top">
+      <div><h1 id="title">Overview</h1><p id="subtitle"></p></div>
+      <div class="arm">
+        <div class="arm-note" id="armNote" aria-live="polite"></div>
+        <button id="armBtn" class="arm-btn" type="button" aria-pressed="false"><svg class="ic"><use href="#i-shield-check"/></svg><span>SAFE</span></button>
+      </div>
+    </header>
+    <div id="banner" hidden role="alert"></div>
+    <main id="main" tabindex="-1"></main>
+  </div>
+</div>
+<div id="toasts" aria-live="polite"></div>
+<dialog id="armDlg" aria-labelledby="armDlgTitle">
+  <h2 id="armDlgTitle">Arm the output?</h2>
+  <p>While armed, controller input is sent to the arm over USB and over the network. Keep clear of the arm. Press Escape at any time to return to SAFE.</p>
+  <div class="inline">
+    <button class="btn" id="armCancel" type="button">Cancel</button>
+    <button class="btn danger" id="armConfirm" type="button">Arm output</button>
+  </div>
+</dialog>
+<script src="/app.js"></script>
+</body>
+</html>

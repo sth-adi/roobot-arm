@@ -30,8 +30,9 @@ def encode(state, seq):
 
 
 class SerialLink:
-    def __init__(self, port=None, baud=115200, enabled=True):
+    def __init__(self, port=None, baud=115200, enabled=True, commands=()):
         self.port_hint, self.baud = port, baud
+        self.commands = list(commands)   # settings lines (e.g. "!rate 5") sent each time the port opens
         self.enabled = enabled and serial is not None
         self.ser = None
         self.seq = 0
@@ -54,8 +55,10 @@ class SerialLink:
         s.port, s.baudrate, s.write_timeout = device, self.baud, 0.05
         s.dtr = s.rts = False          # set BEFORE open: avoids resetting the ESP32
         s.open()
+        for cmd in self.commands:
+            s.write(cmd.encode("ascii") + b"\n")
         self.ser = s
-        self.status = f"serial: sending on {device}"
+        self.status = f"serial: sending on {device}" + (f"  ({', '.join(self.commands)})" if self.commands else "")
 
     def _drop(self, why):
         try:

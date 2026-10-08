@@ -208,6 +208,10 @@ def main():
     p.add_argument("--no-send", action="store_true", help="view only, don't POST to the server")
     p.add_argument("--serial-port", help="ESP32 COM port (default: auto-detect by USB ID)")
     p.add_argument("--no-serial", action="store_true", help="never use the direct USB-serial path")
+    p.add_argument("--rate", type=float, help="rate damper: max output speed in deg/s (0 = unlimited); "
+                   "sent to the ESP32 over USB each time it connects (the board saves it)")
+    p.add_argument("--range", dest="range_deg", type=float,
+                   help="servo travel in degrees that the 1000-2000 us pulse span represents (default on board: 180)")
     args = p.parse_args()
 
     os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
@@ -219,7 +223,12 @@ def main():
     js = pygame.joystick.Joystick(args.index)
     js.init()
 
-    link = SerialLink(args.serial_port, enabled=not args.no_serial)
+    cmds = []
+    if args.rate is not None:
+        cmds.append(f"!rate {args.rate:g}")
+    if args.range_deg is not None:
+        cmds.append(f"!range {args.range_deg:g}")
+    link = SerialLink(args.serial_port, enabled=not args.no_serial, commands=cmds)
     root = tk.Tk()
     App(root, js, pygame, args.url, not args.no_send, link)
     try:

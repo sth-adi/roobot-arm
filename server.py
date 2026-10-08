@@ -4,6 +4,7 @@
 Endpoints
   POST /input   JSON controller state from the client; stored as the latest state
   GET  /state   latest controller state (plus age in seconds)
+  GET  /stream  long-lived stream: one JSON line per new state (+ 0.5 s heartbeat), no polling
   GET  /health  simple liveness check
 
 Optionally forwards every received state to another server (--forward-url or
@@ -14,6 +15,7 @@ Run:  python server.py [--host 0.0.0.0] [--port 8000] [--forward-url http://host
 import argparse
 import json
 import os
+import socket
 import threading
 import time
 import urllib.error
@@ -24,6 +26,7 @@ MAX_BODY = 64 * 1024
 
 _lock = threading.Lock()
 _state = {"data": None, "received_at": None, "count": 0}
+_cond = threading.Condition(_lock)  # wakes /stream clients the moment a new state arrives
 
 # Forwarding: only the newest state matters, so a worker sends whatever is latest.
 _fwd = {"url": None, "ok": None, "error": None, "sent": 0, "failed": 0}
@@ -65,8 +68,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _stream(self):
+        """Hold the connection open and push one JSON line per new state (plus a 0.5 s heartbeat)."""
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        last = -1
+        try:
+            while True:
+                with _cond:
+                    if _state["count"] == last:
+                        _cond.wait(timeout=0.5)
+                    data, count, rec = _state["data"], _state["count"], _state["received_at"]
+                age = None if rec is None else round(time.time() - rec, 3)
+                line = json.dumps({"state": data, "age_s": age, "count": count}) + "\n"
+                self.wfile.write(line.encode())
+                self.wfile.flush()
+                last = count
+        except OSError:  # client went away
+            pass
+
     def do_GET(self):
-        if self.path == "/health":
+        if self.path == "/stream":
+            self._stream()
+        elif self.path == "/health":
             self._send(200, {"status": "ok"})
         elif self.path == "/state":
             with _lock:
@@ -95,6 +122,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "expected a JSON object"})
         with _lock:
             _state.update(data=data, received_at=time.time(), count=_state["count"] + 1)
+            _cond.notify_all()
         print(f"[{_state['count']}] {json.dumps(data)}", flush=True)
         _fwd_wake.set()
         self._send(200, {"ok": True})

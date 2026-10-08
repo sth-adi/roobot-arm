@@ -50,9 +50,13 @@ def raw_packet(url, body):
 
 
 class App:
-    def __init__(self, root, js, pygame, url, send, link):
+    def __init__(self, root, js, pygame, url, send, link, rate0=5.0):
         self.root, self.js, self.pg, self.url, self.send = root, js, pygame, url, send
         self.link = link   # direct USB-serial path to the ESP32 (only active while its COM port exists)
+        self._syncing = False          # True while the slider is being set from the board's reply
+        self._last_live = 0.0
+        self._board_rate_seen = None
+        self.rate_msg = ""
         self.prev = None
         self.seq = 0
         self.last_sent = 0.0
@@ -78,12 +82,58 @@ class App:
         self.log.tag_configure("hdr", foreground=ACTIVE)
         self.log.tag_configure("move", foreground="#ffd23f")
         self.log.tag_configure("pkt", foreground="#8a8f9c")
+        # Rate damper slider: live over the USB cable (drag = unsaved !live, release = saved !rate)
+        ctl = tk.Frame(right, bg=BG)
+        ctl.pack(fill="x", pady=(6, 0))
+        tk.Label(ctl, text="Rate damper (deg/s, 0 = off)", bg=BG, fg="#ddd",
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self.rate_var = tk.DoubleVar(value=rate0)
+        self.rate_scale = tk.Scale(ctl, from_=0, to=60, resolution=1, orient="horizontal",
+                                   showvalue=False, variable=self.rate_var, command=self.on_rate_drag,
+                                   bg=BG, fg="#ddd", troughcolor="#2b2d34", highlightthickness=0)
+        self.rate_scale.pack(fill="x")
+        self.rate_scale.bind("<ButtonRelease-1>", self.on_rate_release)
+        self.rate_lbl = tk.Label(ctl, text="", bg=BG, fg="#aaa", anchor="w", font=("Consolas", 9))
+        self.rate_lbl.pack(fill="x")
         tk.Button(right, text="Clear log", command=self.clear_log, bg="#2b2d34", fg="#ddd",
                   relief="flat").pack(anchor="e", pady=(4, 0))
 
         self.build_pad()
         threading.Thread(target=self.sender, daemon=True).start()
         self.tick()
+
+    # ---- rate damper slider --------------------------------------------------
+    def rate_text(self):
+        v = float(self.rate_var.get())
+        rng = self.link.board_range or 180.0
+        if v <= 0:
+            return "UNLIMITED (damper off)"
+        return f"{v:g} deg/s  ({rng:g} deg sweep in {rng / v:.0f} s)"
+
+    def on_rate_drag(self, _v):
+        if self._syncing:
+            return
+        now = time.time()
+        if now - self._last_live >= 0.1:      # throttle; !live is RAM-only on the board
+            self._last_live = now
+            self.link.command(f"!live {float(self.rate_var.get()):g}")
+
+    def on_rate_release(self, _event):
+        ok = self.link.command(f"!rate {float(self.rate_var.get()):g}")   # final value, saved on board
+        self.rate_msg = "" if ok else "  NOT APPLIED: no USB link"
+
+    def sync_rate(self):
+        br = self.link.board_rate             # board's own report is the source of truth
+        if br is not None and br != self._board_rate_seen:
+            self._board_rate_seen = br
+            self._syncing = True
+            self.rate_var.set(min(br, 60))
+            self._syncing = False
+        if not self.link.connected:
+            self.rate_lbl.config(text="USB cable not connected - slider has no effect yet", fg="#ff8a65")
+        else:
+            board = f"   board: {br:g}" if br is not None else ""
+            self.rate_lbl.config(text=self.rate_text() + board + self.rate_msg, fg="#aaa")
 
     # ---- drawing -----------------------------------------------------------
     def build_pad(self):
@@ -197,6 +247,7 @@ class App:
             self.q.put(s)
             self.last_sent = now
         self.link.update(s)
+        self.sync_rate()
         self.status_lbl.config(text=f"{self.status}\n{self.link.status}")
         self.root.after(int(1000 / cc.SEND_HZ), self.tick)
 
@@ -230,7 +281,7 @@ def main():
         cmds.append(f"!range {args.range_deg:g}")
     link = SerialLink(args.serial_port, enabled=not args.no_serial, commands=cmds)
     root = tk.Tk()
-    App(root, js, pygame, args.url, not args.no_send, link)
+    App(root, js, pygame, args.url, not args.no_send, link, rate0=args.rate if args.rate is not None else 5.0)
     try:
         root.mainloop()
     finally:

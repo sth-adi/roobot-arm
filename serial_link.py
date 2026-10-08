@@ -8,6 +8,7 @@ Wire format, one ASCII line per update (about 40 bytes, ~4 ms at 115200 baud):
     $lx,ly,rx,ry,lt,rt,buttonmask,dpadx,dpady,seq\\n
 buttonmask bits 0..9 = a b x y lb rb back start ls rs.
 """
+import re
 import time
 
 try:
@@ -39,6 +40,9 @@ class SerialLink:
         self.last_scan = 0.0
         self.last_sent = 0.0
         self.last_state = None
+        self._rx = ""
+        self.board_rate = None        # last damper settings the board reported (deg/s, deg)
+        self.board_range = None
         self.status = "serial: off" if not self.enabled else "serial: waiting for COM port"
 
     def _find_port(self):
@@ -55,7 +59,7 @@ class SerialLink:
         s.port, s.baudrate, s.write_timeout = device, self.baud, 0.05
         s.dtr = s.rts = False          # set BEFORE open: avoids resetting the ESP32
         s.open()
-        for cmd in self.commands:
+        for cmd in self.commands + ["!show"]:     # !show: board replies with its saved settings
             s.write(cmd.encode("ascii") + b"\n")
         self.ser = s
         self.status = f"serial: sending on {device}" + (f"  ({', '.join(self.commands)})" if self.commands else "")
@@ -90,13 +94,31 @@ class SerialLink:
         if state == self.last_state and now - self.last_sent < HEARTBEAT_S:
             return
         try:
-            if self.ser.in_waiting:                  # discard the board's debug prints
-                self.ser.read(self.ser.in_waiting)
+            if self.ser.in_waiting:                  # drain the board's prints; keep its settings reply
+                self._rx = (self._rx + self.ser.read(self.ser.in_waiting).decode("ascii", "replace"))[-600:]
+                m = re.findall(r"settings: max rate ([\d.]+) deg/s.*?range ([\d.]+) deg", self._rx)
+                if m:
+                    self.board_rate, self.board_range = float(m[-1][0]), float(m[-1][1])
             self.seq += 1
             self.ser.write(encode(state, self.seq))
             self.last_state, self.last_sent = state, now
         except (OSError, serial.SerialException, serial.SerialTimeoutException):
             self._drop("COM port lost (unplugged?), waiting")
+
+    @property
+    def connected(self):
+        return self.ser is not None
+
+    def command(self, text):
+        """Send one settings line (e.g. '!live 12') now. False if the cable/port isn't available."""
+        if self.ser is None:
+            return False
+        try:
+            self.ser.write(text.encode("ascii") + b"\n")
+            return True
+        except (OSError, serial.SerialException, serial.SerialTimeoutException):
+            self._drop("COM port lost (unplugged?), waiting")
+            return False
 
     def close(self):
         self._drop("closed")

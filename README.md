@@ -52,31 +52,33 @@ Config is read from a git-ignored `.env` file: `cp .env.example .env` and fill i
 
 ## ESP32 outputs, rate damper and input paths
 
-`arduino/arm_receiver/` drives 4 servo-style PWM outputs (50 Hz, 1000-2000 us) from the thumbsticks:
+`arduino/arm_receiver/` drives 4 servo-style PWM outputs (50 Hz, 1000-2000 us) from the thumbsticks.
+**Jog control:** each stick axis is a *velocity*. Pushing a stick moves that output; **when you release it the output stays where it is** (it does not spring back to centre). Outputs start at 1500 us (centre) on power-up and are clamped to 1000-2000 us.
 
 | Output | Pin | Axis |
 |---|---|---|
 | OUT1 | GPIO25 | Left stick X |
-| OUT2 | GPIO26 | Left stick Y (up = high) |
+| OUT2 | GPIO26 | Left stick Y (up raises the pulse) |
 | OUT3 | GPIO27 | Right stick X |
-| OUT4 | GPIO32 | Right stick Y (up = high) |
+| OUT4 | GPIO32 | Right stick Y (up raises the pulse) |
 
-**Rate damper.** The sticks set a *target* angle; each output moves toward it no faster than a max rate (default **5 deg/s**).
-Servo travel is assumed to be 180 deg across 1000-2000 us, so 5 deg/s = 27.8 us/s and a full sweep takes 36 s.
+**Rate damper.** Full stick moves an output at the max speed (default **5 deg/s**); partial deflection moves it proportionally slower.
+Servo travel is assumed to be 180 deg across 1000-2000 us, so 5 deg/s = 27.8 us/s and holding full stick takes 36 s to cross the whole range.
 Change it live over USB serial; the board saves the values:
 
 ```
-!rate 5      max speed in deg/s (0 = unlimited), saved
+!rate 5      max speed at full stick in deg/s (0 = no limit, capped at 180 deg/s), saved
 !live 5      same, but not saved (used while dragging the slider)
 !range 180   servo travel in degrees represented by 1000-2000 us (use 90/270 to match your servo)
 !show        print current settings
 ```
 
-or use the **Rate damper slider in the GUI** (0-60 deg/s, 0 = off): dragging changes the speed live (`!live`, RAM only, no flash writes);
+or use the **speed slider in the GUI** (max speed at full stick, 0-60 deg/s, 0 = no limit): dragging changes the speed live (`!live`, RAM only, no flash writes);
 releasing saves it (`!rate`). The slider syncs to the board's reported value when the cable connects and needs the USB cable.
 Or let the GUI send them every time the cable connects: `python controller_gui.py --rate 5 --range 180`.
 Defaults live in `arm_receiver.ino` (`DEFAULT_MAX_RATE_DEG_S`, `DEFAULT_RANGE_DEG`).
-Fail-safe: with no valid input the outputs **freeze** where they are (they do not keep driving), and resume when valid input returns.
+Fail-safe: with no valid input all stick commands drop to zero, so the arm **stops and holds its position** (a held stick never keeps driving without fresh input), and resumes when valid input returns. USB input is treated as lost after 400 ms, so at the maximum speed the arm can coast for up to 0.4 s after the cable is pulled (about 2 degrees at 5 deg/s).
+Because position is integrated on the board, a reset or power cycle returns every output to centre.
 
 **Input paths** (highest priority first):
 1. **Direct USB serial** - `controller_gui.py` finds the board's COM port by USB ID (`serial_link.py`), opens it without resetting the board and streams compact `$` lines. Used only while the port exists; no cable = silently skipped. `--no-serial` disables it, `--serial-port COMx` forces a port. Only one program can hold the port, so close the GUI before uploading or opening the Serial Monitor.

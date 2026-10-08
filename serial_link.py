@@ -96,7 +96,7 @@ class SerialLink:
         try:
             if self.ser.in_waiting:                  # drain the board's prints; keep its settings reply
                 self._rx = (self._rx + self.ser.read(self.ser.in_waiting).decode("ascii", "replace"))[-600:]
-                m = re.findall(r"settings: max rate ([\d.]+) deg/s.*?range ([\d.]+) deg", self._rx)
+                m = re.findall(r"settings: max (?:rate|speed at full stick) ([\d.]+) deg/s.*?range ([\d.]+) deg", self._rx)
                 if m:
                     self.board_rate, self.board_range = float(m[-1][0]), float(m[-1][1])
             self.seq += 1

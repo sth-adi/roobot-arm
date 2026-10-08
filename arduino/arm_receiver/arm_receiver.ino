@@ -82,12 +82,15 @@ void printInput(const ArmInput &i, uint32_t count) {
   Serial.println();
 }
 
-// ---- PWM outputs: the 4 thumbstick axes -------------------------------------
-// Servo-style PWM: 50 Hz, pulse 1000..2000 us, stick centre = 1500 us.
-//   OUT1  GPIO25  <- LX  left stick, left(-1)=1000us  right(+1)=2000us
-//   OUT2  GPIO26  <- LY  left stick, down(-1)=1000us  up(+1)=2000us     (Y inverted)
-//   OUT3  GPIO27  <- RX  right stick, left=1000us     right=2000us
-//   OUT4  GPIO32  <- RY  right stick, down=1000us     up=2000us         (Y inverted)
+// ---- PWM outputs: the 4 thumbstick axes (JOG control) -----------------------------
+// Servo-style PWM: 50 Hz, pulse 1000..2000 us, position starts at 1500 us (centre).
+// Each stick axis is a VELOCITY, not a position: pushing the stick moves the output that way,
+// and when the stick is released the output STAYS where it is (it does not spring back).
+//   OUT1  GPIO25  <- LX  left stick,  right(+) raises the pulse, left(-) lowers it
+//   OUT2  GPIO26  <- LY  left stick,  up(+) raises the pulse, down(-) lowers it     (Y inverted)
+//   OUT3  GPIO27  <- RX  right stick, right(+) raises, left(-) lowers
+//   OUT4  GPIO32  <- RY  right stick, up(+) raises, down(-) lowers                  (Y inverted)
+// Position is clamped to 1000..2000 us. Half stick = half speed.
 // Pins avoid strapping/flash pins, so they stay quiet while the ESP32 boots.
 const uint8_t  PWM_PINS[4]  = {25, 26, 27, 32};
 const char    *PWM_NAMES[4] = {"LX", "LY", "RX", "RY"};
@@ -95,23 +98,26 @@ const uint32_t PWM_FREQ_HZ  = 50;
 const uint8_t  PWM_BITS     = 16;                 // 65536 steps per 20 ms (~0.3 us): fine enough for slow slews
 const uint16_t PULSE_MIN_US = 1000, PULSE_MID_US = 1500, PULSE_MAX_US = 2000;
 
-// ---- Rate damper (slew limiter) ----------------------------------------------------
-// Sticks set a TARGET angle; the output moves toward it no faster than MAX_RATE deg/s.
-//   DEFAULT_MAX_RATE_DEG_S  speed limit per output, 0 = unlimited. Ideal for now: 5 deg/s.
+// ---- Rate damper (max jog speed) ---------------------------------------------------
+// Full stick deflection moves an output at MAX_RATE deg/s; partial deflection scales it.
+//   DEFAULT_MAX_RATE_DEG_S  speed at full stick, per output. Ideal for now: 5 deg/s.
+//                           0 = "no limit", which is capped at UNLIMITED_JOG_DEG_S below.
 //   DEFAULT_RANGE_DEG       servo travel that the 1000..2000 us pulse span represents
 //                           (180 for a typical "180 degree" servo; use 90 or 270 to match yours).
 // Both are only DEFAULTS: change them live over USB serial (saved on the board, survive reboot):
 //   !rate 5      set max speed in deg/s (0 = no limit)
 //   !range 180   set servo travel in degrees
 //   !show        print the current settings
-// At 5 deg/s on a 180 deg servo a full stick sweep takes 36 s (see README).
+// At 5 deg/s on a 180 deg servo, holding full stick takes 36 s to cross the whole range.
 const float DEFAULT_MAX_RATE_DEG_S = 5.0f;
 const float DEFAULT_RANGE_DEG      = 180.0f;
+const float UNLIMITED_JOG_DEG_S    = 180.0f;   // speed used when the rate is set to 0
 
 float maxRateDegS = DEFAULT_MAX_RATE_DEG_S;
 float rangeDeg    = DEFAULT_RANGE_DEG;
-float curUs[4]    = {PULSE_MID_US, PULSE_MID_US, PULSE_MID_US, PULSE_MID_US};   // actual output
-float tgtUs[4]    = {PULSE_MID_US, PULSE_MID_US, PULSE_MID_US, PULSE_MID_US};   // stick target
+float axisCmd[4]  = {0, 0, 0, 0};                                               // stick velocity command, -1..1
+float tgtUs[4]    = {PULSE_MID_US, PULSE_MID_US, PULSE_MID_US, PULSE_MID_US};   // held position
+float curUs[4]    = {PULSE_MID_US, PULSE_MID_US, PULSE_MID_US, PULSE_MID_US};   // pulse actually output
 uint32_t lastSlewMs = 0;
 Preferences prefs;
 
@@ -127,31 +133,28 @@ void loadSettings() {
 
 void showSettings() {
   float usPerDeg = (PULSE_MAX_US - PULSE_MIN_US) / rangeDeg;
-  Serial.printf("settings: max rate %.2f deg/s%s, range %.0f deg (%.2f us/deg, %.1f us/s)\n",
-                maxRateDegS, maxRateDegS > 0 ? "" : " (UNLIMITED)", rangeDeg, usPerDeg,
-                maxRateDegS * usPerDeg);
+  Serial.printf("settings: max speed at full stick %.2f deg/s%s, range %.0f deg (%.2f us/deg, %.1f us/s)\n",
+                maxRateDegS, maxRateDegS > 0 ? "" : " (no limit: capped at 180 deg/s)", rangeDeg, usPerDeg,
+                (maxRateDegS > 0 ? maxRateDegS : UNLIMITED_JOG_DEG_S) * usPerDeg);
 }
 
-// Move each output toward its target by at most rate*dt. Called every loop pass, so the
-// motion stays smooth and time-based even when no new input arrives.
+// Jog integrator: position += stick * speed * dt, then HOLD. Called every loop pass so the
+// motion is smooth and time-based even when no new input packet arrives (a held stick sends
+// no new packets). Releasing the stick (command 0) leaves the output exactly where it is.
 void tickPwm() {
   uint32_t now = millis();
   uint32_t dtMs = now - lastSlewMs;
   if (dtMs < 5) return;                                // ~200 Hz max
   lastSlewMs = now;
+  if (dtMs > 100) dtMs = 100;                          // after a long blocking call, don't jump
   float usPerDeg = (PULSE_MAX_US - PULSE_MIN_US) / rangeDeg;
-  float maxStep = maxRateDegS > 0 ? maxRateDegS * usPerDeg * (dtMs / 1000.0f) : 1e9f;
+  float degPerS = maxRateDegS > 0 ? maxRateDegS : UNLIMITED_JOG_DEG_S;
+  float step = degPerS * usPerDeg * (dtMs / 1000.0f);  // us moved at full stick this tick
   for (int n = 0; n < 4; n++) {
-    float d = tgtUs[n] - curUs[n];
-    if (fabsf(d) <= maxStep) curUs[n] = tgtUs[n];
-    else curUs[n] += (d > 0 ? maxStep : -maxStep);
+    tgtUs[n] = constrain(tgtUs[n] + axisCmd[n] * step, (float)PULSE_MIN_US, (float)PULSE_MAX_US);
+    curUs[n] = tgtUs[n];
     ledcWrite(PWM_PINS[n], (uint32_t)(curUs[n] * ((1UL << PWM_BITS) - 1) / (1000000.0f / PWM_FREQ_HZ)));
   }
-}
-
-uint16_t axisToUs(float v) {                      // -1..1 -> 1000..2000 us
-  v = constrain(v, -1.0f, 1.0f);
-  return (uint16_t)(PULSE_MID_US + v * (PULSE_MAX_US - PULSE_MID_US));
 }
 
 void setupPwm() {
@@ -161,15 +164,17 @@ void setupPwm() {
   }
 }
 
-// Called only when the input changes: sets the TARGETS. tickPwm() slews the outputs toward
-// them at the configured max rate. Stale/failed packets arrive as all-zero => target centre.
+// Called only when the input changes: sets the stick VELOCITY commands. tickPwm() integrates
+// them into position, which then holds when the sticks return to 0.
 void applyToArm(const ArmInput &i, bool log) {
-  const float axes[4] = {i.lx, -i.ly, i.rx, -i.ry};   // Y inverted: stick up = high
-  for (int n = 0; n < 4; n++) tgtUs[n] = axisToUs(axes[n]);
+  axisCmd[0] = constrain(i.lx, -1.0f, 1.0f);
+  axisCmd[1] = constrain(-i.ly, -1.0f, 1.0f);         // Y inverted: stick up = raise the pulse
+  axisCmd[2] = constrain(i.rx, -1.0f, 1.0f);
+  axisCmd[3] = constrain(-i.ry, -1.0f, 1.0f);
   if (!log) return;
-  Serial.printf("TGT  %s/GPIO%u=%.0fus  %s/GPIO%u=%.0fus  %s/GPIO%u=%.0fus  %s/GPIO%u=%.0fus  | out %.0f %.0f %.0f %.0f\n",
-                PWM_NAMES[0], PWM_PINS[0], tgtUs[0], PWM_NAMES[1], PWM_PINS[1], tgtUs[1],
-                PWM_NAMES[2], PWM_PINS[2], tgtUs[2], PWM_NAMES[3], PWM_PINS[3], tgtUs[3],
+  Serial.printf("JOG  cmd %s=%+.2f %s=%+.2f %s=%+.2f %s=%+.2f  | pos(us) %.0f %.0f %.0f %.0f\n",
+                PWM_NAMES[0], axisCmd[0], PWM_NAMES[1], axisCmd[1],
+                PWM_NAMES[2], axisCmd[2], PWM_NAMES[3], axisCmd[3],
                 curUs[0], curUs[1], curUs[2], curUs[3]);
 }
 
@@ -191,9 +196,9 @@ void handleCommand(const String &s) {
 
 // Apply a new input. PWM is updated on every change; Serial logging is throttled to 10 Hz
 // (always logged when returning to neutral) so printing never slows the control path.
-// `ok` false (stale/failed/disconnected) => fail-safe: the arm FREEZES where it is. Valid
-// input after a freeze is always applied, even if it equals the last state (e.g. sticks
-// released = centre), otherwise the arm would stay frozen forever.
+// `ok` false (stale/failed/disconnected) => fail-safe: all stick commands drop to 0, so the arm
+// STOPS and holds its position (a held stick must never keep driving without fresh input).
+// Valid input after a stop is always applied, even if it equals the last state.
 uint32_t lastLogMs = 0;
 bool holding = false;
 void applyInput(bool ok, ArmInput in, uint32_t count) {
@@ -204,10 +209,10 @@ void applyInput(bool ok, ArmInput in, uint32_t count) {
     if (ok) {
       holding = false;
       applyToArm(in, log);
-    } else {                                           // fail-safe: FREEZE where we are
-      holding = true;                                  // (a slow damper must not keep driving)
-      for (int n = 0; n < 4; n++) tgtUs[n] = curUs[n];
-      if (log) Serial.println("HOLD no valid input: outputs frozen at current position");
+    } else {                                           // fail-safe: STOP moving, keep position
+      holding = true;
+      for (int n = 0; n < 4; n++) axisCmd[n] = 0;
+      if (log) Serial.println("HOLD no valid input: motion stopped, position kept");
     }
     last = in;
     haveLast = true;

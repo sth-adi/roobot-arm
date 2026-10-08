@@ -85,7 +85,7 @@ class App:
         # Rate damper slider: live over the USB cable (drag = unsaved !live, release = saved !rate)
         ctl = tk.Frame(right, bg=BG)
         ctl.pack(fill="x", pady=(6, 0))
-        tk.Label(ctl, text="Rate damper (deg/s, 0 = off)", bg=BG, fg="#ddd",
+        tk.Label(ctl, text="Max speed at full stick (deg/s, 0 = no limit)", bg=BG, fg="#ddd",
                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
         self.rate_var = tk.DoubleVar(value=rate0)
         self.rate_scale = tk.Scale(ctl, from_=0, to=60, resolution=1, orient="horizontal",
@@ -107,8 +107,8 @@ class App:
         v = float(self.rate_var.get())
         rng = self.link.board_range or 180.0
         if v <= 0:
-            return "UNLIMITED (damper off)"
-        return f"{v:g} deg/s  ({rng:g} deg sweep in {rng / v:.0f} s)"
+            return "NO LIMIT (full stick = 180 deg/s)"
+        return f"{v:g} deg/s at full stick  (full stick crosses {rng:g} deg in {rng / v:.0f} s)"
 
     def on_rate_drag(self, _v):
         if self._syncing:

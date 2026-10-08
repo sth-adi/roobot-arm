@@ -5,6 +5,7 @@ Endpoints
   POST /input   JSON controller state from the client; stored as the latest state
   GET  /state   latest controller state (plus age in seconds)
   GET  /stream  long-lived stream: one JSON line per new state (+ 0.5 s heartbeat), no polling
+  POST /control {"forward": true|false} pause/resume forwarding to the next server (used by the dashboard SAFE switch)
   GET  /health  simple liveness check
 
 Optionally forwards every received state to another server (--forward-url or
@@ -29,7 +30,7 @@ _state = {"data": None, "received_at": None, "count": 0}
 _cond = threading.Condition(_lock)  # wakes /stream clients the moment a new state arrives
 
 # Forwarding: only the newest state matters, so a worker sends whatever is latest.
-_fwd = {"url": None, "ok": None, "error": None, "sent": 0, "failed": 0}
+_fwd = {"url": None, "ok": None, "error": None, "sent": 0, "failed": 0, "enabled": True}
 _fwd_wake = threading.Event()
 
 
@@ -43,6 +44,8 @@ def _forward_worker():
         if data is None or count == last_count:
             continue
         last_count = count
+        if not _fwd["enabled"]:          # paused via POST /control: drop it, never queue for later
+            continue
         req = urllib.request.Request(
             _fwd["url"], data=json.dumps(data).encode(),
             headers={"Content-Type": "application/json", "User-Agent": "roobot-arm-server/0.1"},
@@ -98,7 +101,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/state":
             with _lock:
                 age = None if _state["received_at"] is None else round(time.time() - _state["received_at"], 3)
-                out = {"state": _state["data"], "age_s": age, "count": _state["count"]}
+                out = {"state": _state["data"], "age_s": age, "count": _state["count"],
+                       "forward_enabled": _fwd["enabled"]}
                 if _fwd["url"]:
                     out["forward"] = dict(_fwd)
                 self._send(200, out)
@@ -106,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path != "/input":
+        if self.path not in ("/input", "/control"):
             return self._send(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -120,6 +124,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "invalid JSON"})
         if not isinstance(data, dict):
             return self._send(400, {"error": "expected a JSON object"})
+        if self.path == "/control":      # {"forward": true|false} pauses/resumes forwarding to the next server
+            if not isinstance(data.get("forward"), bool):
+                return self._send(400, {"error": "expected {\"forward\": true|false}"})
+            with _lock:
+                _fwd["enabled"] = data["forward"]
+            return self._send(200, {"ok": True, "forward_enabled": data["forward"]})
         with _lock:
             _state.update(data=data, received_at=time.time(), count=_state["count"] + 1)
             _cond.notify_all()

@@ -1,0 +1,9 @@
+services:
+  arm-server:
+    build: .
+    ports:
+      - "8000:8000"
+    # Secrets/config live in .env (git-ignored); see .env.example
+    env_file:
+      - .env
+    restart: unless-stopped

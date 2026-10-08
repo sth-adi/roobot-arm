@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+
+# secrets / local config
+.env
+.env.*
+!.env.example
+
+# Arduino secrets
+secrets.h

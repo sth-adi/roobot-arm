@@ -1,0 +1,10 @@
+services:
+  arm-server:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Other server (override with FORWARD_URL=...); port/path assumed, adjust if needed
+      # (use host.docker.internal to reach a server on this PC)
+      FORWARD_URL: ${FORWARD_URL:-http://192.168.1.5:8000/input}
+    restart: unless-stopped

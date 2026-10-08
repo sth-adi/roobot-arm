@@ -35,3 +35,15 @@ Sticks are -1..1 with a 0.12 deadzone, triggers 0..1. The client sends on change
 ## Notes
 
 Axis and button indices vary by OS/driver. If something looks wrong, run the client with `--debug` and edit `AXES` / `BUTTONS` at the top of `controller_client.py`.
+
+## Docker (server only)
+
+The container runs `server.py` and can forward every received state to another server.
+
+```bash
+docker build -t roobot-arm-server .
+docker run -p 8000:8000 -e FORWARD_URL=http://192.168.1.50:5000/input roobot-arm-server
+# or: FORWARD_URL=http://... docker compose up --build
+```
+
+The controller client/GUI keep running on the PC and POST to `http://localhost:8000/input`. Forwarded requests use the same JSON payload; `GET /state` shows forwarding status (`sent`, `failed`, last `error`). Use `host.docker.internal` as the host to reach a server running on the PC itself.

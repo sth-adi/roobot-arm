@@ -42,7 +42,8 @@ def _forward_worker():
         last_count = count
         req = urllib.request.Request(
             _fwd["url"], data=json.dumps(data).encode(),
-            headers={"Content-Type": "application/json"}, method="POST")
+            headers={"Content-Type": "application/json", "User-Agent": "roobot-arm-server/0.1"},
+            method="POST")
         try:
             with urllib.request.urlopen(req, timeout=2.0) as r:
                 r.read()

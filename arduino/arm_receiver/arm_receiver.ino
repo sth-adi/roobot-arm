@@ -7,6 +7,7 @@
 
   Libraries (Library Manager): ArduinoJson 7.x.  Board: any ESP32 (esp32 core).
   Setup: copy secrets.example.h -> secrets.h and fill in WiFi + STATE_URL.
+  TLS: server cert is verified against the root CAs in ca_certs.h (clock synced via NTP first).
 
   Packet shape (from /state):
   {"state":{"lx":0,"ly":0,"rx":0,"ry":0,"lt":0,"rt":0,
@@ -17,7 +18,9 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <time.h>
 #include "secrets.h"
+#include "ca_certs.h"   // root CAs used to verify the server's TLS certificate
 
 const uint32_t POLL_MS = 50;       // ~20 Hz
 const float    STALE_S = 1.5;      // packet older than this = sender gone
@@ -91,10 +94,25 @@ void connectWifi() {
   Serial.printf("\nWiFi OK, IP %s\n", WiFi.localIP().toString().c_str());
 }
 
+// TLS validates certificate dates, so the clock must be right before any HTTPS call.
+void syncClock() {
+  Serial.print("Syncing time");
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  time_t now = 0;
+  for (int i = 0; i < 60 && now < 1700000000; i++) {   // wait until clock is sane
+    delay(500);
+    Serial.print('.');
+    time(&now);
+  }
+  if (now < 1700000000) Serial.println("\nNTP failed - HTTPS will be rejected until time syncs");
+  else Serial.printf("\nTime OK (%ld)\n", (long)now);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(300);
   connectWifi();
+  syncClock();
 }
 
 void loop() {
@@ -103,7 +121,7 @@ void loop() {
   if (WiFi.status() != WL_CONNECTED) { connectWifi(); return; }
 
   WiFiClientSecure client;
-  client.setInsecure();   // skips cert check (fine for a hobby link; pin a root CA to harden)
+  client.setCACert(ROOT_CAS);   // verify the server certificate against pinned root CAs
   HTTPClient http;
   http.setTimeout(HTTP_TIMEOUT_MS);
   http.setUserAgent("roobot-arm-esp32/0.1");   // Cloudflare rejects default agents
@@ -114,6 +132,7 @@ void loop() {
   if (http.begin(client, STATE_URL)) {
     int code = http.GET();
     if (code == 200) ok = unpack(http.getString(), in, count);
+    else if (code < 0) Serial.printf("HTTPS error: %s\n", HTTPClient::errorToString(code).c_str());
     else Serial.printf("HTTP %d\n", code);
     http.end();
   }

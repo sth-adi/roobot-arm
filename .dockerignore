@@ -5,3 +5,6 @@ controller_client.py
 controller_gui.py
 requirements.txt
 README.md
+
+.env
+.env.*

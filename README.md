@@ -4,7 +4,7 @@ Xbox controller -> HTTP server, as the input path for the robot arm.
 
 - `server.py` – HTTP server, standard library only. `POST /input`, `GET /state`, `GET /health`.
 - `controller_client.py` – reads a generic Xbox One controller (pygame) and POSTs its state as JSON.
-- `controller_gui.py` � live Tk window: draws the controller and logs each move as the raw HTTP packet. `python controller_gui.py [--no-send]`
+- `controller_gui.py` - live Tk window: draws the controller and logs each move as the raw HTTP packet. `python controller_gui.py [--no-send]`
 
 ## Run
 
@@ -66,12 +66,15 @@ Servo travel is assumed to be 180 deg across 1000-2000 us, so 5 deg/s = 27.8 us/
 Change it live over USB serial; the board saves the values:
 
 ```
-!rate 5      max speed in deg/s (0 = unlimited)
+!rate 5      max speed in deg/s (0 = unlimited), saved
+!live 5      same, but not saved (used while dragging the slider)
 !range 180   servo travel in degrees represented by 1000-2000 us (use 90/270 to match your servo)
 !show        print current settings
 ```
 
-or let the GUI send them every time the cable connects: `python controller_gui.py --rate 5 --range 180`.
+or use the **Rate damper slider in the GUI** (0-60 deg/s, 0 = off): dragging changes the speed live (`!live`, RAM only, no flash writes);
+releasing saves it (`!rate`). The slider syncs to the board's reported value when the cable connects and needs the USB cable.
+Or let the GUI send them every time the cable connects: `python controller_gui.py --rate 5 --range 180`.
 Defaults live in `arm_receiver.ino` (`DEFAULT_MAX_RATE_DEG_S`, `DEFAULT_RANGE_DEG`).
 Fail-safe: with no valid input the outputs **freeze** where they are (they do not keep driving), and resume when valid input returns.
 

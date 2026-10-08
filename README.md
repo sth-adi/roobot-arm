@@ -4,6 +4,7 @@ Xbox controller -> HTTP server, as the input path for the robot arm.
 
 - `server.py` – HTTP server, standard library only. `POST /input`, `GET /state`, `GET /health`.
 - `controller_client.py` – reads a generic Xbox One controller (pygame) and POSTs its state as JSON.
+- `controller_gui.py` � live Tk window: draws the controller and logs each move as the raw HTTP packet. `python controller_gui.py [--no-send]`
 
 ## Run
 

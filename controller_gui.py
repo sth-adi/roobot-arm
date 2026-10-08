@@ -18,6 +18,7 @@ import urllib.error
 from urllib.parse import urlparse
 
 import controller_client as cc
+from serial_link import SerialLink
 
 BG, BODY, IDLE, ACTIVE = "#1e1f24", "#34363d", "#50535c", "#3ddc84"
 COLORS = {"a": "#3ddc84", "b": "#ff5252", "x": "#4aa3ff", "y": "#ffd23f"}
@@ -49,8 +50,9 @@ def raw_packet(url, body):
 
 
 class App:
-    def __init__(self, root, js, pygame, url, send):
+    def __init__(self, root, js, pygame, url, send, link):
         self.root, self.js, self.pg, self.url, self.send = root, js, pygame, url, send
+        self.link = link   # direct USB-serial path to the ESP32 (only active while its COM port exists)
         self.prev = None
         self.seq = 0
         self.last_sent = 0.0
@@ -194,7 +196,8 @@ class App:
         if self.send and (changed or now - self.last_sent >= cc.HEARTBEAT_S):
             self.q.put(s)
             self.last_sent = now
-        self.status_lbl.config(text=self.status)
+        self.link.update(s)
+        self.status_lbl.config(text=f"{self.status}\n{self.link.status}")
         self.root.after(int(1000 / cc.SEND_HZ), self.tick)
 
 
@@ -203,6 +206,8 @@ def main():
     p.add_argument("--url", default="http://localhost:8000/input")
     p.add_argument("--index", type=int, default=0)
     p.add_argument("--no-send", action="store_true", help="view only, don't POST to the server")
+    p.add_argument("--serial-port", help="ESP32 COM port (default: auto-detect by USB ID)")
+    p.add_argument("--no-serial", action="store_true", help="never use the direct USB-serial path")
     args = p.parse_args()
 
     os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
@@ -214,9 +219,13 @@ def main():
     js = pygame.joystick.Joystick(args.index)
     js.init()
 
+    link = SerialLink(args.serial_port, enabled=not args.no_serial)
     root = tk.Tk()
-    App(root, js, pygame, args.url, not args.no_send)
-    root.mainloop()
+    App(root, js, pygame, args.url, not args.no_send, link)
+    try:
+        root.mainloop()
+    finally:
+        link.close()   # release the COM port so the IDE / uploads can use it
 
 
 if __name__ == "__main__":

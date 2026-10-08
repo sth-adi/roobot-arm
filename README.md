@@ -49,3 +49,33 @@ docker run -p 8000:8000 -e FORWARD_URL=http://<other-server-ip>:<port>/<path> ro
 The controller client/GUI keep running on the PC and POST to `http://localhost:8000/input`. Forwarded requests use the same JSON payload; `GET /state` shows forwarding status (`sent`, `failed`, last `error`). Use `host.docker.internal` as the host to reach a server running on the PC itself.
 
 Config is read from a git-ignored `.env` file: `cp .env.example .env` and fill in `FORWARD_URL`. Compose loads it automatically; for plain `docker run` use `--env-file .env`. Don't commit `.env`.
+
+## ESP32 outputs, rate damper and input paths
+
+`arduino/arm_receiver/` drives 4 servo-style PWM outputs (50 Hz, 1000-2000 us) from the thumbsticks:
+
+| Output | Pin | Axis |
+|---|---|---|
+| OUT1 | GPIO25 | Left stick X |
+| OUT2 | GPIO26 | Left stick Y (up = high) |
+| OUT3 | GPIO27 | Right stick X |
+| OUT4 | GPIO32 | Right stick Y (up = high) |
+
+**Rate damper.** The sticks set a *target* angle; each output moves toward it no faster than a max rate (default **5 deg/s**).
+Servo travel is assumed to be 180 deg across 1000-2000 us, so 5 deg/s = 27.8 us/s and a full sweep takes 36 s.
+Change it live over USB serial; the board saves the values:
+
+```
+!rate 5      max speed in deg/s (0 = unlimited)
+!range 180   servo travel in degrees represented by 1000-2000 us (use 90/270 to match your servo)
+!show        print current settings
+```
+
+or let the GUI send them every time the cable connects: `python controller_gui.py --rate 5 --range 180`.
+Defaults live in `arm_receiver.ino` (`DEFAULT_MAX_RATE_DEG_S`, `DEFAULT_RANGE_DEG`).
+Fail-safe: with no valid input the outputs **freeze** where they are (they do not keep driving), and resume when valid input returns.
+
+**Input paths** (highest priority first):
+1. **Direct USB serial** - `controller_gui.py` finds the board's COM port by USB ID (`serial_link.py`), opens it without resetting the board and streams compact `$` lines. Used only while the port exists; no cable = silently skipped. `--no-serial` disables it, `--serial-port COMx` forces a port. Only one program can hold the port, so close the GUI before uploading or opening the Serial Monitor.
+2. **Plain-TCP stream** - define `STREAM_HOST`/`STREAM_PORT` in `secrets.h` (the PC's IP on the same network as the ESP32); the sketch holds one `GET /stream` connection open (no TLS, no polling). The server pushes a line per new state.
+3. **HTTPS polling** of `STATE_URL` - used when `STREAM_HOST` is not defined.

@@ -19,6 +19,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <Preferences.h>
 #include "secrets.h"
 #include "ca_certs.h"   // root CAs used to verify the server's TLS certificate
 
@@ -91,11 +92,61 @@ void printInput(const ArmInput &i, uint32_t count) {
 const uint8_t  PWM_PINS[4]  = {25, 26, 27, 32};
 const char    *PWM_NAMES[4] = {"LX", "LY", "RX", "RY"};
 const uint32_t PWM_FREQ_HZ  = 50;
-const uint8_t  PWM_BITS     = 14;                 // 16384 steps per 20 ms period
+const uint8_t  PWM_BITS     = 16;                 // 65536 steps per 20 ms (~0.3 us): fine enough for slow slews
 const uint16_t PULSE_MIN_US = 1000, PULSE_MID_US = 1500, PULSE_MAX_US = 2000;
+
+// ---- Rate damper (slew limiter) ----------------------------------------------------
+// Sticks set a TARGET angle; the output moves toward it no faster than MAX_RATE deg/s.
+//   DEFAULT_MAX_RATE_DEG_S  speed limit per output, 0 = unlimited. Ideal for now: 5 deg/s.
+//   DEFAULT_RANGE_DEG       servo travel that the 1000..2000 us pulse span represents
+//                           (180 for a typical "180 degree" servo; use 90 or 270 to match yours).
+// Both are only DEFAULTS: change them live over USB serial (saved on the board, survive reboot):
+//   !rate 5      set max speed in deg/s (0 = no limit)
+//   !range 180   set servo travel in degrees
+//   !show        print the current settings
+// At 5 deg/s on a 180 deg servo a full stick sweep takes 36 s (see README).
+const float DEFAULT_MAX_RATE_DEG_S = 5.0f;
+const float DEFAULT_RANGE_DEG      = 180.0f;
+
+float maxRateDegS = DEFAULT_MAX_RATE_DEG_S;
+float rangeDeg    = DEFAULT_RANGE_DEG;
+float curUs[4]    = {PULSE_MID_US, PULSE_MID_US, PULSE_MID_US, PULSE_MID_US};   // actual output
+float tgtUs[4]    = {PULSE_MID_US, PULSE_MID_US, PULSE_MID_US, PULSE_MID_US};   // stick target
+uint32_t lastSlewMs = 0;
+Preferences prefs;
 
 uint32_t usToDuty(uint16_t us) {
   return (uint32_t)us * ((1UL << PWM_BITS) - 1) / (1000000UL / PWM_FREQ_HZ);
+}
+
+void loadSettings() {
+  prefs.begin("arm", false);
+  maxRateDegS = prefs.getFloat("rate", DEFAULT_MAX_RATE_DEG_S);
+  rangeDeg    = prefs.getFloat("range", DEFAULT_RANGE_DEG);
+}
+
+void showSettings() {
+  float usPerDeg = (PULSE_MAX_US - PULSE_MIN_US) / rangeDeg;
+  Serial.printf("settings: max rate %.2f deg/s%s, range %.0f deg (%.2f us/deg, %.1f us/s)\n",
+                maxRateDegS, maxRateDegS > 0 ? "" : " (UNLIMITED)", rangeDeg, usPerDeg,
+                maxRateDegS * usPerDeg);
+}
+
+// Move each output toward its target by at most rate*dt. Called every loop pass, so the
+// motion stays smooth and time-based even when no new input arrives.
+void tickPwm() {
+  uint32_t now = millis();
+  uint32_t dtMs = now - lastSlewMs;
+  if (dtMs < 5) return;                                // ~200 Hz max
+  lastSlewMs = now;
+  float usPerDeg = (PULSE_MAX_US - PULSE_MIN_US) / rangeDeg;
+  float maxStep = maxRateDegS > 0 ? maxRateDegS * usPerDeg * (dtMs / 1000.0f) : 1e9f;
+  for (int n = 0; n < 4; n++) {
+    float d = tgtUs[n] - curUs[n];
+    if (fabsf(d) <= maxStep) curUs[n] = tgtUs[n];
+    else curUs[n] += (d > 0 ? maxStep : -maxStep);
+    ledcWrite(PWM_PINS[n], (uint32_t)(curUs[n] * ((1UL << PWM_BITS) - 1) / (1000000.0f / PWM_FREQ_HZ)));
+  }
 }
 
 uint16_t axisToUs(float v) {                      // -1..1 -> 1000..2000 us
@@ -110,31 +161,52 @@ void setupPwm() {
   }
 }
 
-// Called only when the input changes. Stale/failed packets arrive as all-zero => centred.
+// Called only when the input changes: sets the TARGETS. tickPwm() slews the outputs toward
+// them at the configured max rate. Stale/failed packets arrive as all-zero => target centre.
 void applyToArm(const ArmInput &i, bool log) {
   const float axes[4] = {i.lx, -i.ly, i.rx, -i.ry};   // Y inverted: stick up = high
-  uint16_t us[4];
-  for (int n = 0; n < 4; n++) {
-    us[n] = axisToUs(axes[n]);
-    ledcWrite(PWM_PINS[n], usToDuty(us[n]));
-  }
+  for (int n = 0; n < 4; n++) tgtUs[n] = axisToUs(axes[n]);
   if (!log) return;
-  Serial.printf("PWM  %s/GPIO%u=%uus  %s/GPIO%u=%uus  %s/GPIO%u=%uus  %s/GPIO%u=%uus\n",
-                PWM_NAMES[0], PWM_PINS[0], us[0], PWM_NAMES[1], PWM_PINS[1], us[1],
-                PWM_NAMES[2], PWM_PINS[2], us[2], PWM_NAMES[3], PWM_PINS[3], us[3]);
+  Serial.printf("TGT  %s/GPIO%u=%.0fus  %s/GPIO%u=%.0fus  %s/GPIO%u=%.0fus  %s/GPIO%u=%.0fus  | out %.0f %.0f %.0f %.0f\n",
+                PWM_NAMES[0], PWM_PINS[0], tgtUs[0], PWM_NAMES[1], PWM_PINS[1], tgtUs[1],
+                PWM_NAMES[2], PWM_PINS[2], tgtUs[2], PWM_NAMES[3], PWM_PINS[3], tgtUs[3],
+                curUs[0], curUs[1], curUs[2], curUs[3]);
+}
+
+// Settings commands from USB serial: "!rate 5", "!range 180", "!show".
+void handleCommand(const String &s) {
+  float v;
+  if (sscanf(s.c_str(), "!rate %f", &v) == 1 && v >= 0 && v <= 1000) {
+    maxRateDegS = v; prefs.putFloat("rate", v); showSettings();
+  } else if (sscanf(s.c_str(), "!range %f", &v) == 1 && v >= 10 && v <= 720) {
+    rangeDeg = v; prefs.putFloat("range", v); showSettings();
+  } else if (s.startsWith("!show")) {
+    showSettings();
+  } else {
+    Serial.println("commands: !rate <deg/s, 0=unlimited> | !range <deg> | !show");
+  }
 }
 
 // Apply a new input. PWM is updated on every change; Serial logging is throttled to 10 Hz
 // (always logged when returning to neutral) so printing never slows the control path.
-// `ok` false (stale/failed/disconnected) => all inputs neutral: the arm must stop, not
-// keep the last command.
+// `ok` false (stale/failed/disconnected) => fail-safe: the arm FREEZES where it is. Valid
+// input after a freeze is always applied, even if it equals the last state (e.g. sticks
+// released = centre), otherwise the arm would stay frozen forever.
 uint32_t lastLogMs = 0;
+bool holding = false;
 void applyInput(bool ok, ArmInput in, uint32_t count) {
   if (!ok) in = ArmInput();
-  if (!haveLast || !(in == last)) {
+  if (!haveLast || !(in == last) || (ok && holding)) {
     bool log = (in == ArmInput()) || millis() - lastLogMs >= 100;
     if (log) { lastLogMs = millis(); printInput(in, count ? count : lastCount); }
-    applyToArm(in, log);
+    if (ok) {
+      holding = false;
+      applyToArm(in, log);
+    } else {                                           // fail-safe: FREEZE where we are
+      holding = true;                                  // (a slow damper must not keep driving)
+      for (int n = 0; n < 4; n++) tgtUs[n] = curUs[n];
+      if (log) Serial.println("HOLD no valid input: outputs frozen at current position");
+    }
     last = in;
     haveLast = true;
   }
@@ -178,7 +250,9 @@ void pollSerial() {
     if (c == '\n') {
       ArmInput in;
       uint32_t count = 0;
-      if (parseSerialLine(serBuf, in, count)) {
+      if (serBuf.length() && serBuf[0] == '!') {
+        handleCommand(serBuf);
+      } else if (parseSerialLine(serBuf, in, count)) {
         lastSerialMs = millis();
         applyInput(true, in, count);
       }
@@ -194,6 +268,7 @@ void pollSerial() {
     Serial.println("serial: input lost, falling back to WiFi");
   }
   serialWasActive = active;
+  tickPwm();   // runs every loop pass in every mode: keeps the damped motion time-based
 }
 
 // WiFi paths (stream / HTTPS poll) feed in here; ignored while direct serial is active.
@@ -236,7 +311,10 @@ void setup() {
   Serial.setRxBufferSize(1024);   // room for bursts of serial input lines
   Serial.begin(115200);
   delay(300);
+  loadSettings();  // saved rate/range (falls back to defaults)
   setupPwm();      // outputs centred before WiFi comes up
+  lastSlewMs = millis();
+  showSettings();
   connectWifi();
 #ifndef STREAM_HOST
   syncClock();     // only HTTPS needs a correct clock (certificate dates)

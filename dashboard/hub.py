@@ -246,6 +246,8 @@ class Hub:
                     snap = self._pose_snapshot() if now - pose_t >= 0.04 else None
                     if snap is not None:
                         self.cell.step(snap["points"][4], wire.get("X") if wire else False, now - pose_t if pose_t else 0.04)
+                        if not self.emu.running:           # with the emulated firmware its own saved list is not visible here
+                            self.cell.track_saved(self.sim.saved, self.sim.replaying, self.sim.replay_idx, snap["points"][4])
                         snap["world"] = self.cell.snapshot()
                 if snap is not None:
                     pose_t = now

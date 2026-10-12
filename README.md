@@ -127,7 +127,7 @@ python -m unittest discover -s sim -v       # all tests, including the C++ firmw
 ```
 
 **Damper.** The slider on the Control page limits how fast any joint moves, in deg/s (0 = no limit, capped at 180). It applies to the sticks,
-Go home and replay; all four joints are scaled together so the tool stays on its path. The same limit is sent to the real arm: the hub posts it to the server (`POST /control {"maxSpeed": n}`, 1-60 deg/s; 0 is sent as 60), the server adds `"maxSpeed"` to every packet it forwards or serves on `/controller`, and the firmware in `firmware/rarm/` applies it.
+Go home and replay; all four joints are scaled together so the tool stays on its path. By default it affects the simulation only, so the packets the arm receives are exactly what the stock UWE-RArm firmware expects. With `python dashboard/hub.py --send-speed` the limit is sent to the real arm too, which needs the modified firmware below: the hub posts it to the server (`POST /control {"maxSpeed": n}`, 1-60 deg/s; 0 is sent as 60), the server adds `"maxSpeed"` to every packet it forwards or serves on `/controller`, and the firmware in `firmware/rarm/` applies it.
 
 **Differences from the firmware** (kept on purpose, see the module docstring): the pose always comes from the joint angles, so moving after Go home no longer
 snaps the arm back to its old position; input older than 1.5 s stops the arm; the tool length is a setting (63 mm with the test ball, 53 mm without).
@@ -139,6 +139,6 @@ Calibration *training* (the A-button flow) is not simulated: enter limits and ho
 
 ## Real firmware (firmware/rarm)
 
-`firmware/rarm/` is the UWE-RArm ESP32 firmware (copied from Samwally1/UWE-RArm at 3b9b8aa) with the damper and a stale-input stop added, plus a PC test that runs its movement code against the Python arm. See `firmware/rarm/README.md` before flashing it.
+`firmware/rarm/` is the UWE-RArm ESP32 firmware (copied from Samwally1/UWE-RArm at 3b9b8aa) with the damper and a stale-input stop added, plus a PC test that runs its movement code against the Python arm. It is optional: the stock firmware works with everything else here unchanged. See `firmware/rarm/README.md` before flashing it.
 
 The "Arm and board" and "Firmware" pages still target the older USB jog sketch in `arduino/arm_receiver/`.

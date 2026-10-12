@@ -124,6 +124,8 @@ class Hub:
         self.emu = EmuRunner(self.server, self.log)   # emulated ESP32 + network (Control page)
         self._prev_y = False
         self._run_once = None
+        self._esp = None                        # (state dict, time) last report of our firmware via the server's /armstate
+        self._esp_run = None                    # id of the sequence the ESP is running for us
         self.phone_url = None                   # set by main() with --lan
         self.cell = Workcell()                  # boxes, keys, tray and the electromagnet (sim/workcell.py)
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
@@ -256,12 +258,16 @@ class Hub:
                     self.sim.step(wire, dt)
                     snap = self._pose_snapshot() if now - pose_t >= 0.04 else None
                     if snap is not None:
-                        self.cell.step(snap["points"][4], wire.get("X") if wire else False, now - pose_t if pose_t else 0.04)
+                        esp = self.esp_state()
+                        if esp:
+                            self.cell.set_magnet(bool(esp.get("magnet")))      # the firmware switches the magnet; the cell only follows
+                        self.cell.step(snap["points"][4], False if esp else (wire.get("X") if wire else False), now - pose_t if pose_t else 0.04)
                         # the virtual arm runs the same logic on the same input, so its saved list and replay schedule stand in for the
                         # emulated firmware's (which the hub cannot see); arrival is judged from the arm that is drawn
                         before = self.cell.magnet
-                        self.cell.track_saved(self.sim.saved, self.sim.replaying, self.sim.replay_idx, snap["points"][4])
-                        if self._run_once and self.cell.run_finished(self._run_once):
+                        if not esp:
+                            self.cell.track_saved(self.sim.saved, self.sim.replaying, self.sim.replay_idx, snap["points"][4])
+                        if self._run_once and not self._esp_run and self.cell.run_finished(self._run_once):
                             self._run_once = None
                             self.sim.stop_replay()
                             self.log("hub", "sequence finished")
@@ -724,16 +730,61 @@ class Hub:
             "emu_input": self.emu.running and self.forward_control is True and not self.armed,
         }
 
+    # ---- our firmware's own reports (/armstate): when they are fresh, the ESP, not the virtual arm, is the truth ----
+    def _esp_loop(self):
+        while not self.stop.is_set():
+            time.sleep(0.4)
+            try:
+                r = self._http("/armstate", timeout=0.8)
+                st = r.get("state")
+                if st and "seqDone" in st and r.get("age_s") is not None and r["age_s"] < 4.0:
+                    self._esp = (st, time.time() - r["age_s"])
+                else:
+                    self._esp = None
+                if self._esp_run is not None:
+                    if st and st.get("seqDone") == self._esp_run:
+                        self._esp_run, self._run_once = None, None
+                        self.log("hub", "sequence finished on the ESP32")
+                    elif self._esp is None:                      # the ESP went quiet mid-run
+                        self._esp_run, self._run_once = None, None
+                        self.log("hub", "lost the ESP32 during a sequence")
+            except Exception:
+                self._esp = None
+
+    def esp_state(self):
+        e = self._esp
+        return e[0] if e and time.time() - e[1] < 4.0 else None
+
+    def _esp_tap(self, button, hold=0.8):
+        try:
+            self._http("/input", dict(IDLE_WIRE, **{button: True}))
+            time.sleep(hold)
+            self._http("/input", dict(IDLE_WIRE))
+        except Exception as e:
+            self.log("hub", "could not send %s to the ESP32: %s" % (button, e))
+
     # ---- state packet and the task runner ------------------------------------------------------------------------
     def state_packet(self):
         """What an AI needs to see before it decides: pose, home grip, magnet, what is running, where the keys are."""
         from sim.armsim import forward_kin
+        esp = self.esp_state()
+        if esp:                                   # our firmware is reporting: believe it rather than the virtual arm
+            with self.sim_lock:
+                held = self.cell.held
+                keys = {str(k["id"]): self.cell.where(k) for k in self.cell.keys}
+            at_home = bool(esp.get("atHome"))
+            return {"format": "roobot-arm-state", "version": 1, "time": time.time(), "build": BUILD, "source": "esp32",
+                    "pose": {k: esp.get(k) for k in ("x", "y", "z", "angle")}, "at_home": at_home, "magnet": bool(esp.get("magnet")),
+                    "holding": held is not None, "home_grip": at_home and not esp.get("magnet") and held is None,
+                    "mode": "running" if esp.get("mode") == "sequence" else esp.get("mode"), "saved": esp.get("saved"),
+                    "running_step": esp.get("step") if esp.get("mode") == "sequence" else None, "keys": keys,
+                    "last_run": self.last_run, "task": dict(self.task)}
         with self.sim_lock:
             x, y, z, th = self.sim.pose()
             hx, hy, hz, _ = forward_kin(self.sim._home_angles(), self.sim.tool)
             at_home = math.dist((x, y, z), (hx, hy, hz)) < 8.0 and not self.sim.replaying
             held = self.cell.held
-            return {"format": "roobot-arm-state", "version": 1, "time": time.time(), "build": BUILD,
+            return {"format": "roobot-arm-state", "version": 1, "time": time.time(), "build": BUILD, "source": "virtual",
                     "pose": {"x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "angle": round(th, 1)},
                     "at_home": at_home, "magnet": self.cell.magnet, "holding": held is not None, "home_grip": at_home and not self.cell.magnet and held is None,
                     "mode": "running" if self.sim.replaying else self.sim.mode, "saved": len(self.sim.saved), "running_step": self.sim.replay_idx if self.sim.replaying else None,
@@ -788,11 +839,16 @@ class Hub:
                 return self._tlog("Cannot start: this move needs a key on the %s, and the keys are at %s" % (need, ", ".join(st["keys"].values())), "failed")
             if not st["home_grip"]:
                 self._tlog("Not at home grip: going home first")
-                with self.sim_lock:
-                    self.sim.stop_replay()
-                    self.cell.set_magnet(False)
-                    self.sim.go_home()
-                if not self._wait(lambda: self.state_packet()["at_home"], 30):
+                if st.get("source") == "esp32":
+                    if st["magnet"]:
+                        self._esp_tap("X")                  # magnet off first
+                    self._esp_tap("B")                      # then go home
+                else:
+                    with self.sim_lock:
+                        self.sim.stop_replay()
+                        self.cell.set_magnet(False)
+                        self.sim.go_home()
+                if not self._wait(lambda: self.state_packet()["at_home"] and not self.state_packet()["magnet"], 30):
                     return self._tlog("Could not get to home grip", "failed")
             self._tlog("At home grip: running", "running")
             self.load_sequence(seq, False, True)
@@ -813,6 +869,11 @@ class Hub:
         seq = SEQ.validate(pkt)
         if reverse:
             seq = SEQ.reverse(seq)
+        if run and self.esp_state():                   # the ESP32 runs it itself: wipe, load, go, wait for arrival at each pose
+            r = self._http("/sequence", {"poses": seq["poses"]}, timeout=2.0)
+            self._run_once, self._esp_run = len(seq["poses"]), r["id"]
+            self.log("hub", "sent sequence %s%s to the ESP32 (id %d)" % (seq["name"] or "(unnamed)", " (reversed)" if reverse else "", r["id"]))
+            return seq
         saved, mag = SEQ.to_saved(seq)
         with self.sim_lock:
             self.sim.stop_replay()
@@ -845,7 +906,7 @@ class Hub:
         a = d.get("action")
         if a == "start":
             self.push_calibration()                 # the firmware reads /calibration at boot
-            self.emu.start(str(d.get("firmware", "patched")), str(d.get("preset", "home_wifi")))
+            self.emu.start(str(d.get("firmware", "ours")), str(d.get("preset", "home_wifi")))
         elif a == "stop":
             self.emu.stop()
         elif a == "link":
@@ -862,7 +923,7 @@ class Hub:
                 "logs": {k: list(v)[-80:] for k, v in self.logs.items()}}
 
     def start(self):
-        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop):
+        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop):
             threading.Thread(target=fn, daemon=True).start()
         threading.Thread(target=self._ticker, daemon=True).start()
         self.set_forward(False)                     # start SAFE: the server must not forward until ARMED

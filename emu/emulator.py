@@ -4,7 +4,7 @@
     python emu/emulator.py --firmware stock   --host 127.0.0.1:8100 --seconds 30
     python emu/emulator.py --firmware patched --host 127.0.0.1:8000
 
---firmware: stock (firmware/stock/src as shipped), patched (stock + firmware/stock/patches/damper-and-failsafes.patch),
+--firmware: stock (firmware/stock/src as shipped), patched (stock + firmware/stock/patches/damper-and-failsafes.patch), ours (patched + sequences-and-magnet.patch: magnet, sequence runs, state packet),
 or rarm (the rewrite in firmware/rarm/src). --host is the server the firmware polls: the local server directly, or the
 network proxy (emu/netproxy.py) for a link with latency, loss and handshake cost. Needs a C++ compiler (g++; on Windows MinGW-w64 via MSYS2) and git or patch for `patched`.
 Prints the servo positions as they change and the network statistics every 5 s. Library use: see class Emulator.
@@ -81,12 +81,14 @@ def firmware_src(kind, workdir):
         return os.path.join(FW, "stock", "src")
     if kind == "rarm":
         return os.path.join(FW, "rarm", "src")
-    if kind == "patched":
-        tree = os.path.join(workdir, "patched")
+    if kind in ("patched", "ours"):
+        tree = os.path.join(workdir, kind)
         shutil.copytree(os.path.join(FW, "stock", "src"), os.path.join(tree, "src"))
         apply_patch(tree, os.path.join(FW, "stock", "patches", "damper-and-failsafes.patch"))
+        if kind == "ours":                       # plus the electromagnet, sequence runs and the state packet
+            apply_patch(tree, os.path.join(FW, "stock", "patches", "sequences-and-magnet.patch"))
         return os.path.join(tree, "src")
-    raise ValueError("firmware must be stock, patched or rarm")
+    raise ValueError("firmware must be stock, patched, ours or rarm")
 
 
 def build(kind, out_dir):
@@ -148,7 +150,7 @@ class Emulator:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--firmware", choices=["stock", "patched", "rarm"], default="patched")
+    ap.add_argument("--firmware", choices=["stock", "patched", "ours", "rarm"], default="ours")
     ap.add_argument("--host", default="127.0.0.1:8000", help="server or proxy the firmware polls, host:port")
     ap.add_argument("--seconds", type=float, help="stop after this long (default: until Ctrl+C)")
     ap.add_argument("--serial", action="store_true", help="show the firmware's Serial output")

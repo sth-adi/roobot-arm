@@ -29,6 +29,22 @@ STUBS = os.path.join(FW, "rarm", "test", "stubs")
 EXE = ".exe" if os.name == "nt" else ""
 
 
+def _use_msys2_toolchain():
+    """Windows: MSYS2's UCRT64 toolchain is usually installed but not on PATH, so g++ is not found and the built
+    program cannot load libstdc++/winpthread. Put its bin folder on PATH for THIS process only (the system PATH is
+    not touched). Set MSYS2_ROOT if MSYS2 is not in C:\\msys64."""
+    if os.name != "nt" or shutil.which("g++"):
+        return
+    for root in (os.environ.get("MSYS2_ROOT"), r"C:\msys64", r"C:\msys2"):
+        d = os.path.join(root, "ucrt64", "bin") if root else None
+        if d and os.path.isfile(os.path.join(d, "g++.exe")):
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            return
+
+
+_use_msys2_toolchain()
+
+
 def compiler():
     """The C++ compiler: $CXX, else g++ (on Windows that is MinGW-w64, e.g. from MSYS2), else c++."""
     for c in (os.environ.get("CXX"), "g++", "c++"):

@@ -17,18 +17,22 @@ The hub only listens on 127.0.0.1 and rejects cross-origin requests.
 """
 import argparse
 import collections
+import hmac
 import json
 import math
 import mimetypes
 import os
 import queue
 import re
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -112,6 +116,7 @@ class Hub:
         self._sim_status_sent = None
         self._cal_synced = False
         self.emu = EmuRunner(self.server, self.log)   # emulated ESP32 + network (Control page)
+        self.phone_url = None                   # set by main() with --lan
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
         self.packets = collections.deque(maxlen=500)
         self.packet_times = collections.deque(maxlen=400)
@@ -681,6 +686,7 @@ class Hub:
             "project": self.cache["git"],
             "sim": self._sim_snapshot(),
             "emu": self.emu.snapshot(),
+            "phone_url": self.phone_url,
             "emu_input": self.emu.running and self.forward_control is True and not self.armed,
         }
 
@@ -744,6 +750,7 @@ def _find_port_cached(self):
 
 SerialLink.find_port_cached = _find_port_cached
 HUB = None
+LAN_TOKEN = None                    # set with --lan: other devices on the network need this key
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -762,7 +769,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    _new_cookie = False
+
+    def end_headers(self):
+        if self._new_cookie:
+            self.send_header("Set-Cookie", f"hubkey={LAN_TOKEN}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly")
+        super().end_headers()
+
+    def _lan_ok(self):
+        """A request from another device (phone) is allowed only with the key from the launcher's link, in the URL or a cookie."""
+        if not LAN_TOKEN:
+            return False
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("key", [""])[0]
+        ck = ""
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "hubkey":
+                ck = v
+        if hmac.compare_digest(q, LAN_TOKEN):
+            self._new_cookie = True
+        elif not hmac.compare_digest(ck, LAN_TOKEN):
+            return False
+        origin = self.headers.get("Origin")
+        return not origin or urllib.parse.urlparse(origin).netloc == self.headers.get("Host")
+
+    def _is_local(self):
+        return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
     def _host_ok(self):
+        if not self._is_local():
+            return self._lan_ok()
         host = (self.headers.get("Host") or "").split(":")[0]
         if host not in ("127.0.0.1", "localhost"):
             return False
@@ -788,9 +824,18 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- GET ----
     def do_GET(self):
-        if not self._host_ok():
-            return self._json(403, {"error": "forbidden host"})
         path = self.path.split("?")[0]
+        public = path in ("/apple-touch-icon.png", "/icon-192.png", "/icon-512.png")      # home-screen icons are fetched without cookies
+        if not public and not self._host_ok():
+            if not self._is_local() and path in ("/", "/index.html"):
+                return self._json(403, {"error": "open the link the launcher printed: it carries the key for this hub"})
+            return self._json(403, {"error": "forbidden host"})
+        if path == "/manifest.webmanifest":
+            start = "/?key=%s#/arm" % LAN_TOKEN if (LAN_TOKEN and not self._is_local()) else "/#/arm"
+            return self._json(200, {"name": "Arm Hub", "short_name": "Arm Hub", "start_url": start, "scope": "/", "display": "standalone",
+                                    "orientation": "any", "background_color": "#0e1013", "theme_color": "#0e1013",
+                                    "icons": [{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+                                              {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}]})
         if path == "/api/status":
             return self._json(200, HUB.snapshot())
         if path == "/api/events":
@@ -912,24 +957,54 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": f"bad request: {e}"})
 
 
+def lan_ip():
+    """This computer's address on the local network (the one a phone on the same WiFi can reach)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            sk.connect(("10.255.255.255", 1))          # no packet is sent
+            return sk.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
 def main():
     global HUB
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--server", default="http://127.0.0.1:8000", help="the local input server")
     ap.add_argument("--no-open", action="store_true", help="do not open the browser")
+    ap.add_argument("--lan", action="store_true",
+                    help="also serve other devices on the network (a phone), which need the key printed in the link; see launch.py")
     ap.add_argument("--send-speed", action="store_true",
                     help="also send the damper to the arm as maxSpeed (needs the modified firmware in firmware/rarm)")
     args = ap.parse_args()
+    global LAN_TOKEN
     HUB = Hub(args.server, send_speed=args.send_speed)
+    bind = "127.0.0.1"
+    if args.lan:
+        tf = ROOT / ".hub_token"
+        try:
+            LAN_TOKEN = tf.read_text().strip()
+        except OSError:
+            LAN_TOKEN = ""
+        if len(LAN_TOKEN) < 12:
+            LAN_TOKEN = secrets.token_urlsafe(12)
+            try:
+                tf.write_text(LAN_TOKEN)
+            except OSError:
+                pass
+        bind = "0.0.0.0"
+        HUB.phone_url = f"http://{lan_ip()}:{args.port}/?key={LAN_TOKEN}"
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        httpd = ThreadingHTTPServer((bind, args.port), Handler)
     except OSError as e:
-        raise SystemExit(f"Cannot listen on 127.0.0.1:{args.port} ({e}). Is the hub already running?")
+        raise SystemExit(f"Cannot listen on {bind}:{args.port} ({e}). Is the hub already running?")
     httpd.daemon_threads = True
     HUB.start()
     url = f"http://127.0.0.1:{args.port}"
     print(f"Robot arm hub on {url}  (output starts SAFE; Ctrl+C to stop)")
+    if HUB.phone_url:
+        print(f"On your phone (same WiFi): {HUB.phone_url}", flush=True)
     if not args.no_open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:

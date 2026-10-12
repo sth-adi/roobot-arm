@@ -9,3 +9,6 @@ __pycache__/
 
 # Arduino secrets
 secrets.h
+
+# hub key for the phone link
+.hub_token

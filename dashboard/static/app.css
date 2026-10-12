@@ -298,3 +298,7 @@ body.fill #main { max-width: none; padding: 0; }
   .btn, .tabs button, select { min-height: 40px; }
 }
 [hidden] { display: none !important; }
+.legend summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.legend dl { margin: 8px 0; display: grid; gap: 8px; }
+.legend dt { font-weight: 600; font-size: 13px; }
+.legend dd { margin: 0; color: var(--muted); font-size: 13px; }

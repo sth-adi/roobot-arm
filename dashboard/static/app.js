@@ -929,20 +929,26 @@ function makeViewer(canvas) {
       }
       ctx.globalAlpha = 1;
     }
-    // column from the ground to the first joint, then links and joints, far to near
-    const pts = P.map(proj), items = [];
-    const z0 = proj([P[0][0], P[0][1], 0]);
-    items.push({ d: z0[2], f: () => { ctx.strokeStyle = c.strong; ctx.lineWidth = 22 * pts[0][3]; poly([z0, pts[0]]); ctx.stroke(); } });
-    for (let i = 0; i < 4; i++) {
-      const a = pts[i], b = pts[i + 1], w = (i === 3 ? 9 : 15) * (a[3] + b[3]) / 2;
-      items.push({ d: (a[2] + b[2]) / 2, f: () => {
-        ctx.strokeStyle = c.bg; ctx.lineWidth = w + 4; poly([a, b]); ctx.stroke();
-        ctx.strokeStyle = pose.emulated ? c.warn : c.accent; ctx.lineWidth = w; poly([a, b]); ctx.stroke();
+    // the arm as solid parts (Lynxmotion AL5D style), painted far to near
+    const g = [Math.sin(v.yaw) * Math.cos(v.pitch), Math.cos(v.yaw) * Math.cos(v.pitch), -Math.sin(v.pitch)];   // points away from the camera
+    const items = [];
+    for (const f of al5dParts(pose)) {
+      if (f.sphere) {
+        const q = proj(f.sphere), r = f.r * q[3];
+        items.push({ d: q[2], f: () => {
+          const gr = ctx.createRadialGradient(q[0] - r * 0.35, q[1] - r * 0.35, r * 0.1, q[0], q[1], r);
+          gr.addColorStop(0, "#fff3d0"); gr.addColorStop(1, c.warn);
+          ctx.beginPath(); ctx.arc(q[0], q[1], r, 0, 6.2832); ctx.fillStyle = gr; ctx.fill(); ctx.strokeStyle = "rgba(0,0,0,.45)"; ctx.lineWidth = 1; ctx.stroke();
+        } });
+        continue;
+      }
+      if (f.n[0] * g[0] + f.n[1] * g[1] + f.n[2] * g[2] >= 0) continue;      // faces turned away
+      const q = f.pts.map(proj), d = q.reduce((t, x) => t + x[2], 0) / q.length;
+      const lit = 0.5 + 0.5 * Math.max(0, f.n[0] * -0.35 + f.n[1] * -0.3 + f.n[2] * 0.89);
+      items.push({ d, f: () => {
+        ctx.fillStyle = shade(f.color, lit); poly(q, true); ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 1; ctx.stroke();
       } });
-    }
-    for (let i = 0; i < 5; i++) {
-      const q = pts[i], r = (i === 4 ? 7 : 11) * q[3];
-      items.push({ d: q[2] - 1, f: () => { ctx.beginPath(); ctx.arc(q[0], q[1], r, 0, 6.2832); ctx.fillStyle = i === 4 ? c.warn : c.bg; ctx.fill(); ctx.strokeStyle = c.text; ctx.lineWidth = 2; ctx.stroke(); } });
     }
     items.sort((p, q) => q.d - p.d).forEach((it) => it.f());
   }
@@ -971,11 +977,61 @@ function makeViewer(canvas) {
       if (!last || Math.hypot(tip[0] - last[0], tip[1] - last[1], tip[2] - last[2]) > 3) { trail.push(tip.slice()); if (trail.length > 160) trail.shift(); }
       dirty = true;
     },
-    view(name) { Object.assign(v, name === "top" ? { yaw: 0, pitch: 1.5, dist: 1250 } : name === "side" ? { yaw: 0.0, pitch: 0.02, dist: 1150 } : V0); dirty = true; },
+    view(name) {
+      const az = pose ? ((pose.angles[0] - 90) * Math.PI) / 180 : 0;      // turn the view with the arm's base angle
+      Object.assign(v, name === "top" ? { yaw: az, pitch: 1.5, dist: 1250 } : name === "side" ? { yaw: az - Math.PI / 2, pitch: 0.02, dist: 1150 } : V0); dirty = true;
+    },
     clearTrail() { trail = []; dirty = true; },
     destroy() { ro.disconnect(); },
   };
 }
+/* ---- Lynxmotion AL5D-style solid model, simplified from the published dimensions (no CAD). The last joint and gripper are removed:
+   the wrist ends in a short rod and the test ball. Drawn as boxes and prisms: arrays of {pts, n, color} faces plus one sphere. ---- */
+const shade = (hex, k) => { const n = parseInt(hex.slice(1), 16); return `rgb(${Math.round(((n >> 16) & 255) * k)},${Math.round(((n >> 8) & 255) * k)},${Math.round((n & 255) * k)})`; };
+const vadd = (a, b, s = 1) => [a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s];
+const vsub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const vlen = (a) => Math.hypot(a[0], a[1], a[2]);
+const vnorm = (a) => { const m = vlen(a) || 1; return [a[0] / m, a[1] / m, a[2] / m]; };
+const vcross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+function boxFaces(out, c, ax, h, color) {         // c centre, ax three unit axes, h half sizes
+  for (let i = 0; i < 3; i++) for (const sg of [-1, 1]) {
+    const j = (i + 1) % 3, k = (i + 2) % 3, mid = vadd(c, ax[i], sg * h[i]);
+    const corner = (a, b) => vadd(vadd(mid, ax[j], a * h[j]), ax[k], b * h[k]);
+    out.push({ pts: [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)], n: ax[i].map((x) => x * sg), color });
+  }
+}
+function prismFaces(out, c, r, h, ax, color, sides = 22) {     // upright cylinder: axis ax[2] is its length axis
+  const ring = (z) => { const a = []; for (let i = 0; i < sides; i++) { const t = (i / sides) * 6.2832; a.push(vadd(vadd(vadd(c, ax[0], r * Math.cos(t)), ax[1], r * Math.sin(t)), ax[2], z)); } return a; };
+  const lo = ring(-h), hi = ring(h);
+  out.push({ pts: hi, n: ax[2], color }); out.push({ pts: lo.slice().reverse(), n: ax[2].map((x) => -x), color });
+  for (let i = 0; i < sides; i++) {
+    const j = (i + 1) % sides, t = ((i + 0.5) / sides) * 6.2832;
+    out.push({ pts: [lo[i], lo[j], hi[j], hi[i]], n: vadd(ax[0].map((x) => x * Math.cos(t)), ax[1], Math.sin(t)), color });
+  }
+}
+function al5dParts(p) {
+  const out = [], P = p.points, base = ((p.angles[0] - 90) * Math.PI) / 180;
+  const d = [Math.sin(base), Math.cos(base), 0], l = [Math.cos(base), -Math.sin(base), 0], up = [0, 0, 1];
+  const W = [[1, 0, 0], [0, 1, 0], [0, 0, 1]], AL = "#b4bcc8", AL2 = "#9aa3b0", SV = "#2b313b", BLK = "#1d2128";
+  boxFaces(out, [0, 0, 3], W, [70, 52, 3], AL2);                                   // base plate
+  prismFaces(out, [0, 0, 22], 40, 16, [d, l, up], BLK);                            // turret
+  boxFaces(out, vadd([0, 0, 24], d, 36), [d, l, up], [8, 7, 8], AL);               // marker showing the base direction
+  for (const sg of [-1, 1]) boxFaces(out, vadd([0, 0, 68], l, 24 * sg), [d, l, up], [28, 2, 30], AL);   // shoulder bracket plates
+  boxFaces(out, vadd([0, 0, 72], l, 36), [d, l, up], [26, 12, 24], SV);            // shoulder servo
+  const u1 = vnorm(vsub(P[2], P[1])), u2 = vnorm(vsub(P[3], P[2])), u3 = vnorm(vsub(P[4], P[3]));
+  const frame = (u) => [u, l, vnorm(vcross(u, l))];
+  const L1 = vlen(vsub(P[2], P[1])), L2 = vlen(vsub(P[3], P[2])), L3 = vlen(vsub(P[4], P[3]));
+  for (const sg of [-1, 1]) {
+    boxFaces(out, vadd(vadd(P[1], P[2]), [0, 0, 0]).map((x) => x / 2).map((x, i) => x + l[i] * 15 * sg), frame(u1), [L1 / 2, 2, 8], AL);   // upper arm bars
+    boxFaces(out, vadd(vadd(P[2], P[3]), [0, 0, 0]).map((x) => x / 2).map((x, i) => x + l[i] * 12 * sg), frame(u2), [L2 / 2, 2, 7], AL);   // forearm bars
+  }
+  boxFaces(out, vadd(vadd(P[2], u1, -12), l, -28), frame(u1), [24, 12, 20], SV);   // elbow servo
+  boxFaces(out, vadd(vadd(P[3], u2, -12), l, 16), frame(u2), [17, 8, 14], SV);    // wrist servo
+  boxFaces(out, vadd(P[3], u3, Math.max(0, L3 - 14) / 2), frame(u3), [Math.max(1, (L3 - 14) / 2), 4, 4], AL);   // rod to the ball
+  out.push({ sphere: vadd(P[3], u3, Math.max(0, L3 - 14)), r: 14 });               // the test ball
+  return out;
+}
+
 function mountArm(root) {
   document.body.classList.add("fill");
   root.innerHTML = `<div class="armstage">

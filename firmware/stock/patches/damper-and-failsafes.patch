@@ -125,8 +125,11 @@ diff -ruN a/src/main.cpp b/src/main.cpp
      targetPosition = ForwardKinTransform(targetAngles);
      for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
          if (!jointServos[jointIndex].attached()) {
-@@ -272,9 +323,11 @@
+@@ -270,11 +321,14 @@
+ {
+     static bool previousB = false;
      static bool previousA = false;
++    static bool savedByThisPress = false;   // the save made when A went down; undone if A is held to start a replay
      static bool movingHome = false;
      static bool replayingPositions = false;
 -    static unsigned long homeStartTime = 0;
@@ -138,7 +141,7 @@ diff -ruN a/src/main.cpp b/src/main.cpp
      static int replayPositionIndex = 0;
      constexpr unsigned long replayStartHoldMs = 750;
      constexpr unsigned long replayPositionIntervalMs = 1500;
-@@ -284,21 +337,15 @@
+@@ -284,21 +338,15 @@
          bool currentA = controllerInput.aButton == 1;
          const unsigned long currentTime = millis();
  
@@ -167,7 +170,30 @@ diff -ruN a/src/main.cpp b/src/main.cpp
              movingHome = true;
  
              SendArmStatus("Moving all joints home");
-@@ -337,16 +384,16 @@
+@@ -308,7 +356,9 @@
+ 
+         if (currentA && !previousA) {
+             aPressStartTime = currentTime;
++            savedByThisPress = false;
+             if (savedPositionCount < MaxSavedPositions) {
++                savedByThisPress = true;
+                 savedPositions[savedPositionCount++] = targetPosition;
+                 SendArmStatus("Position " + String(savedPositionCount) + " saved");
+             } else {
+@@ -318,7 +368,11 @@
+ 
+         if (currentA && !replayingPositions
+             && currentTime - aPressStartTime >= replayStartHoldMs
+-            && savedPositionCount > 0) {
++            && savedPositionCount - (savedByThisPress ? 1 : 0) > 0) {
++            if (savedByThisPress) {   // holding A means replay, not save: drop the position the press just added
++                --savedPositionCount;
++                savedByThisPress = false;
++            }
+             replayingPositions = true;
+             replayPositionIndex = 0;
+             lastReplayPositionTime = currentTime - replayPositionIntervalMs;
+@@ -337,16 +391,16 @@
              if (InverseKinTransform(replayTarget, targetAngles, replayAngles)) {
                  targetPosition = replayTarget;
                  targetAngles = replayAngles;
@@ -187,7 +213,7 @@ diff -ruN a/src/main.cpp b/src/main.cpp
                  targetPosition
              );
              RobotAngles requestedAngles;
-@@ -354,7 +401,6 @@
+@@ -354,7 +408,6 @@
                                      requestedAngles)) {
                  targetPosition = requestedPosition;
                  targetAngles = requestedAngles;
@@ -195,7 +221,7 @@ diff -ruN a/src/main.cpp b/src/main.cpp
              }
          }
          lastPositionUpdateTime = currentTime;
-@@ -376,13 +422,32 @@
+@@ -376,13 +429,32 @@
          }
      }
  

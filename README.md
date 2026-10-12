@@ -6,6 +6,15 @@ Xbox controller -> HTTP server, as the input path for the robot arm.
 - `controller_client.py` – reads a generic Xbox One controller (pygame) and POSTs its state as JSON.
 - `controller_gui.py` - live Tk window: draws the controller and logs each move as the raw HTTP packet. `python controller_gui.py [--no-send]`
 
+## One tap
+
+Double-click `Start Dashboard.bat` (Windows) or run `./start.sh` / `python launch.py`: it starts the input server and the hub and opens the **Robot** page, a large 3D view of the arm
+(drag to turn, scroll or pinch to zoom, Top/Side buttons) with the controls, emulator and status in a side panel. Output starts SAFE.
+
+**Phone:** the launcher prints a link for your phone (same WiFi; it also appears in the side panel on the computer). Open it once, then *Add to Home Screen* (iPhone: Share; Android: menu, Install app).
+From then on the icon opens the Robot page in one tap while the launcher is running, with virtual sticks as the default input on touch screens. The link carries a key (saved in `.hub_token`); other devices
+without it are refused. `python launch.py --local-only` turns phone access off. Windows asks once to allow Python through the firewall: allow private networks.
+
 ## Run
 
 ```bash

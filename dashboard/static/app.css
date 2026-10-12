@@ -268,3 +268,33 @@ dialog .inline { justify-content: flex-end; }
 .armviews .jnt { fill: var(--surface); stroke: var(--text); stroke-width: 2px; vector-effect: non-scaling-stroke; }
 .armviews .jnt.tip { fill: var(--warn); }
 @media (max-width: 720px) { .armviews { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---------- robot page: the viewer is the main view, controls sit in a side panel ---------- */
+body.fill #main { max-width: none; padding: 0; }
+.armstage { display: grid; grid-template-columns: minmax(0, 1fr) 340px; height: calc(100vh - 73px); height: calc(100dvh - 73px); min-height: 520px; }
+.viewer { position: relative; overflow: hidden; border-right: 1px solid var(--line); background: var(--bg); }
+.viewer canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; display: block; }
+.viewer canvas:active { cursor: grabbing; }
+.vhud { position: absolute; display: flex; gap: 6px; pointer-events: none; }
+.vhud .btn, .vhud input { pointer-events: auto; }
+.vhud.tl { top: 12px; left: 14px; flex-direction: column; align-items: flex-start; gap: 4px; }
+.vhud.tr { top: 12px; right: 12px; }
+.vhud.bl { left: 14px; bottom: 12px; flex-direction: column; width: 220px; gap: 4px; }
+.jr { display: grid; grid-template-columns: 64px minmax(0, 1fr) 44px; gap: 8px; align-items: center; font-size: 12.5px; color: var(--muted); }
+.jr .mono { text-align: right; color: var(--text); }
+.jb { height: 4px; background: var(--line); display: block; }
+.jb i { display: block; height: 100%; background: var(--accent); }
+.side { overflow-y: auto; padding: 14px 16px 28px; min-width: 0; }
+.side .tabs { flex-wrap: wrap; }
+.side .pad { max-width: 100%; }
+.sidesec { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
+.sidesec h2 { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.side select, .side input { max-width: 100%; }
+@media (max-width: 900px) {
+  .armstage { grid-template-columns: minmax(0, 1fr); grid-template-rows: 54vh auto; grid-template-rows: 54dvh auto; height: auto; }
+  .viewer { border-right: 0; border-bottom: 1px solid var(--line); }
+  .vhud.bl { width: 170px; }
+  body.fill .top p { display: none; }
+  .btn, .tabs button, select { min-height: 40px; }
+}
+[hidden] { display: none !important; }

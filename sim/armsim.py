@@ -16,6 +16,15 @@ Two deliberate differences from the firmware, both described where they happen:
     target that is not updated by "go home", so the first stick movement afterwards snaps the arm back to where it
     was before homing. Using the real angles as the single source of truth removes that.
 
+Three behaviours can be simulated (ArmSim(model=..., patch=...)):
+  * "improved"        the reference above (default).
+  * "stock"           the UWE-RArm firmware exactly as it is, quirks included: a separate XYZ target that "go home" does not
+                      update (so the next stick move snaps the arm back), no speed limit, the whole elapsed time since the
+                      last packet integrated in one go, servos released 3 s after "go home" whether or not they arrived.
+  * "stock" + patch   the stock firmware plus the small patch in firmware/stock/patches: speed limit on the servo output,
+                      elapsed time capped at 100 ms, stick input paused while the arm lags the target by more than
+                      LAG_HOLD_DEG, "go home" waits for arrival, re-syncs the target and releases 1 s later.
+
 Wire format (what the controller client posts, and what the firmware reads):
     {"LSX": -1..1, "LSY": -1..1, "RSX": -1..1, "RSY": -1..1, "A": bool, "B": bool, "X": bool, "Y": bool}
 Sticks are raw pygame axes (stick up = negative); the firmware applies its own 0.2 deadzone.
@@ -42,6 +51,9 @@ REPLAY_STEP_S = 1.5      # time between replayed positions
 STALE_S = 1.5            # no input newer than this = treat as no input (fail-safe; the firmware has no such check)
 UNLIMITED_DEG_S = 180.0  # speed used when the damper is set to 0 ("no limit")
 HOME_SETTLE_S = 1.0      # after reaching home, signals stay on this long before the servos are released
+STOCK_HOME_MS = 3000     # stock firmware: servos released this long after "go home", arrived or not
+PATCH_MAX_STEP_MS = 100  # patch: longest stretch of stick input integrated in one go
+LAG_HOLD_DEG = 25.0      # patch: stick input pauses while any joint is this far behind its target
 
 DEFAULT_LIMITS = [[0, 180], [0, 180], [0, 180], [0, 180]]
 DEFAULT_HOMES = [90, 90, 90, 90]
@@ -155,7 +167,10 @@ def _clean_pairs(limits, homes):
 
 
 class ArmSim:
-    def __init__(self, tool_mm=DEFAULT_TOOL_MM, rate=30.0, limits=None, homes=None):
+    def __init__(self, tool_mm=DEFAULT_TOOL_MM, rate=30.0, limits=None, homes=None, model="improved", patch=False):
+        if model not in ("improved", "stock"):
+            raise ValueError("model must be 'improved' or 'stock'")
+        self.model, self.patch = model, bool(patch) and model == "stock"
         self.tool = float(tool_mm)
         self.rate = float(rate)                       # damper, deg/s per joint; 0 = no limit
         self.limits, self.homes = _clean_pairs(limits or DEFAULT_LIMITS, homes or DEFAULT_HOMES)
@@ -174,7 +189,37 @@ class ArmSim:
         self.status = "Starting"
         self.log = deque(maxlen=200)
         self.moved = 0                                # incremented on every servo-relevant change
+        self._init_stock()
         self.say("Home XYZ %.1f, %.1f, %.1f" % self.pose()[:3])
+
+    def _init_stock(self):
+        """State of the stock firmware model: its own XYZ target and target angles, separate from what the servos hold."""
+        self._ms = 0                                  # integer milliseconds, like millis()
+        self._t_ang = self._home_angles()             # targetAngles
+        self._t_pos = forward_kin(self._t_ang, self.tool)   # targetPosition
+        self._moving_home = False
+        self._home_start_ms = 0
+        self._home_arrived_ms = None
+        self._replaying = False
+        self._a_press_ms = 0
+        self._replay_ms = 0
+        self._last_update_ms = None
+        self._sticks_active = False
+        self._last_cmd = [int(round(math.degrees(v))) for v in self._home_angles()]   # patch: last whole-degree command sent
+
+    def set_model(self, model, patch=False):
+        """Switch between the reference, the stock firmware and the patched stock firmware. Resets the arm to home."""
+        if model not in ("improved", "stock"):
+            raise ValueError("model must be 'improved' or 'stock'")
+        self.model, self.patch = model, bool(patch) and model == "stock"
+        self.angles = self._home_angles()
+        self.mode, self._goal, self.attached, self.ik_ok = "idle", None, True, True
+        self._prev = {"A": False, "B": False}
+        self._init_stock()
+        self.say("Model: " + self.model_name())
+
+    def model_name(self):
+        return "improved" if self.model == "improved" else ("stock + patch" if self.patch else "stock")
 
     # ---- helpers --------------------------------------------------------------------------------------------
     def say(self, msg):
@@ -211,6 +256,7 @@ class ArmSim:
         self.saved.clear()
         self.mode, self._goal = "idle", None
         self.attached = True
+        self._init_stock()
         self.say("Calibration set: homes " + ", ".join(str(h) for h in self.homes))
 
     def set_rate(self, deg_s):
@@ -226,7 +272,10 @@ class ArmSim:
         self.tool = v
 
     def go_home(self):
-        self._start_home()
+        if self.model == "stock":
+            self._stock_start_home()
+        else:
+            self._start_home()
 
     def clear_saved(self):
         self.saved.clear()
@@ -254,6 +303,8 @@ class ArmSim:
 
     def step(self, inp, dt):
         """Advance by `dt` seconds. `inp` is a wire-format dict, or None when there is no fresh input."""
+        if self.model == "stock":
+            return self._step_stock(inp, dt)
         dt = max(0.0, min(dt, 0.1))
         self._clock += dt
         now = self._clock
@@ -329,6 +380,109 @@ class ArmSim:
             self.mode = "idle"
             self.ik_ok = True
 
+
+    # ---- the stock firmware (main.cpp loop) -------------------------------------------------------------------------
+    def _stock_write(self):
+        """CommandJointAngles(targetAngles): the servos are told the target at once."""
+        self.angles = self._t_ang
+        self.attached = True
+        self.moved += 1
+
+    def _whole_degrees(self):
+        return [int(round(math.degrees(v))) for v in self.angles]
+
+    def _stock_start_home(self):
+        self.attached = True
+        self._moving_home = True
+        self._home_start_ms = self._ms
+        self._home_arrived_ms = None
+        if not self.patch:
+            self.angles = self._home_angles()     # stock writes the home angles straight to the servos
+        else:
+            self._last_cmd = self._whole_degrees()      # patch: attach and hold where it is
+        self.moved += 1
+        self.say("Moving all joints home")
+
+    def _step_stock(self, inp, dt):
+        dt = max(0.0, dt)
+        self._ms += int(round(dt * 1000))
+        now = self._ms
+        if isinstance(inp, dict):                 # GetControllerState() returned true
+            a = inp
+            btn_a, btn_b = bool(a.get("A")), bool(a.get("B"))
+            if btn_b and not self._prev["B"]:
+                self._stock_start_home()
+            self._prev["B"] = btn_b
+            if btn_a and not self._prev["A"]:
+                self._a_press_ms = now
+                if len(self.saved) < MAX_SAVED:
+                    self.saved.append(self._t_pos)            # stock saves the target, not where the arm is
+                    self.say("Position %d saved" % len(self.saved))
+                else:
+                    self.say("Saved-position list is full")
+            if btn_a and not self._replaying and now - self._a_press_ms >= 750 and self.saved:
+                self._replaying, self.replay_idx = True, 0
+                self._replay_ms = now - 1500
+                self.say("Replaying saved positions")
+            if not btn_a and self._replaying:
+                self._replaying = False
+                self.say("Position replay stopped")
+            self._prev["A"] = btn_a
+            if self._replaying and now - self._replay_ms >= 1500:
+                target = self.saved[self.replay_idx]
+                goal = inverse_kin(target, self._t_ang, self.limits, self.tool)
+                if goal is not None:
+                    self._t_pos, self._t_ang = target, goal
+                    if not self.patch:
+                        self._stock_write()
+                self.replay_idx = (self.replay_idx + 1) % len(self.saved)
+                self._replay_ms = now
+            self._sticks_active = False
+            if self._last_update_ms is not None and not self._moving_home and not self._replaying:
+                elapsed = now - self._last_update_ms
+                if self.patch:
+                    elapsed = min(elapsed, PATCH_MAX_STEP_MS)
+                lag = max(abs(math.degrees(self._t_ang[i] - self.angles[i])) for i in range(4))
+                if not (self.patch and lag > LAG_HOLD_DEG):
+                    sx, sy = _dz(float(a.get("LSX", 0))), _dz(float(a.get("LSY", 0)))
+                    rx, ry = _dz(float(a.get("RSX", 0))), _dz(float(a.get("RSY", 0)))
+                    e = elapsed / 1000.0
+                    x, y, z, th = self._t_pos
+                    req = (x + sx * CHORD_SENSE * e, y + sy * CHORD_SENSE * e, z + ry * CHORD_SENSE * e,
+                           th + rx * ANGLE_SENSE * e)
+                    self._sticks_active = bool(sx or sy or rx or ry)
+                    goal = inverse_kin(req, self._t_ang, self.limits, self.tool)
+                    self.ik_ok = goal is not None
+                    if goal is not None:
+                        self._t_pos, self._t_ang = req, goal
+                        if not self.patch:
+                            self._stock_write()
+            self._last_update_ms = now
+
+        if self.patch:                            # damper on the servo output; every loop, whether or not a packet came
+            goal = self._home_angles() if self._moving_home else self._t_ang
+            arrived = self._slew(goal, max(0.0, min(dt, 0.1)))
+            cmd = self._whole_degrees()
+            if cmd != self._last_cmd:             # only a changed whole-degree command reaches (and re-powers) the servos
+                self._last_cmd = cmd
+                self.attached = True
+                self.moved += 1
+            if self._moving_home and arrived:
+                if self._home_arrived_ms is None:
+                    self._home_arrived_ms = now
+                    self._t_ang = self._home_angles()                 # re-sync, so the next stick move starts here
+                    self._t_pos = forward_kin(self._t_ang, self.tool)
+                elif now - self._home_arrived_ms >= 1000:
+                    self._moving_home, self._home_arrived_ms = False, None
+                    self.attached = False
+                    self.say("Servo signals disabled")
+        elif self._moving_home and now - self._home_start_ms >= STOCK_HOME_MS:
+            self._moving_home = False
+            self.attached = False
+            self.say("Servo signals disabled")
+        self.mode = "home" if self._moving_home else "replay" if self._replaying else \
+            "manual" if self._sticks_active else "idle"
+
     def saved_replay_stop(self):
         if self.mode == "replay":
             self.say("Position replay stopped")
@@ -345,7 +499,8 @@ class ArmSim:
             "xyz": [r1(x), r1(y), r1(z)], "tool_angle": r1(th),
             "points": [[r1(c) for c in p] for p in joint_points(self.angles, self.tool)],
             "saved": len(self.saved), "replay_idx": self.replay_idx,
-            "rate": self.rate, "tool": self.tool,
+            "rate": self.rate, "tool": self.tool, "model": self.model, "patch": self.patch,
+            "target": [r1(v) for v in self._t_pos[:3]] if self.model == "stock" else None,
             "limits": self.limits, "homes": self.homes,
         }
 

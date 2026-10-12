@@ -302,3 +302,5 @@ body.fill #main { max-width: none; padding: 0; }
 .legend dl { margin: 8px 0; display: grid; gap: 8px; }
 .legend dt { font-weight: 600; font-size: 13px; }
 .legend dd { margin: 0; color: var(--muted); font-size: 13px; }
+#w-keys { white-space: pre-line; margin-top: 4px; }
+#w-mag[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }

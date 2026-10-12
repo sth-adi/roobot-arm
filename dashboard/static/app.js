@@ -951,6 +951,12 @@ function makeViewer(canvas) {
       } });
     }
     items.sort((p, q) => q.d - p.d).forEach((it) => it.f());
+    if (pose.world) {
+      const w = pose.world;
+      ctx.font = "600 13px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillStyle = c.text;
+      w.boxes.forEach(([cx, cy], i) => { const q = proj([cx, cy, w.box_height + 26]); ctx.fillText("Box " + (i + 1), q[0], q[1]); });
+      const q = proj([w.tray[0], w.tray[1], w.tray_top + 26]); ctx.fillText("Tray", q[0], q[1]);
+    }
   }
   const loop = () => { if (dirty) draw(); requestAnimationFrame(loop); };
   requestAnimationFrame(loop);
@@ -1027,8 +1033,39 @@ function al5dParts(p) {
   }
   boxFaces(out, vadd(vadd(P[2], u1, -12), l, -28), frame(u1), [24, 12, 20], SV);   // elbow servo
   boxFaces(out, vadd(vadd(P[3], u2, -12), l, 16), frame(u2), [17, 8, 14], SV);    // wrist servo
-  boxFaces(out, vadd(P[3], u3, Math.max(0, L3 - 14) / 2), frame(u3), [Math.max(1, (L3 - 14) / 2), 4, 4], AL);   // rod to the ball
-  out.push({ sphere: vadd(P[3], u3, Math.max(0, L3 - 14)), r: 14 });               // the test ball
+  const on = !!(p.world && p.world.magnet), rodLen = Math.max(2, L3 - 22);
+  boxFaces(out, vadd(P[3], u3, rodLen / 2), frame(u3), [rodLen / 2, 4, 4], AL);   // rod to the electromagnet
+  const fr = frame(u3), mag = [fr[1], vnorm(vcross(u3, fr[1])), u3];
+  prismFaces(out, vadd(P[4], u3, -11), 12, 11, mag, "#b87333");                    // the electromagnet: copper coil
+  prismFaces(out, vadd(P[4], u3, 0.5), 12.5, 1.5, mag, on ? "#5ec8ff" : "#4a4f58");   // its face: lit when energised
+  if (p.world) out.push(...worldParts(p.world));
+  return out;
+}
+
+/* ---- the work cell: three boxes with a key each, a tray, drawn from the world the hub streams ---- */
+function worldParts(w) {
+  const out = [], W = [[1, 0, 0], [0, 1, 0], [0, 0, 1]], CARD = "#a8825a", CARD2 = "#8d6c47", TRAY = "#56657a", TRAY2 = "#6e7f96";
+  const h = w.box_inner, t = w.box_wall, fl = w.box_floor, ht = w.box_height;
+  for (const [cx, cy] of w.boxes) {
+    boxFaces(out, [cx, cy, fl / 2], W, [h + t, h + t, fl / 2], CARD2);
+    for (const sg of [-1, 1]) {
+      boxFaces(out, [cx, cy + sg * (h + t / 2), ht / 2], W, [h + t, t / 2, ht / 2], CARD);
+      boxFaces(out, [cx + sg * (h + t / 2), cy, ht / 2], W, [t / 2, h, ht / 2], CARD);
+    }
+  }
+  const [tx, ty] = w.tray, [hx, hy] = w.tray_half, tt = w.tray_top;
+  boxFaces(out, [tx, ty, tt / 2], W, [hx, hy, tt / 2], TRAY);
+  for (const sg of [-1, 1]) {
+    boxFaces(out, [tx, ty + sg * (hy - 1.5), tt + 3], W, [hx, 1.5, 3], TRAY2);
+    boxFaces(out, [tx + sg * (hx - 1.5), ty, tt + 3], W, [1.5, hy - 3, 3], TRAY2);
+  }
+  for (const k of w.keys) {
+    const y = (k.yaw * Math.PI) / 180, a = [Math.cos(y), Math.sin(y), 0], b = [-Math.sin(y), Math.cos(y), 0], up = [0, 0, 1];
+    const col = w.held === k.id ? "#ffd666" : "#d8b04a";
+    boxFaces(out, vadd(k.pos, a, 6), [a, b, up], [15, 3.5, 1.5], col);                  // blade
+    boxFaces(out, vadd(k.pos, a, 13), [a, b, up], [2.5, 6, 1.5], col);                  // teeth
+    prismFaces(out, vadd(k.pos, a, -14), 8, 1.5, [a, b, up], col, 14);                  // bow
+  }
   return out;
 }
 
@@ -1037,7 +1074,7 @@ function mountArm(root) {
   root.innerHTML = `<div class="armstage">
     <section class="viewer" aria-label="Robot viewer">
       <canvas id="v3d" role="img" aria-label="3D view of the robot arm. Drag to turn, pinch or scroll to zoom, double tap to reset."></canvas>
-      <div class="vhud tl"><div class="st idle" id="v-mode">-</div><div class="mono" id="v-xyz"></div><div class="note" id="v-status"></div><div class="note mono" id="v-saved"></div></div>
+      <div class="vhud tl"><div class="st idle" id="v-mode">-</div><div class="mono" id="v-xyz"></div><div class="note" id="v-status"></div><div class="note mono" id="v-saved"></div><div class="note mono" id="v-mag"></div></div>
       <div class="vhud tr"><button class="btn sm" type="button" data-view="iso">3D</button><button class="btn sm" type="button" data-view="top">Top</button><button class="btn sm" type="button" data-view="side">Side</button><button class="btn sm" type="button" id="v-clr">Clear path</button></div>
       <div class="vhud bl" id="v-joints"></div>
     </section>
@@ -1056,10 +1093,15 @@ function mountArm(root) {
           <dt>A (tap)</dt><dd>Saves the current position. Up to 20 are kept; a 21st is ignored.</dd>
           <dt>A (hold 0.75 s)</dt><dd>Replays the saved positions in order, one every 1.5 s, looping. Let go of A to stop.</dd>
           <dt>B</dt><dd>Go home: every joint returns to its home angle, then the servos are released.</dd>
-          <dt>X, Y, triggers, bumpers, d-pad</dt><dd>Not used by the arm.</dd>
+          <dt>X</dt><dd>Switches the simulated electromagnet on or off (each press toggles it). The real firmware ignores X.</dd>
+          <dt>Y, triggers, bumpers, d-pad</dt><dd>Not used.</dd>
           <dt>Hold A while the ESP32 starts</dt><dd>Calibration mode: the right stick moves one joint, A records its minimum, maximum and home in turn, for all four joints.</dd>
         </dl>
         <p class="note">Sticks have a 20% dead zone. Saved positions live in the ESP32's memory only: they are lost when it restarts.</p></details>
+      <div class="sidesec"><h2>Electromagnet and keys</h2>
+        <div class="inline"><button class="btn sm" id="w-mag" type="button" aria-pressed="false">Magnet off</button><button class="btn sm" id="w-reset" type="button">Reset keys</button></div>
+        <div class="note" style="margin-top:6px">Hold the tip within 2 cm of a key and switch the magnet on to pick it up. Switch it off to let go: it falls onto whatever is below. The X button does the same.</div>
+        <div class="note mono" id="w-keys"></div></div>
       <div class="sidesec"><h2>Emulated ESP32</h2>
         <div class="inline"><select id="m-fw" aria-label="Firmware"><option value="stock">Stock</option><option value="patched">Stock + patch</option><option value="rarm">Rewrite</option></select>
           <select id="m-net" aria-label="Network"></select><button class="btn sm" id="m-go" type="button">Start</button></div>
@@ -1079,6 +1121,8 @@ function mountArm(root) {
   $r("#a-home").addEventListener("click", async () => { const r = await api("/api/sim", { home: true }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
   const model = $r("#a-model");
   model.addEventListener("change", async () => { const v = model.value; await api("/api/sim", { model: v === "improved" ? "improved" : "stock", patch: v === "stock-patch" }); });
+  $r("#w-mag").addEventListener("click", async () => { const r = await api("/api/world", { magnet: "toggle" }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
+  $r("#w-reset").addEventListener("click", () => api("/api/world", { reset: true }));
   $r("#s-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($r("#s-url").value); toast("Link copied", "ok"); } catch (e) { $r("#s-url").select(); } });
   const emu = async (b) => { const r = await api("/api/emu", b); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); };
   const fw = $r("#m-fw"), net = $r("#m-net"), go = $r("#m-go");
@@ -1125,6 +1169,12 @@ function mountArm(root) {
       $r("#v-xyz").textContent = `x ${f1(p.xyz[0], 0)}  y ${f1(p.xyz[1], 0)}  z ${f1(p.xyz[2], 0)} mm`;
       $r("#v-status").textContent = p.ik_ok ? p.status : "out of reach: holding position";
       $r("#v-saved").textContent = p.emulated ? "" : `saved positions: ${p.saved}/20${p.mode === "replay" ? ", replaying #" + (p.replay_idx + 1) : ""}`;
+      const w = p.world;
+      if (w) {
+        const mb = $r("#w-mag"); mb.textContent = w.magnet ? "Magnet ON" : "Magnet off"; mb.setAttribute("aria-pressed", String(w.magnet));
+        $r("#v-mag").textContent = `magnet ${w.magnet ? "ON" : "off"}${w.held ? ", holding key " + w.held : ""}`;
+        $r("#w-keys").textContent = w.keys.map((k) => `Key ${k.id}: ${k.where}`).join("\n");
+      }
       for (let i = 0; i < 4; i++) {
         const [lo, hi] = p.limits[i], a = Math.min(lo, hi), b = Math.max(lo, hi);
         $r("#vj-a" + i).textContent = f1(p.angles[i], 0) + "°";

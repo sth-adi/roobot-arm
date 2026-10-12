@@ -46,6 +46,7 @@ sys.path.insert(0, str(HERE))
 from serial_link import SerialLink, BUTTON_ORDER  # noqa: E402
 from sim.armsim import ArmSim, STALE_S, internal_from_wire, wire_from_internal  # noqa: E402
 from emu_runner import EmuRunner  # noqa: E402
+from sim.workcell import Workcell  # noqa: E402
 
 IS_WIN = sys.platform == "win32"
 NOWIN = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
@@ -117,6 +118,7 @@ class Hub:
         self._cal_synced = False
         self.emu = EmuRunner(self.server, self.log)   # emulated ESP32 + network (Control page)
         self.phone_url = None                   # set by main() with --lan
+        self.cell = Workcell()                  # boxes, keys, tray and the electromagnet (sim/workcell.py)
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
         self.packets = collections.deque(maxlen=500)
         self.packet_times = collections.deque(maxlen=400)
@@ -241,6 +243,9 @@ class Hub:
                 with self.sim_lock:
                     self.sim.step(wire, dt)
                     snap = self._pose_snapshot() if now - pose_t >= 0.04 else None
+                    if snap is not None:
+                        self.cell.step(snap["points"][4], wire.get("X") if wire else False, now - pose_t if pose_t else 0.04)
+                        snap["world"] = self.cell.snapshot()
                 if snap is not None:
                     pose_t = now
                     self.publish("pose", snap)
@@ -252,7 +257,9 @@ class Hub:
         Call with sim_lock held."""
         got = self.emu.servo_angles_deg(self.sim.limits) if self.emu.running else None
         if got is None:
-            return self.sim.snapshot()
+            snap = self.sim.snapshot()
+            snap["world"] = self.cell.snapshot()
+            return snap
         deg, attached = got
         v = self.emu_view
         v.limits, v.homes, v.tool = self.sim.limits, self.sim.homes, self.sim.tool
@@ -262,6 +269,7 @@ class Hub:
         v.saved, v.replay_idx = [], 0
         snap = v.snapshot()
         snap["emulated"] = True
+        snap["world"] = self.cell.snapshot()
         return snap
 
     def _post_text(self, path, text, timeout=0.6):
@@ -931,6 +939,14 @@ class Handler(BaseHTTPRequestHandler):
                 if push_rate:
                     HUB.push_speed()
                 return self._json(200, {"ok": True, "sim": HUB._sim_snapshot()})
+            if path == "/api/world":            # the electromagnet and the keys (simulation only: nothing is sent to the arm)
+                with HUB.sim_lock:
+                    if d.get("reset"):
+                        HUB.cell.reset()
+                    if "magnet" in d:
+                        HUB.cell.toggle() if d["magnet"] == "toggle" else HUB.cell.set_magnet(bool(d["magnet"]))
+                    snap = HUB.cell.snapshot()
+                return self._json(200, {"ok": True, "world": snap})
             if path == "/api/emu":              # the emulated ESP32 and its network
                 try:
                     HUB.emu_action(d)

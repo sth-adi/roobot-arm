@@ -279,6 +279,7 @@ class Hub:
                         snap["world"] = self.cell.snapshot()
                 if snap is not None:
                     pose_t = now
+                    snap["t"] = time.time()          # the page plays poses back on this clock, so network jitter does not show as stutter
                     self.publish("pose", snap)
             except Exception as e:                  # never let the simulation die
                 self.log("hub", f"simulation error: {e}")
@@ -778,7 +779,8 @@ class Hub:
                     "holding": held is not None, "home_grip": at_home and not esp.get("magnet") and held is None,
                     "mode": "running" if esp.get("mode") == "sequence" else esp.get("mode"), "saved": esp.get("saved"),
                     "running_step": esp.get("step") if esp.get("mode") == "sequence" else None, "keys": keys,
-                    "last_run": self.last_run, "task": dict(self.task)}
+                    "last_run": self.last_run, "task": dict(self.task),
+                    "ai": "groq" if AGENT.api_key() else "keywords", "armed": self.armed, "poses": [list(p) for p in self.sim.saved]}
         with self.sim_lock:
             x, y, z, th = self.sim.pose()
             hx, hy, hz, _ = forward_kin(self.sim._home_angles(), self.sim.tool)
@@ -788,7 +790,8 @@ class Hub:
                     "pose": {"x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "angle": round(th, 1)},
                     "at_home": at_home, "magnet": self.cell.magnet, "holding": held is not None, "home_grip": at_home and not self.cell.magnet and held is None,
                     "mode": "running" if self.sim.replaying else self.sim.mode, "saved": len(self.sim.saved), "running_step": self.sim.replay_idx if self.sim.replaying else None,
-                    "keys": {str(k["id"]): self.cell.where(k) for k in self.cell.keys}, "last_run": self.last_run, "task": dict(self.task)}
+                    "keys": {str(k["id"]): self.cell.where(k) for k in self.cell.keys}, "last_run": self.last_run, "task": dict(self.task),
+                    "ai": "groq" if AGENT.api_key() else "keywords", "armed": self.armed, "poses": [list(p) for p in self.sim.saved]}
 
     task = {"state": "idle"}
     last_run = None
@@ -823,10 +826,14 @@ class Hub:
             library = LIBRARY.list()
             plan = AGENT.choose(request, library, st)
             if not plan["sequence"]:
+                if plan.get("ai_error"):
+                    self._tlog("Groq was not used: " + plan["ai_error"])
                 return self._tlog("No sequence fits: " + plan["reason"], "failed")
             seq = LIBRARY.get(plan["sequence"])
             self.task["plan"] = plan
             self._tlog("Chose %s%s (%s, %s)" % (plan["sequence"], " reversed" if plan["reverse"] else "", plan["by"], plan["reason"]))
+            if plan.get("ai_error"):
+                self._tlog("Groq was not used: " + plan["ai_error"])
             if plan["reverse"]:
                 seq = SEQ.reverse(seq)
             need = seq.get("requires", {}).get("key_in")
@@ -869,7 +876,9 @@ class Hub:
         seq = SEQ.validate(pkt)
         if reverse:
             seq = SEQ.reverse(seq)
-        if run and self.esp_state():                   # the ESP32 runs it itself: wipe, load, go, wait for arrival at each pose
+        if run and self.esp_state():                   # the ESP32 runs it itself
+            if not (self.armed or self.emu.running):
+                raise ValueError("the output is SAFE: arm it first, because this would move the real arm")
             r = self._http("/sequence", {"poses": seq["poses"]}, timeout=2.0)
             self._run_once, self._esp_run = len(seq["poses"]), r["id"]
             self.log("hub", "sent sequence %s%s to the ESP32 (id %d)" % (seq["name"] or "(unnamed)", " (reversed)" if reverse else "", r["id"]))
@@ -1064,7 +1073,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/events":
             return self._events()
         if path == "/":
+            path = "/studio/index.html" if (STATIC / "studio" / "index.html").is_file() and "studio" in self.path else "/index.html"
+        elif path in ("/legacy", "/legacy.html"):
             path = "/index.html"
+        elif path in ("/studio", "/studio/"):
+            path = "/studio/index.html"
         f = (STATIC / path.lstrip("/")).resolve()
         if STATIC.resolve() not in f.parents or not f.is_file():
             return self._json(404, {"error": "not found"})
@@ -1142,6 +1155,10 @@ class Handler(BaseHTTPRequestHandler):
                         HUB.sim.toggle_replay() if r == "toggle" else (HUB.sim.start_replay() if r else HUB.sim.stop_replay())
                     if "model" in d:
                         HUB.sim.set_model(d["model"], bool(d.get("patch")))
+                    if d.get("save_here"):
+                        if not HUB.sim.save_here():
+                            return self._json(409, {"error": "the saved list is full (20 poses)"})
+                        HUB.cell.saved_magnet = (HUB.cell.saved_magnet + [HUB.cell.magnet])[:len(HUB.sim.saved)]
                     if d.get("home"):
                         HUB.sim.go_home()
                     if d.get("clear_saved"):
@@ -1165,6 +1182,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/sequence":         # save the move sequence on the host as JSON, load one back, or run one from the library
                 try:
                     rev, run = bool(d.get("reverse")), bool(d.get("run"))
+                    if isinstance(d.get("delete"), str):
+                        LIBRARY.delete(d["delete"])
+                        HUB.log("hub", "sequence %s deleted" % d["delete"])
+                        return self._json(200, {"ok": True})
+                    if isinstance(d.get("rename"), dict):
+                        LIBRARY.rename(str(d["rename"].get("from", "")), str(d["rename"].get("to", "")))
+                        return self._json(200, {"ok": True})
                     if "load" in d:
                         seq = HUB.load_sequence(d["load"], rev, run)
                         return self._json(200, {"ok": True, "loaded": seq["count"], "name": seq["name"]})

@@ -59,22 +59,39 @@ def groq_choice(request, library, state, key, timeout=15):
               "Sequences: " + json.dumps(catalog) + " Arm state: " + json.dumps({k: state.get(k) for k in ("at_home", "holding", "keys", "last_run")}) + " last_run is the sequence that ran most recently; undoing it means running it with the opposite reverse flag.")
     body = json.dumps({"model": GROQ_MODEL, "temperature": 0, "response_format": {"type": "json_object"},
                        "messages": [{"role": "system", "content": system}, {"role": "user", "content": request[:500]}]}).encode()
-    req = urllib.request.Request(GROQ_URL, body, {"Content-Type": "application/json", "Authorization": "Bearer " + key})
+    req = urllib.request.Request(GROQ_URL, body, {"Content-Type": "application/json", "Authorization": "Bearer " + key,
+                                                 "User-Agent": "roobot-arm/1.0", "Accept": "application/json"})   # Groq sits behind Cloudflare, which rejects the default Python-urllib agent
     with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.loads(r.read())
     ans = json.loads(out["choices"][0]["message"]["content"])
     return {"sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "reason": str(ans.get("reason", ""))[:200], "by": "groq"}
 
 
+def _why(e):
+    import urllib.error
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            body = e.read().decode("utf-8", "replace")[:160]
+        except Exception:
+            body = ""
+        return "Groq answered HTTP %s %s" % (e.code, body)
+    return "%s: %s" % (type(e).__name__, str(e)[:160])
+
+
 def choose(request, library, state):
     """{"sequence": name | None, "reverse": bool, "reason": str, "by": ...}; the name is always one that is in the library."""
     key = api_key()
+    err = ""
     names = {s["name"] for s in library}
     if key:
         try:
             c = groq_choice(request, library, state, key)
             if c["sequence"] is None or c["sequence"] in names:
                 return c
-        except Exception:                              # no network, bad key, bad JSON: fall back
-            pass
-    return keyword_choice(request, library, state.get("last_run"))
+        except Exception as e:                         # no network, bad key, bad JSON: fall back, but say why
+            err = _why(e)
+    else:
+        err = "no GROQ_API_KEY found (environment or .env in the repository folder)"
+    c = keyword_choice(request, library, state.get("last_run"))
+    c["ai_error"] = err
+    return c

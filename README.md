@@ -198,3 +198,6 @@ longest stall. Run `python server.py` first, then `python dashboard/hub.py`.
 `firmware/rarm/` is the UWE-RArm ESP32 firmware (copied from Samwally1/UWE-RArm at 3b9b8aa) with the damper and a stale-input stop added, plus a PC test that runs its movement code against the Python arm. This is a larger rewrite and optional; the smaller route is the patch in `firmware/stock/`. The stock firmware works with everything else here unchanged. See `firmware/rarm/README.md` before flashing it.
 
 The "Arm and board" and "Firmware" pages still target the older USB jog sketch in `arduino/arm_receiver/`.
+
+### Sending the move sequence to the host as JSON
+In the side panel: **Send sequence to host** writes the saved positions (x, y, z in mm, tool angle in degrees, and whether the magnet was on at each) as one `roobot-arm-sequence` JSON packet into `sequences/` on the machine running the hub, also available at `GET /api/sequence`. **Copy JSON** puts it on the clipboard; **Load JSON** (or `POST /api/sequence {"load": packet}`) puts a packet back as the saved positions.

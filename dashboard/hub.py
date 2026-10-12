@@ -716,6 +716,50 @@ class Hub:
             "emu_input": self.emu.running and self.forward_control is True and not self.armed,
         }
 
+    SEQ_FORMAT = "roobot-arm-sequence"
+
+    def sequence_packet(self):
+        """The saved move sequence as one JSON-able packet: tool-tip positions (mm, tool angle in degrees) plus the magnet state of each."""
+        with self.sim_lock:
+            mag = list(self.cell.saved_magnet)
+            pos = [{"n": i + 1, "x": round(p[0], 2), "y": round(p[1], 2), "z": round(p[2], 2), "angle": round(p[3], 2),
+                    "magnet": bool(mag[i]) if i < len(mag) else False} for i, p in enumerate(self.sim.saved)]
+            return {"format": self.SEQ_FORMAT, "version": 1, "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "build": BUILD,
+                    "tool_mm": self.sim.tool, "step_ms": 1500, "count": len(pos), "positions": pos}
+
+    def load_sequence(self, pkt):
+        if not isinstance(pkt, dict) or pkt.get("format") != self.SEQ_FORMAT or not isinstance(pkt.get("positions"), list):
+            raise ValueError("not a roobot-arm-sequence packet")
+        from sim.armsim import MAX_SAVED
+        items = pkt["positions"]
+        if len(items) > MAX_SAVED:
+            raise ValueError("at most %d positions" % MAX_SAVED)
+        saved, mag = [], []
+        for it in items:
+            try:
+                v = tuple(float(it[k]) for k in ("x", "y", "z", "angle"))
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("each position needs numeric x, y, z and angle")
+            if not all(math.isfinite(c) and abs(c) < 1000 for c in v):
+                raise ValueError("position out of range")
+            saved.append(v)
+            mag.append(bool(it.get("magnet", False)))
+        with self.sim_lock:
+            self.sim.stop_replay()
+            self.sim.saved[:] = saved
+            self.cell.saved_magnet = mag
+        return len(saved)
+
+    def store_sequence(self):
+        """Write the packet to sequences/ on this (host) machine and return its path."""
+        pkt = self.sequence_packet()
+        folder = ROOT / "sequences"
+        folder.mkdir(exist_ok=True)
+        path = folder / ("sequence-%s.json" % time.strftime("%Y%m%d-%H%M%S"))
+        path.write_text(json.dumps(pkt, indent=2) + "\n", encoding="utf-8")
+        self.log("hub", "sequence of %d positions saved to %s" % (pkt["count"], path))
+        return path, pkt
+
     def _sim_snapshot(self):
         with self.sim_lock:
             return self._pose_snapshot()
@@ -866,6 +910,8 @@ class Handler(BaseHTTPRequestHandler):
                                               {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}]})
         if path == "/api/status":
             return self._json(200, HUB.snapshot())
+        if path == "/api/sequence":
+            return self._json(200, HUB.sequence_packet())
         if path == "/api/events":
             return self._events()
         if path == "/":
@@ -967,6 +1013,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(403, {"error": "forbidden"})
                 threading.Thread(target=HTTPD.shutdown, daemon=True).start()
                 return self._json(200, {"ok": True})
+            if path == "/api/sequence":         # save the move sequence on the host as JSON, or load one back
+                try:
+                    if "load" in d:
+                        return self._json(200, {"ok": True, "loaded": HUB.load_sequence(d["load"])})
+                    pth, pkt = HUB.store_sequence()
+                except ValueError as e:
+                    return self._json(400, {"error": str(e)})
+                return self._json(200, {"ok": True, "path": str(pth), "packet": pkt})
             if path == "/api/world":            # the electromagnet and the keys (simulation only: nothing is sent to the arm)
                 with HUB.sim_lock:
                     if d.get("reset"):

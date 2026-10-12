@@ -5,6 +5,7 @@ import { startInput } from "./input.js";
 import { Btn, Icon, Num, Pill } from "./ui.jsx";
 import { AskPanel, PadPanel, SetupPanel, StatePanel, TeachPanel, useDraft } from "./Panels.jsx";
 import Palette from "./Palette.jsx";
+import System, { PAGES as SYS_PAGES } from "./System.jsx";
 
 const Scene = lazy(() => import("./Scene.jsx"));
 
@@ -31,6 +32,10 @@ export default function App() {
   const toasts = useStore((s) => s.toasts);
   const [tab, setTab] = useState(() => { try { return localStorage.getItem("studio.tab") || "teach"; } catch (e) { return "teach"; } });
   const [open, setOpen] = useState(true);
+  const [area, setArea] = useState(() => { try { return localStorage.getItem("studio.area") === "system" ? "system" : "studio"; } catch (e) { return "studio"; } });
+  const [page, setPage] = useState(() => { try { return localStorage.getItem("studio.page") || "overview"; } catch (e) { return "overview"; } });
+  useEffect(() => { try { localStorage.setItem("studio.area", area); localStorage.setItem("studio.page", page); } catch (e) { /* private window */ } }, [area, page]);
+  const openPage = (p) => { setPage(p); setArea("system"); };
   const [view, setView] = useState({ name: "iso", tick: 0 });
   const [palette, setPalette] = useState(false);
   const [armDlg, setArmDlg] = useState(false);
@@ -65,8 +70,10 @@ export default function App() {
     { id: "reset", label: "Reset keys", hint: "put the keys back in the boxes", icon: "rev", run: () => api("/api/world", { reset: true }) },
     { id: "arm", label: armed ? "Return to SAFE" : "Arm the output", hint: "Esc also returns to SAFE", icon: "shield", run: toggleArm },
     ...VIEWS.map(([n, l]) => ({ id: "v" + n, label: "View: " + l, hint: "camera", icon: "cube", run: () => go(n) })),
+    { id: "astudio", label: "Go to Studio", hint: "3D view and teaching", icon: "cube", run: () => setArea("studio") },
+    ...SYS_PAGES.map(([p, l, ic]) => ({ id: "p" + p, label: "System: " + l, hint: "page", icon: ic, run: () => openPage(p) })),
     ...TABS.map(([t, l, ic]) => ({ id: "t" + t, label: "Open " + l, hint: "panel", icon: ic, run: () => openTab(t) })),
-    { id: "legacy", label: "Open the classic dashboard", hint: "all the original pages", icon: "ext", run: () => { location.href = "/?legacy=1"; } },
+    { id: "legacy", label: "Open the classic dashboard", hint: "the original pages", icon: "ext", run: () => { location.href = "/?legacy=1"; } },
     ...seqs.flatMap((q) => [
       { id: "run-" + q.name, label: "Run " + q.name, hint: q.description, icon: "play", run: async () => { const r = await api("/api/sequence", { name: q.name, use: true, run: true }); toast(r.ok ? `Running ${q.name}` : (r.error || "Failed"), r.ok ? "ok" : "bad"); } },
       { id: "rev-" + q.name, label: "Run " + q.name + " reversed", hint: "the opposite move", icon: "rev", run: async () => { const r = await api("/api/sequence", { name: q.name, use: true, run: true, reverse: true }); toast(r.ok ? `Running ${q.name} reversed` : (r.error || "Failed"), r.ok ? "ok" : "bad"); } },
@@ -84,12 +91,16 @@ export default function App() {
           <Pill tone={agent?.source === "esp32" ? "ok" : "idle"} title="Where the arm is running">{src}</Pill>
           <Pill tone={agent?.ai === "groq" ? "ok" : "idle"} title="Who picks the sequence for Ask">{agent?.ai === "groq" ? "AI: Groq" : "AI: keywords"}</Pill>
         </div>
+        <div className="areas" role="tablist" aria-label="Area">
+          {[["studio", "Studio", "cube"], ["system", "System", "sliders"]].map(([k, l, ic]) => <button key={k} type="button" role="tab" aria-selected={area === k} className={area === k ? "on" : ""} onClick={() => setArea(k)}><Icon n={ic} size={15} /><span>{l}</span></button>)}
+        </div>
         <div className="grow" />
         <button type="button" className="kbd" onClick={() => setPalette(true)} aria-label="Open the command palette"><Icon n="cmd" size={14} /> <span>Search & commands</span><kbd>Ctrl K</kbd></button>
         <button type="button" className={`arm ${armed ? "on" : ""}`} onClick={toggleArm} aria-pressed={armed}><Icon n="shield" size={16} />{armed ? "ARMED" : "SAFE"}</button>
       </header>
 
-      <main className="stage">
+      {area === "system" && <System status={status} page={page} setPage={setPage} />}
+      <main className="stage" hidden={area === "system"}>
         <section className="viewport" aria-label="3D view of the arm">
           <Suspense fallback={<div className="loading">Loading the 3D view…</div>}>
             <Scene view={view} draft={draft} onPick={(i) => { setPicked(i); openTab("teach"); }} />

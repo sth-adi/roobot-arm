@@ -27,6 +27,11 @@ const PATHS = {
   target: "M12 3v4m0 10v4M3 12h4m10 0h4M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z",
   copy: "M8 8h11v13H8V8Zm-3 8V3h11",
   arrow: "M5 12h14m-6-6 6 6-6 6",
+  pause: "M8 5v14m8-14v14",
+  hammer: "M14 6l4 4M4 20l9-9m-1-5 3-3 6 6-3 3-6-6Z",
+  upload: "M12 16V4m0 0-4 4m4-4 4 4M4 16v4h16v-4",
+  server: "M4 4h16v6H4V4Zm0 10h16v6H4v-6Zm3-7h.01M7 17h.01",
+  git: "M6 3v12m0 0a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm12-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0 0c0 4-6 3-12 6",
 };
 export const Icon = ({ n, size = 18, ...rest }) => (
   <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...rest}>

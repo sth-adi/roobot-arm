@@ -199,5 +199,8 @@ longest stall. Run `python server.py` first, then `python dashboard/hub.py`.
 
 The "Arm and board" and "Firmware" pages still target the older USB jog sketch in `arduino/arm_receiver/`.
 
-### Sending the move sequence to the host as JSON
-In the side panel: **Send sequence to host** writes the saved positions (x, y, z in mm, tool angle in degrees, and whether the magnet was on at each) as one `roobot-arm-sequence` JSON packet into `sequences/` on the machine running the hub, also available at `GET /api/sequence`. **Copy JSON** puts it on the clipboard; **Load JSON** (or `POST /api/sequence {"load": packet}`) puts a packet back as the saved positions.
+### Sequences (named JSON, reversible)
+A sequence is a named list of poses (`x, y, z` in mm, tool `angle` in degrees) with an optional magnet `action` per pose: `grab` or `release`. Storing the magnet as an action is what lets a sequence run backwards: the order flips and grab and release swap, so a box-to-tray move becomes tray-to-box without re-teaching it. `requires` and `ends` hold the conditions the task assumes and leaves behind, for the AI to match against.
+
+In the side panel, **Sequences**: type a name and a description, **Save to host** writes `sequences/<name>.json` on the hub's machine; pick one and **Run** or **Run reversed** plays it once (it keeps the keys where they are, so a reversed task finds the key where the forward one left it). **Copy JSON** / **Load JSON** move a packet by hand.
+API: `GET /api/sequence` (the current saved positions as a packet), `GET /api/sequences` (the library), `GET /api/sequences/<name>`, `POST /api/sequence` with `{"name","description","requires","ends"}` to save, `{"load": packet}` or `{"name": n, "use": true}` to load, plus `"run": true` and `"reverse": true`.

@@ -48,6 +48,8 @@ from sim.armsim import ArmSim, STALE_S, internal_from_wire, wire_from_internal  
 from emu_runner import EmuRunner  # noqa: E402
 from stamp import code_stamp  # noqa: E402
 from sim.workcell import Workcell  # noqa: E402
+import sim.sequences as SEQ  # noqa: E402
+LIBRARY = SEQ.Library(ROOT / "sequences")
 
 IS_WIN = sys.platform == "win32"
 NOWIN = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
@@ -120,6 +122,7 @@ class Hub:
         self._cal_synced = False
         self.emu = EmuRunner(self.server, self.log)   # emulated ESP32 + network (Control page)
         self._prev_y = False
+        self._run_once = None
         self.phone_url = None                   # set by main() with --lan
         self.cell = Workcell()                  # boxes, keys, tray and the electromagnet (sim/workcell.py)
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
@@ -257,6 +260,10 @@ class Hub:
                         # emulated firmware's (which the hub cannot see); arrival is judged from the arm that is drawn
                         before = self.cell.magnet
                         self.cell.track_saved(self.sim.saved, self.sim.replaying, self.sim.replay_idx, snap["points"][4])
+                        if self._run_once and self.cell.last_applied == self._run_once - 1 and self.cell._pending is None:
+                            self._run_once = None
+                            self.sim.stop_replay()
+                            self.log("hub", "sequence finished")
                         if getattr(self.cell, "restarted", False):
                             self.cell.restarted = False
                             self.log("hub", "replay: keys put back in the boxes for a fresh run")
@@ -716,49 +723,39 @@ class Hub:
             "emu_input": self.emu.running and self.forward_control is True and not self.armed,
         }
 
-    SEQ_FORMAT = "roobot-arm-sequence"
-
-    def sequence_packet(self):
-        """The saved move sequence as one JSON-able packet: tool-tip positions (mm, tool angle in degrees) plus the magnet state of each."""
+    def current_sequence(self, name="", description="", requires=None, ends=None):
+        """The virtual arm's saved positions (with the magnet state of each) as a sequence packet."""
         with self.sim_lock:
-            mag = list(self.cell.saved_magnet)
-            pos = [{"n": i + 1, "x": round(p[0], 2), "y": round(p[1], 2), "z": round(p[2], 2), "angle": round(p[3], 2),
-                    "magnet": bool(mag[i]) if i < len(mag) else False} for i, p in enumerate(self.sim.saved)]
-            return {"format": self.SEQ_FORMAT, "version": 1, "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "build": BUILD,
-                    "tool_mm": self.sim.tool, "step_ms": 1500, "count": len(pos), "positions": pos}
+            return SEQ.make_sequence(list(self.sim.saved), list(self.cell.saved_magnet), name, description, requires, ends)
 
-    def load_sequence(self, pkt):
-        if not isinstance(pkt, dict) or pkt.get("format") != self.SEQ_FORMAT or not isinstance(pkt.get("positions"), list):
-            raise ValueError("not a roobot-arm-sequence packet")
-        from sim.armsim import MAX_SAVED
-        items = pkt["positions"]
-        if len(items) > MAX_SAVED:
-            raise ValueError("at most %d positions" % MAX_SAVED)
-        saved, mag = [], []
-        for it in items:
-            try:
-                v = tuple(float(it[k]) for k in ("x", "y", "z", "angle"))
-            except (KeyError, TypeError, ValueError):
-                raise ValueError("each position needs numeric x, y, z and angle")
-            if not all(math.isfinite(c) and abs(c) < 1000 for c in v):
-                raise ValueError("position out of range")
-            saved.append(v)
-            mag.append(bool(it.get("magnet", False)))
+    def load_sequence(self, pkt, reverse=False, run=False):
+        """Put a sequence into the (cleared) saved list; optionally play it backwards and/or run it once."""
+        seq = SEQ.validate(pkt)
+        if reverse:
+            seq = SEQ.reverse(seq)
+        saved, mag = SEQ.to_saved(seq)
         with self.sim_lock:
             self.sim.stop_replay()
             self.sim.saved[:] = saved
             self.cell.saved_magnet = mag
-        return len(saved)
+            self.cell.reset_keys_on_lap = not run         # a one-off run starts from the world as it is: a reversed task needs the key where it was left
+            self.cell.last_applied = None
+            self._run_once = len(saved) if run else None
+            if run:
+                self.sim.start_replay()
+        if run:
+            self.log("hub", "running sequence %s%s once" % (seq["name"] or "(unnamed)", " (reversed)" if reverse else ""))
+        return seq
 
-    def store_sequence(self):
-        """Write the packet to sequences/ on this (host) machine and return its path."""
-        pkt = self.sequence_packet()
-        folder = ROOT / "sequences"
-        folder.mkdir(exist_ok=True)
-        path = folder / ("sequence-%s.json" % time.strftime("%Y%m%d-%H%M%S"))
-        path.write_text(json.dumps(pkt, indent=2) + "\n", encoding="utf-8")
-        self.log("hub", "sequence of %d positions saved to %s" % (pkt["count"], path))
-        return path, pkt
+    def store_sequence(self, name="", description="", requires=None, ends=None):
+        """Write the current sequence to sequences/ on this (host) machine."""
+        seq = self.current_sequence(name, description, requires, ends)
+        if not name:
+            name = "sequence-%s" % time.strftime("%Y%m%d-%H%M%S")
+            seq["name"] = name
+        path = LIBRARY.save(SEQ.validate(seq))
+        self.log("hub", "sequence %s (%d poses) saved to %s" % (name, seq["count"], path))
+        return path, seq
 
     def _sim_snapshot(self):
         with self.sim_lock:
@@ -911,7 +908,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/status":
             return self._json(200, HUB.snapshot())
         if path == "/api/sequence":
-            return self._json(200, HUB.sequence_packet())
+            return self._json(200, HUB.current_sequence())
+        if path == "/api/sequences":
+            return self._json(200, {"sequences": LIBRARY.list()})
+        if path.startswith("/api/sequences/"):
+            try:
+                return self._json(200, LIBRARY.get(urllib.parse.unquote(path.rsplit("/", 1)[1])))
+            except KeyError:
+                return self._json(404, {"error": "no such sequence"})
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
         if path == "/api/events":
             return self._events()
         if path == "/":
@@ -1013,11 +1019,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(403, {"error": "forbidden"})
                 threading.Thread(target=HTTPD.shutdown, daemon=True).start()
                 return self._json(200, {"ok": True})
-            if path == "/api/sequence":         # save the move sequence on the host as JSON, or load one back
+            if path == "/api/sequence":         # save the move sequence on the host as JSON, load one back, or run one from the library
                 try:
+                    rev, run = bool(d.get("reverse")), bool(d.get("run"))
                     if "load" in d:
-                        return self._json(200, {"ok": True, "loaded": HUB.load_sequence(d["load"])})
-                    pth, pkt = HUB.store_sequence()
+                        seq = HUB.load_sequence(d["load"], rev, run)
+                        return self._json(200, {"ok": True, "loaded": seq["count"], "name": seq["name"]})
+                    if isinstance(d.get("name"), str) and d.get("use"):      # {"name": "x", "use": true, "reverse": false, "run": true}
+                        seq = HUB.load_sequence(LIBRARY.get(d["name"]), rev, run)
+                        return self._json(200, {"ok": True, "loaded": seq["count"], "name": seq["name"]})
+                    pth, pkt = HUB.store_sequence(str(d.get("name") or ""), str(d.get("description") or ""), d.get("requires"), d.get("ends"))
+                except KeyError:
+                    return self._json(404, {"error": "no such sequence"})
                 except ValueError as e:
                     return self._json(400, {"error": str(e)})
                 return self._json(200, {"ok": True, "path": str(pth), "packet": pkt})

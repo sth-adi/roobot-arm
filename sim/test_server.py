@@ -103,10 +103,13 @@ class DeadMan(unittest.TestCase):
         cls.srv.shutdown()
         cls.srv.server_close()
 
+    _base = 0
+
     def setUp(self):
         self.end = _EndServer()
+        DeadMan._base += 1000        # the worker remembers the last count it forwarded, so every test starts higher
         with server._lock:
-            server._state.update(data=None, received_at=None, count=0)
+            server._state.update(data=None, received_at=None, count=DeadMan._base)
             server._fwd.update(url=self.end.url, ok=None, error=None, sent=0, failed=0, enabled=True,
                                neutrals=0, flush_neutral=False)
 
@@ -155,6 +158,28 @@ class DeadMan(unittest.TestCase):
         self.post("/input", HELD)                             # paused: dropped, not forwarded
         time.sleep(0.8)
         self.assertEqual(len(self.end.got), n)
+
+    def test_max_speed_goes_with_every_packet_including_neutral(self):
+        self.post("/control", {"maxSpeed": 25})
+        self.post("/input", HELD)
+        self.assertTrue(self.wait_for(lambda: len(self.end.got) >= 2), self.end.got)
+        self.assertEqual(self.end.got[0], {**HELD, "maxSpeed": 25})
+        self.assertEqual(self.end.got[1], {**NEUTRAL, "maxSpeed": 25})   # neutral keeps the limit
+        self.assertEqual(json.loads(urllib.request.urlopen(self.base + "/controller", timeout=3).read())["maxSpeed"], 25)
+        with server._lock:
+            server._arm["max_speed"] = None
+
+    def test_max_speed_validation(self):
+        for bad in (0, 61, -1, "fast", True, None):
+            with self.assertRaises(urllib.error.HTTPError, msg=repr(bad)) as cm:
+                self.post("/control", {"maxSpeed": bad})
+            self.assertEqual(cm.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError):
+            self.post("/control", {})
+        self.post("/control", {"maxSpeed": 60, "forward": True})        # both at once, upper bound allowed
+        with server._lock:
+            self.assertEqual(server._arm["max_speed"], 60)
+            server._arm["max_speed"] = None
 
     def test_controller_endpoint(self):
         self.assertEqual(json.loads(urllib.request.urlopen(self.base + "/controller", timeout=3).read()), {})

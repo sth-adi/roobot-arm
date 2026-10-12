@@ -251,10 +251,22 @@ class Hub:
         except Exception:
             return False
 
+    def push_speed(self):
+        """Send the damper to the server as "maxSpeed", which it adds to every packet for the real arm. The firmware
+        accepts 1-60 deg/s, so 0 (no limit in the simulation) goes as the 60 deg/s ceiling."""
+        with self.sim_lock:
+            rate = self.sim.rate
+        try:
+            self._http("/control", {"maxSpeed": min(60, max(1, rate or 60))})
+            return True
+        except Exception:
+            return False
+
     def _sync_arm_channel(self, health):
         """Keep the server's /calibration and /status in step with the virtual arm, like the real ESP32 does."""
         if not health:
             self._cal_synced = False                # a restarted server has lost both: sync again when it is back
+            self._speed_synced = False
             self._sim_status_sent = None
             return
         if not self._cal_synced:
@@ -273,6 +285,8 @@ class Hub:
                     self._cal_synced = True
             except (urllib.error.URLError, OSError, KeyError, ValueError, TypeError):
                 pass
+        if not getattr(self, "_speed_synced", False):
+            self._speed_synced = self.push_speed()
         with self.sim_lock:
             status = self.sim.status
         if status != self._sim_status_sent:
@@ -795,9 +809,10 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     return self._json(502, {"sent": False, "reason": "local server unreachable"})
             if path == "/api/sim":              # the virtual arm: damper, tool length, calibration, home, saved positions
-                push = False
+                push = push_rate = False
                 with HUB.sim_lock:
                     if "rate" in d:
+                        push_rate = True
                         HUB.sim.set_rate(d["rate"])
                     if "tool" in d:
                         HUB.sim.set_tool(d["tool"])
@@ -813,6 +828,8 @@ class Handler(BaseHTTPRequestHandler):
                         push = True
                 if push:
                     HUB.push_calibration()
+                if push_rate:
+                    HUB.push_speed()
                 return self._json(200, {"ok": True, "sim": HUB._sim_snapshot()})
             if path == "/api/board":
                 cmd = str(d.get("cmd", "")).strip()

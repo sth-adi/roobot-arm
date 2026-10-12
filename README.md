@@ -123,14 +123,22 @@ sticks -> XYZ -> inverse kinematics -> 4 joint angles, with calibration limits a
 python server.py                 # terminal 1
 python dashboard/hub.py          # terminal 2: Control page shows the arm
 python controller_client.py --simulate    # terminal 3, or use a real pad / the browser sticks
-python -m unittest sim.test_armsim sim.test_server -v
+python -m unittest discover -s sim -v       # all tests, including the C++ firmware check (needs g++)
 ```
 
 **Damper.** The slider on the Control page limits how fast any joint moves, in deg/s (0 = no limit, capped at 180). It applies to the sticks,
-Go home and replay; all four joints are scaled together so the tool stays on its path. The firmware has no damper yet; this is the reference for porting it.
+Go home and replay; all four joints are scaled together so the tool stays on its path. The same limit is sent to the real arm: the hub posts it to the server (`POST /control {"maxSpeed": n}`, 1-60 deg/s; 0 is sent as 60), the server adds `"maxSpeed"` to every packet it forwards or serves on `/controller`, and the firmware in `firmware/rarm/` applies it.
 
 **Differences from the firmware** (kept on purpose, see the module docstring): the pose always comes from the joint angles, so moving after Go home no longer
 snaps the arm back to its old position; input older than 1.5 s stops the arm; the tool length is a setting (63 mm with the test ball, 53 mm without).
 Calibration *training* (the A-button flow) is not simulated: enter limits and homes in the panel instead.
+
+**Dead-man.** The server sends the arm a neutral packet when input has been silent for 1.5 s and when forwarding is paused (SAFE), because the UWE-RArm backend keeps the last packet for ever. The firmware also treats input older than 1.5 s as centred sticks.
+
+**PS5 controller.** Yes. `controller_client.py` and `controller_gui.py` pick the DualSense layout automatically from the pad's name (`--profile ps5` forces it, `--profile xbox` the old one): Cross/Circle/Square/Triangle are A/B/X/Y, so **Circle = go home** and **Cross = save / hold to replay**. The browser sticks on the Control page use the standard Gamepad API mapping, which DualSense matches. Wire it by USB or Bluetooth; if a button or stick is off, run with `--debug` to see the raw indices and edit the `ps5` profile at the top of `controller_client.py`.
+
+## Real firmware (firmware/rarm)
+
+`firmware/rarm/` is the UWE-RArm ESP32 firmware (copied from Samwally1/UWE-RArm at 3b9b8aa) with the damper and a stale-input stop added, plus a PC test that runs its movement code against the Python arm. See `firmware/rarm/README.md` before flashing it.
 
 The "Arm and board" and "Firmware" pages still target the older USB jog sketch in `arduino/arm_receiver/`.

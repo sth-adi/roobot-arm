@@ -141,6 +141,11 @@ Calibration *training* (the A-button flow) is not simulated: enter limits and ho
 pre-home pose 3 s after Go home, has no speed limit, and integrates packet gaps in one go), or **stock + patch**. The stock and patched models are checked against the real
 `main.cpp` compiled on a PC (`sim/test_stock.py`). See `firmware/stock/README.md`; the patch (`firmware/stock/patches/`) is the small, reviewable way to add the damper and failsafes to his firmware.
 
+## Emulated ESP32 on a network (emu/)
+
+`emu/` runs the firmware's real `main.cpp` on your PC against the real server over real sockets, with a proxy (`emu/netproxy.py`) that makes the link behave like the network you pick
+(latency, jitter, loss, outages, TLS handshake cost). See `emu/README.md`. The preset numbers are assumptions until calibrated against the board.
+
 ## Real firmware (firmware/rarm)
 
 `firmware/rarm/` is the UWE-RArm ESP32 firmware (copied from Samwally1/UWE-RArm at 3b9b8aa) with the damper and a stale-input stop added, plus a PC test that runs its movement code against the Python arm. This is a larger rewrite and optional; the smaller route is the patch in `firmware/stock/`. The stock firmware works with everything else here unchanged. See `firmware/rarm/README.md` before flashing it.

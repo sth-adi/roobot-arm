@@ -63,6 +63,7 @@ class Workcell:
 
     # ---- control ----------------------------------------------------------------------------------------------
     last_applied = 0
+    reset_keys_on_lap = True
 
     def set_magnet(self, on):
         on = bool(on)
@@ -121,7 +122,7 @@ class Workcell:
             self._pending = None
         if self._pending is None and idx != getattr(self, "_last_idx", None):
             self._pending = idx
-            if idx == 0:                                      # a run (or the next lap) starts: keys back in the boxes, so every run can pick them up again
+            if idx == 0 and self.reset_keys_on_lap:                                      # a run (or the next lap) starts: keys back in the boxes, so every run can pick them up again
                 self.reset_keys()
                 self._pending = idx
                 self.restarted = True

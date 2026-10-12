@@ -62,7 +62,7 @@ export function startInput() {
     if (should && (active || wasSending)) {
       const buttons = { ...st.buttons, ...sticky };
       const body = JSON.stringify({ lx: st.lx, ly: st.ly, rx: st.rx, ry: st.ry, lt: st.lt, rt: st.rt, buttons, dpad: st.dpad });
-      if (!inflight && (body !== lastJson || ts - lastSend > 500)) {
+      if (!inflight && ts - lastSend > 33 && (body !== lastJson || ts - lastSend > 500)) {
         inflight = true; lastJson = body; lastSend = ts;
         for (const k of Object.keys(sticky)) delete sticky[k];
         fetch("/api/input", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub": "1" }, body })

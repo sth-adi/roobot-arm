@@ -38,6 +38,7 @@ ROOT = HERE.parent
 STATIC = HERE / "static"
 sys.path.insert(0, str(ROOT))
 from serial_link import SerialLink, BUTTON_ORDER  # noqa: E402
+from sim.armsim import ArmSim, STALE_S, internal_from_wire, wire_from_internal  # noqa: E402
 
 IS_WIN = sys.platform == "win32"
 NOWIN = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
@@ -100,6 +101,12 @@ class Hub:
         self.forward_control = None             # did the last pause/resume reach the server?
         # controller input seen by the local server
         self.latest, self.latest_recv, self.latest_count = None, 0.0, 0
+        self.latest_wire = None                 # the same packet in the UWE-RArm wire format, what the arm reads
+        # virtual ESP32 + arm (sim/armsim.py): always running, so the preview works with no hardware and while SAFE
+        self.sim = ArmSim()
+        self.sim_lock = threading.Lock()
+        self._sim_status_sent = None
+        self._cal_synced = False
         self.packets = collections.deque(maxlen=500)
         self.packet_times = collections.deque(maxlen=400)
         self.stream_ok = False
@@ -176,15 +183,23 @@ class Hub:
                         if not line:
                             continue
                         msg = json.loads(line)
-                        st, count, age = msg.get("state"), msg.get("count") or 0, msg.get("age_s")
-                        if st is None:
+                        raw, count, age = msg.get("state"), msg.get("count") or 0, msg.get("age_s")
+                        if raw is None:
                             continue
+                        if "LSX" in raw:                    # UWE-RArm wire format: the dashboard shows it as its richer state
+                            wire, st = raw, internal_from_wire(raw)
+                        else:                               # an older client still posting the previous format
+                            try:
+                                st = clean_state(raw)
+                            except (ValueError, TypeError):
+                                continue
+                            wire = wire_from_internal(st)
                         now = time.time()
-                        self.latest, self.latest_recv = st, now - (age or 0.0)
+                        self.latest, self.latest_wire, self.latest_recv = st, wire, now - (age or 0.0)
                         if count != self.latest_count:
                             self.latest_count = count
                             self.packet_times.append(now)
-                            ev = {"n": count, "t": round(self.latest_recv, 3), "s": st, "d": describe(prev, st)}
+                            ev = {"n": count, "t": round(self.latest_recv, 3), "s": st, "w": wire, "d": describe(prev, st)}
                             prev = st
                             self.packets.append(ev)
                             self.publish("packet", ev)
@@ -201,6 +216,71 @@ class Hub:
         if self.latest is not None and time.time() - self.latest_recv < 1.0:
             return self.latest
         return None
+
+    # ---- virtual ESP32 + arm ---------------------------------------------------------------
+    def _sim_loop(self):
+        """Run the arm model at 50 Hz on whatever the local server is receiving. No fresh input = no motion."""
+        last, pose_t = time.monotonic(), 0.0
+        while not self.stop.is_set():
+            time.sleep(0.02)
+            now = time.monotonic()
+            dt, last = now - last, now
+            wire = self.latest_wire if (self.latest_wire is not None and time.time() - self.latest_recv < STALE_S) else None
+            try:
+                with self.sim_lock:
+                    self.sim.step(wire, dt)
+                    snap = self.sim.snapshot() if now - pose_t >= 0.04 else None
+                if snap is not None:
+                    pose_t = now
+                    self.publish("pose", snap)
+            except Exception as e:                  # never let the simulation die
+                self.log("hub", f"simulation error: {e}")
+
+    def _post_text(self, path, text, timeout=0.6):
+        req = urllib.request.Request(self.server + path, data=text.encode("utf-8"), method="POST",
+                                     headers={"Content-Type": "text/plain; charset=utf-8"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read()
+
+    def push_calibration(self):
+        with self.sim_lock:
+            cal = {"jointLimits": [list(p) for p in self.sim.limits], "jointHomes": list(self.sim.homes)}
+        try:
+            self._http("/calibration", cal)
+            return True
+        except Exception:
+            return False
+
+    def _sync_arm_channel(self, health):
+        """Keep the server's /calibration and /status in step with the virtual arm, like the real ESP32 does."""
+        if not health:
+            self._cal_synced = False                # a restarted server has lost both: sync again when it is back
+            self._sim_status_sent = None
+            return
+        if not self._cal_synced:
+            try:
+                cal = self._http("/calibration", timeout=0.8)
+                with self.sim_lock:
+                    changed = self.sim.limits != cal["jointLimits"] or self.sim.homes != cal["jointHomes"]
+                    if changed:                     # only then: loading resets the arm to home
+                        self.sim.set_calibration(cal["jointLimits"], cal["jointHomes"])
+                if changed:
+                    self.log("hub", "virtual arm: loaded calibration from the server")
+                self._cal_synced = True
+            except urllib.error.HTTPError as e:
+                if e.code == 404 and self.push_calibration():
+                    self.log("hub", "virtual arm: no calibration on the server, sent the default")
+                    self._cal_synced = True
+            except (urllib.error.URLError, OSError, KeyError, ValueError, TypeError):
+                pass
+        with self.sim_lock:
+            status = self.sim.status
+        if status != self._sim_status_sent:
+            try:
+                self._post_text("/status", status)
+                self._sim_status_sent = status
+            except (urllib.error.URLError, OSError):
+                pass
 
     # ---- serial link / board ---------------------------------------------------------------
     def _board_line(self, line):
@@ -488,6 +568,7 @@ class Hub:
                     except Exception:
                         pass
                 c["server"] = srv
+                self._sync_arm_channel(health)
                 if n % 5 == 0:
                     rc, _ = self._quick([DOCKER, "info"], timeout=8)
                     c["docker_engine"] = "running" if rc == 0 else "stopped"
@@ -556,7 +637,12 @@ class Hub:
                              age=None if not self.fw["finished_t"] else round(time.time() - self.fw["finished_t"], 1)),
             "config": {"env_present": (ROOT / ".env").exists(), "forward_url_set": bool(self.env_forward())},
             "project": self.cache["git"],
+            "sim": self._sim_snapshot(),
         }
+
+    def _sim_snapshot(self):
+        with self.sim_lock:
+            return self.sim.snapshot()
 
     def hello(self):
         return {"status": self.snapshot(), "packets": list(self.packets)[-120:],
@@ -564,7 +650,7 @@ class Hub:
                 "logs": {k: list(v)[-80:] for k, v in self.logs.items()}}
 
     def start(self):
-        for fn in (self._stream_reader, self._pump, self._poller):
+        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop):
             threading.Thread(target=fn, daemon=True).start()
         threading.Thread(target=self._ticker, daemon=True).start()
         self.set_forward(False)                     # start SAFE: the server must not forward until ARMED
@@ -704,10 +790,30 @@ class Handler(BaseHTTPRequestHandler):
                 if not HUB.armed:
                     return self._json(200, {"sent": False, "reason": "safe"})
                 try:
-                    HUB._http("/input", st, timeout=1.0)
+                    HUB._http("/input", wire_from_internal(st), timeout=1.0)
                     return self._json(200, {"sent": True})
                 except Exception:
                     return self._json(502, {"sent": False, "reason": "local server unreachable"})
+            if path == "/api/sim":              # the virtual arm: damper, tool length, calibration, home, saved positions
+                push = False
+                with HUB.sim_lock:
+                    if "rate" in d:
+                        HUB.sim.set_rate(d["rate"])
+                    if "tool" in d:
+                        HUB.sim.set_tool(d["tool"])
+                    if d.get("home"):
+                        HUB.sim.go_home()
+                    if d.get("clear_saved"):
+                        HUB.sim.clear_saved()
+                    if "calibration" in d:
+                        c = d["calibration"]
+                        if not isinstance(c, dict):
+                            raise ValueError("calibration must be an object")
+                        HUB.sim.set_calibration(c.get("jointLimits"), c.get("jointHomes"))
+                        push = True
+                if push:
+                    HUB.push_calibration()
+                return self._json(200, {"ok": True, "sim": HUB._sim_snapshot()})
             if path == "/api/board":
                 cmd = str(d.get("cmd", "")).strip()
                 if not BOARD_CMD_RE.match(cmd):

@@ -36,17 +36,17 @@ function toast(msg, kind = "") {
 }
 
 /* ===================================================================== state */
-const S = { st: null, packets: [], board: [], logs: {}, ok: false, lastState: null, ppsHist: [] };
-const cfg = { rate: 5, range: 180 };
+const S = { st: null, packets: [], board: [], logs: {}, ok: false, lastState: null, ppsHist: [], pose: null };
+const cfg = { rate: 30 };   // damper: fastest joint speed in deg/s, mirrored from the hub's virtual arm
 const LOG_SRC = [["hub", "Hub"], ["server_docker", "Server (Docker)"], ["server_python", "Server (Python)"], ["gui", "Controller GUI"], ["docker_engine", "Docker Desktop"], ["firmware", "Firmware"]];
 
 /* ===================================================================== engine
-   One loop for the whole app: reads the chosen controller source, runs a "preview arm" that mirrors the
-   firmware's jog logic (stick = velocity, position holds on release), and sends input while ARMED. */
+   One loop for the whole app: reads the chosen controller source, draws it, and sends input while ARMED.
+   The arm itself is the virtual arm in the hub (sim/armsim.py); this page only draws the pose it streams. */
 const E = {
-  source: "server", virt: neutral(), active: neutral(), idle: false, twin: [1500, 1500, 1500, 1500],
+  source: "server", virt: neutral(), active: neutral(), idle: false,
   last: performance.now(), lastSend: 0, lastJson: "", inflight: false, sending: false, wasSending: false, gpName: null,
-  userRateT: 0, lastLive: 0,
+  userRateT: -1e9, lastLive: 0,
 };
 function readGamepad() {
   const pads = (navigator.getGamepads && navigator.getGamepads()) || [];
@@ -81,10 +81,6 @@ function engine(ts) {
   const dt = Math.min(0.1, (ts - E.last) / 1000);
   E.last = ts;
   const st = (E.active = readSource(ts));
-  // preview arm: same maths as tickPwm() in the firmware
-  const rate = cfg.rate > 0 ? cfg.rate : 180, usPerDeg = 1000 / cfg.range;
-  const cmd = [st.lx, -st.ly, st.rx, -st.ry];
-  for (let i = 0; i < 4; i++) E.twin[i] = clamp(E.twin[i] + cmd[i] * rate * usPerDeg * dt, 1000, 2000);
   maybeSend(ts, st);
   if (cur && cur.frame) cur.frame(st);
   requestAnimationFrame(engine);
@@ -111,22 +107,10 @@ function setSource(s) {
   if (cur && cur.sourceChanged) cur.sourceChanged();
 }
 
-/* ===================================================================== board settings */
-function pushRateLive(v) {
-  const now = performance.now();
-  if (now - E.lastLive < 100) return;
-  E.lastLive = now;
-  api("/api/board", { cmd: `!live ${v}` });
-}
-async function saveRate(v) {
-  const r = await api("/api/board", { cmd: `!rate ${v}` });
-  toast(r.ok ? `Speed at full stick saved on the board: ${v} deg/s` : "The USB link is not open: only the preview uses this speed", r.ok ? "ok" : "");
-}
+/* ===================================================================== damper sync */
 function syncCfg() {
-  const u = S.st && S.st.usb;
-  if (!u) return;
-  if (u.range) cfg.range = u.range;
-  if (u.rate != null && performance.now() - E.userRateT > 2500) cfg.rate = u.rate;
+  const sim = S.st && S.st.sim;
+  if (sim && performance.now() - E.userRateT > 2500) cfg.rate = sim.rate;
 }
 
 /* ===================================================================== pages: overview */
@@ -189,7 +173,7 @@ function mountOverview(root) {
     <div><div class="k">Last packet</div><div class="v" id="o-age">-</div><div class="sub" id="o-age-s"></div></div>
     <div><div class="k">End server</div><div class="v s" id="o-fwd">-</div><div class="sub" id="o-fwd-s"></div></div>
     <div><div class="k">USB link</div><div class="v s" id="o-usb">-</div><div class="sub" id="o-usb-s"></div></div>
-    <div><div class="k">Speed at full stick</div><div class="v" id="o-rate">-</div><div class="sub" id="o-rate-s"></div></div>
+    <div><div class="k">Joint speed limit</div><div class="v" id="o-rate">-</div><div class="sub" id="o-rate-s"></div></div>
   </div>
   <section class="sec"><h2>System map</h2>
     <p class="lead">How input travels today. Lines move only while packets are flowing, and only the paths that are allowed through are lit.</p>
@@ -219,8 +203,9 @@ function mountOverview(root) {
       $("#o-fwd-s", root).textContent = fw.sent != null ? `${fw.sent} sent, ${fw.failed || 0} failed` : (sv.forward_enabled === false ? "SAFE pauses it" : "");
       $("#o-usb", root).textContent = usb.port || "no board";
       $("#o-usb-s", root).textContent = { open: "open", busy: "port busy", waiting: "waiting", off: "link off", suspended: "flashing" }[usb.phase] || usb.phase;
-      $("#o-rate", root).innerHTML = usb.rate == null ? "-" : `${usb.rate}<span class="u">deg/s</span>`;
-      $("#o-rate-s", root).textContent = usb.rate == null ? "board not reporting" : (usb.rate > 0 ? `${cfg.range} deg in ${Math.round(cfg.range / usb.rate)} s at full stick` : "no limit");
+      const sim = st.sim;
+      $("#o-rate", root).innerHTML = sim ? `${sim.rate > 0 ? sim.rate : 180}<span class="u">deg/s</span>` : "-";
+      $("#o-rate-s", root).textContent = !sim ? "" : (sim.rate > 0 ? "damper on the virtual arm" : "no limit (capped at 180)");
       // map
       const live = st.pps > 0, armed = st.armed;
       const lvl = (c) => c;
@@ -253,7 +238,6 @@ const SOURCES = [
   ["virtual", "Virtual sticks", "Drag the sticks and press the buttons with the mouse or touch. Sticks spring back to centre like real ones. Sends while ARMED."],
   ["demo", "Demo wave", "Slow automatic stick movement for checking the preview and the data path. Sends while ARMED, so only use it when the arm is clear."],
 ];
-const OUTS = [["OUT1", 25, "LX", "Left stick, left and right"], ["OUT2", 26, "LY", "Left stick, up and down"], ["OUT3", 27, "RX", "Right stick, left and right"], ["OUT4", 32, "RY", "Right stick, up and down"]];
 function padSVG() {
   const cross = (cx, cy) => `<g id="p-dpad"><rect class="part" id="p-du" x="${cx - 12}" y="${cy - 36}" width="24" height="28"/><rect class="part" id="p-dd" x="${cx - 12}" y="${cy + 8}" width="24" height="28"/>
     <rect class="part" id="p-dl" x="${cx - 36}" y="${cy - 12}" width="28" height="24"/><rect class="part" id="p-dr" x="${cx + 8}" y="${cy - 12}" width="28" height="24"/><rect class="part" x="${cx - 8}" y="${cy - 8}" width="16" height="16" style="stroke:none"/></g>`;
@@ -272,14 +256,24 @@ function padSVG() {
     <g class="btnp" data-b="start"><circle class="part" id="p-start" cx="348" cy="170" r="10"/></g><text class="lab" x="348" y="192">Start</text>
   </svg>`;
 }
-function dialSVG(i) {
-  let t = "";
-  for (const a of [-90, -45, 0, 45, 90]) {
-    const rad = (a * Math.PI) / 180, x1 = 80 + 66 * Math.sin(rad), y1 = 90 - 66 * Math.cos(rad), x2 = 80 + 72 * Math.sin(rad), y2 = 90 - 72 * Math.cos(rad);
-    t += `<line class="tick" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
-  }
-  return `<svg viewBox="0 0 160 100" role="img" aria-label="${OUTS[i][0]} position"><path class="arc" d="M20 90 A60 60 0 0 1 140 90"/>${t}
-    <line class="needle" id="nd${i}" x1="80" y1="90" x2="80" y2="38"/><circle class="bmark" id="bm${i}" r="4" cx="80" cy="30" style="display:none"/><circle class="hub" cx="80" cy="90" r="5"/></svg>`;
+const OUTS = [["OUT1", 25, "LX", "Left stick, left and right"], ["OUT2", 26, "LY", "Left stick, up and down"], ["OUT3", 27, "RX", "Right stick, left and right"], ["OUT4", 32, "RY", "Right stick, up and down"]];   // the USB jog sketch (Arm and board page)
+/* The virtual arm: two views drawn from the pose the hub streams (the sim in sim/armsim.py runs in the hub, not here). */
+function armViewsHTML() {
+  const dots = (p, r) => [0, 1, 2, 3, 4].map((i) => `<circle class="jnt${i === 4 ? " tip" : ""}" id="av-${p}${i}" r="${i === 4 ? r + 2 : r}" cx="0" cy="0"/>`).join("");
+  return `<div class="armviews">
+    <figure><svg viewBox="-110 -470 620 520" role="img" aria-label="Arm, side view"><g transform="scale(1,-1)">
+      <line class="ground" x1="-110" y1="0" x2="510" y2="0"/><polyline class="link" id="av-sl" points=""/>${dots("s", 9)}</g></svg><figcaption>Side view</figcaption></figure>
+    <figure><svg viewBox="-420 -420 840 840" role="img" aria-label="Arm, top view"><g transform="scale(1,-1)">
+      <circle class="reach" id="av-reach" r="392" cx="0" cy="0"/><line class="ground" x1="0" y1="-420" x2="0" y2="420"/><polyline class="link" id="av-tl" points=""/>${dots("t", 11)}</g></svg><figcaption>Top view (arm forward is up)</figcaption></figure>
+  </div>`;
+}
+const MODE_TEXT = { idle: "holding", manual: "jogging", home: "going home", replay: "replaying" };
+const JOINT_NAMES = ["Base", "Shoulder", "Elbow", "Wrist"];
+function pushRate(v, force) {
+  const now = performance.now();
+  if (!force && now - E.lastLive < 100) return;
+  E.lastLive = now;
+  api("/api/sim", { rate: v });
 }
 function mountControl(root) {
   root.innerHTML = `
@@ -292,20 +286,31 @@ function mountControl(root) {
       <p class="note" id="c-info" style="margin-top:8px"></p>
     </div>
     <div>
-      <section class="sec" style="border-top:0;padding-top:0"><h2>Preview arm</h2>
-        <p class="lead">Mirrors the firmware: a stick moves the output, and the output stays put when the stick is released. It runs in this browser only.</p>
-        <div class="dials">${OUTS.map((o, i) => `<div class="dial"><div class="hd"><span>${o[0]} <span class="muted">${o[2]}</span></span><span class="muted mono">GPIO${o[1]}</span></div>${dialSVG(i)}
-          <div class="hd"><span class="rd" id="d-us${i}">1500 us</span><span class="mono muted" id="d-deg${i}">0 deg</span></div>
-          <div class="bar mid" style="margin-top:6px"><i id="d-cmd${i}" style="left:50%;width:0"></i></div></div>`).join("")}</div>
-        <div class="inline" style="margin-top:14px"><button class="btn sm" id="c-centre" type="button">${icon("arrows-clockwise", "sm")}Centre preview</button>
-          <span class="note" id="c-board"></span></div>
+      <section class="sec" style="border-top:0;padding-top:0"><h2>Virtual arm</h2>
+        <p class="lead">The UWE-RArm movement logic, run on this computer: sticks move the tool through inverse kinematics, A saves a position, holding A replays them, B goes home. It always runs, including while SAFE, and needs no hardware.</p>
+        ${armViewsHTML()}
+        <div class="strip" style="margin-top:12px">
+          <div><div class="k">Tool position</div><div class="v s" id="a-xyz">-</div><div class="sub" id="a-ang"></div></div>
+          <div><div class="k">State</div><div class="v s" id="a-mode">-</div><div class="sub" id="a-status"></div></div>
+          <div><div class="k">Reach</div><div class="v s" id="a-ik">-</div><div class="sub" id="a-ik-s"></div></div>
+          <div><div class="k">Saved positions</div><div class="v" id="a-saved">0</div><div class="sub" id="a-replay"></div></div>
+        </div>
+        <table class="tbl" style="margin-top:12px"><thead><tr><th>Joint</th><th>Angle</th><th>Limits</th><th>Servo</th></tr></thead><tbody>
+          ${JOINT_NAMES.map((n, i) => `<tr><td>${i + 1} ${n}</td><td id="j-a${i}">-</td><td id="j-l${i}">-</td><td id="j-s${i}">-</td></tr>`).join("")}</tbody></table>
+        <div class="inline" style="margin-top:12px"><button class="btn sm" id="a-home" type="button">${icon("arrows-clockwise", "sm")}Go home</button>
+          <button class="btn sm" id="a-clear" type="button">${icon("trash", "sm")}Clear saved positions</button></div>
       </section>
-      <section class="sec"><h2>Speed at full stick</h2>
-        <p class="lead">The damper: how fast an output moves when the stick is pushed all the way. Partial pushes go proportionally slower.</p>
-        <div class="field"><div class="inline"><input type="range" id="c-rate" min="0" max="60" step="1" aria-label="Speed at full stick in degrees per second"><span class="mono" id="c-rate-v" style="min-width:90px;text-align:right"></span></div>
+      <section class="sec"><h2>Damper</h2>
+        <p class="lead">The fastest any joint may move, in degrees per second. It applies to the sticks, Go home and replay. All four joints are slowed together, so the tool keeps to its path. A joint is never faster than this.</p>
+        <div class="field"><div class="inline"><input type="range" id="c-rate" min="0" max="60" step="1" aria-label="Fastest joint speed in degrees per second"><span class="mono" id="c-rate-v" style="min-width:90px;text-align:right"></span></div>
           <div class="note" id="c-rate-n"></div></div>
-        <div class="inline"><label class="muted" for="c-range">Servo travel</label><input type="number" id="c-range" min="10" max="720" step="1"><span class="muted">degrees</span>
-          <button class="btn sm" id="c-range-go" type="button">Apply</button></div>
+      </section>
+      <section class="sec"><h2>Calibration and tool</h2>
+        <p class="lead">Joint limits and homes as trained on the real arm: whole degrees 0 to 180, and a min above the max marks an inverted servo. Applying them moves the virtual arm home, clears the saved positions and posts the values to the server's /calibration, which the firmware reads at boot.</p>
+        <table class="tbl"><thead><tr><th>Joint</th><th>Min</th><th>Max</th><th>Home</th></tr></thead><tbody>
+          ${[0, 1, 2, 3].map((j) => `<tr><td>${j + 1} ${JOINT_NAMES[j]}</td>${["min", "max", "home"].map((k) => `<td><input type="number" class="cal" data-j="${j}" data-k="${k}" min="0" max="180" step="1" style="width:72px" aria-label="Joint ${j + 1} ${k}"></td>`).join("")}</tr>`).join("")}</tbody></table>
+        <div class="inline" style="margin-top:12px"><label class="muted" for="c-tool">Tool length</label><input type="number" id="c-tool" min="0" max="300" step="1" style="width:80px"><span class="muted">mm (63 with the test ball, 53 without)</span>
+          <button class="btn sm" id="c-cal-go" type="button">Apply</button></div>
       </section>
     </div>
   </div>`;
@@ -340,18 +345,32 @@ function mountControl(root) {
     if (bt) { if (bt.dataset.b) E.virt.buttons[bt.dataset.b] = false; else E.virt[bt.dataset.t] = 0; }
   };
   pad.addEventListener("pointerup", release); pad.addEventListener("pointercancel", release);
-  // settings
+  // damper
   const slider = $r("#c-rate");
   slider.value = cfg.rate;
-  slider.addEventListener("input", () => { cfg.rate = +slider.value; E.userRateT = performance.now(); pushRateLive(cfg.rate); });
-  slider.addEventListener("change", () => { E.userRateT = performance.now(); saveRate(+slider.value); });
-  $r("#c-range").value = cfg.range;
-  $r("#c-range-go").addEventListener("click", async () => {
-    const v = clamp(+$r("#c-range").value || 180, 10, 720); cfg.range = v;
-    const r = await api("/api/board", { cmd: `!range ${v}` });
-    toast(r.ok ? `Servo travel saved on the board: ${v} degrees` : "The USB link is not open: only the preview uses this travel", r.ok ? "ok" : "");
+  slider.addEventListener("input", () => { cfg.rate = +slider.value; E.userRateT = performance.now(); pushRate(cfg.rate); });
+  slider.addEventListener("change", () => { E.userRateT = performance.now(); pushRate(+slider.value, true); });
+  // actions
+  $r("#a-home").addEventListener("click", async () => { const r = await api("/api/sim", { home: true }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
+  $r("#a-clear").addEventListener("click", async () => { const r = await api("/api/sim", { clear_saved: true }); toast(r.ok ? "Saved positions cleared" : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); });
+  // calibration and tool length
+  let dirty = false;
+  const cal = root.querySelectorAll("input.cal"), tool = $r("#c-tool");
+  const fill = (s) => {
+    cal.forEach((i) => { const j = +i.dataset.j; i.value = i.dataset.k === "home" ? s.homes[j] : s.limits[j][i.dataset.k === "min" ? 0 : 1]; });
+    tool.value = s.tool;
+  };
+  root.addEventListener("input", (e) => { if (e.target.matches("input.cal, #c-tool")) dirty = true; });
+  $r("#c-cal-go").addEventListener("click", async () => {
+    const s = S.st.sim, lim = [[0, 0], [0, 0], [0, 0], [0, 0]], homes = [0, 0, 0, 0];
+    cal.forEach((i) => { const j = +i.dataset.j, v = Math.round(+i.value); if (i.dataset.k === "home") homes[j] = v; else lim[j][i.dataset.k === "min" ? 0 : 1] = v; });
+    const body = { tool: +tool.value };
+    const changed = JSON.stringify(lim) !== JSON.stringify(s.limits) || JSON.stringify(homes) !== JSON.stringify(s.homes);
+    if (changed) body.calibration = { jointLimits: lim, jointHomes: homes };
+    const r = await api("/api/sim", body);
+    if (r.ok) { dirty = false; fill(r.sim); toast(changed ? "Calibration applied: the arm is at its new home" : "Tool length applied", "ok"); }
+    else toast(r.error || "The hub is not reachable", "bad");
   });
-  $r("#c-centre").addEventListener("click", () => { E.twin = [1500, 1500, 1500, 1500]; });
   const upd = {
     sourceChanged() {
       root.querySelectorAll("#c-tabs button").forEach((b) => b.setAttribute("aria-selected", b.dataset.src === E.source));
@@ -363,18 +382,17 @@ function mountControl(root) {
       const armed = st.armed;
       const el = $r("#c-send");
       if (E.source === "server") { el.className = "st idle"; el.textContent = "Not sending from this page"; }
-      else if (!armed) { el.className = "st warn"; el.textContent = "Preview only: output is SAFE"; }
+      else if (!armed) { el.className = "st warn"; el.textContent = "Virtual arm only: output is SAFE"; }
       else if (E.sending) { el.className = "st bad"; el.textContent = "Sending to the arm"; }
       else { el.className = "st warn"; el.textContent = "ARMED, waiting to send"; }
       $r("#c-info").textContent = E.source === "gamepad" ? (E.gpName ? `Controller found: ${E.gpName}` : "No controller reported yet. Press a button on it.")
         : E.source === "server" && E.idle ? "No live input at the local server right now." : "";
-      const u = st.usb;
-      $r("#c-board").textContent = u.phase === "open" ? "The board is connected: speed and travel changes reach it." : "No board on USB: speed and travel change the preview only.";
-      if (document.activeElement !== $r("#c-range") && u.range) $r("#c-range").value = cfg.range;
       slider.value = cfg.rate;
+      $r("#c-rate-v").textContent = cfg.rate > 0 ? `${cfg.rate} deg/s` : "no limit";
+      $r("#c-rate-n").textContent = cfg.rate > 0 ? `A 90 degree joint move takes at least ${Math.round(90 / cfg.rate)} s.` : "No limit: joints are capped at 180 deg/s.";
+      if (!dirty && st.sim) fill(st.sim);
     },
     frame(st) {
-      // controller drawing
       const k = (id) => $r("#p-" + id);
       const kn = (id, vx, vy) => { const n = k(id); n.setAttribute("cx", r3(vx * 28)); n.setAttribute("cy", r3(vy * 28)); };
       kn("lk", st.lx, st.ly); kn("rk", st.rx, st.ry);
@@ -382,25 +400,36 @@ function mountControl(root) {
       k("ltf").setAttribute("width", r3(84 * st.lt)); k("rtf").setAttribute("width", r3(84 * st.rt));
       k("du").classList.toggle("on", st.dpad[1] === 1); k("dd").classList.toggle("on", st.dpad[1] === -1);
       k("dl").classList.toggle("on", st.dpad[0] === -1); k("dr").classList.toggle("on", st.dpad[0] === 1);
-      // preview arm
-      const cmd = [st.lx, -st.ly, st.rx, -st.ry], bpos = S.st && S.st.board && S.st.board.pos;
-      for (let i = 0; i < 4; i++) {
-        const us = E.twin[i], ang = ((us - 1500) / 500) * 90, rad = (ang * Math.PI) / 180;
-        const nd = $r("#nd" + i); nd.setAttribute("x2", r3(80 + 52 * Math.sin(rad))); nd.setAttribute("y2", r3(90 - 52 * Math.cos(rad)));
-        $r("#d-us" + i).textContent = Math.round(us) + " us";
-        $r("#d-deg" + i).textContent = ((us - 1500) / (1000 / cfg.range)).toFixed(1) + " deg";
-        const c = $r("#d-cmd" + i), v = clamp(cmd[i], -1, 1);
-        c.style.left = (v >= 0 ? 50 : 50 + v * 50) + "%"; c.style.width = Math.abs(v) * 50 + "%";
-        const bm = $r("#bm" + i);
-        if (bpos && bpos[i]) { const br = (((bpos[i] - 1500) / 500) * 90 * Math.PI) / 180; bm.style.display = ""; bm.setAttribute("cx", r3(80 + 60 * Math.sin(br))); bm.setAttribute("cy", r3(90 - 60 * Math.cos(br))); }
-        else bm.style.display = "none";
+    },
+    pose(p) {
+      if (!p || !p.points) return;
+      const P = p.points, tip = P[4], m = Math.hypot(tip[0], tip[1]), d = m > 1 ? [tip[0] / m, tip[1] / m] : [0, 1];
+      const side = P.map((q) => [q[0] * d[0] + q[1] * d[1], q[2]]), pts = (a) => a.map((q) => q[0].toFixed(1) + "," + q[1].toFixed(1)).join(" ");
+      $r("#av-sl").setAttribute("points", pts(side));
+      $r("#av-tl").setAttribute("points", pts(P.map((q) => [q[0], q[1]])));
+      for (let i = 0; i < 5; i++) {
+        const a = $r("#av-s" + i), b = $r("#av-t" + i);
+        a.setAttribute("cx", side[i][0]); a.setAttribute("cy", side[i][1]); b.setAttribute("cx", P[i][0]); b.setAttribute("cy", P[i][1]);
       }
-      const sv = $r("#c-rate-v");
-      sv.textContent = cfg.rate > 0 ? `${cfg.rate} deg/s` : "no limit";
-      $r("#c-rate-n").textContent = cfg.rate > 0 ? `Holding full stick crosses ${cfg.range} degrees in ${Math.round(cfg.range / cfg.rate)} s.` : "No limit means full stick moves at 180 deg/s.";
+      $r("#av-reach").setAttribute("r", 145.95 + 183.7 + p.tool);
+      $r("#a-xyz").textContent = `${f1(p.xyz[0], 0)}, ${f1(p.xyz[1], 0)}, ${f1(p.xyz[2], 0)}`;
+      $r("#a-ang").textContent = `x, y, z mm · tool ${f1(p.tool_angle, 0)}°`;
+      $r("#a-mode").textContent = p.attached ? MODE_TEXT[p.mode] || p.mode : "servos released";
+      $r("#a-status").textContent = p.status;
+      const ik = $r("#a-ik"); ik.textContent = p.ik_ok ? "reachable" : "out of reach"; ik.style.color = p.ik_ok ? "" : "var(--bad)";
+      $r("#a-ik-s").textContent = p.ik_ok ? "" : "holding position";
+      $r("#a-saved").textContent = p.saved;
+      $r("#a-replay").textContent = p.mode === "replay" ? `next: #${p.replay_idx + 1}` : "";
+      for (let i = 0; i < 4; i++) {
+        const [lo, hi] = p.limits[i];
+        $r("#j-a" + i).textContent = f1(p.angles[i]) + "°";
+        $r("#j-l" + i).textContent = `${lo}° to ${hi}°${lo > hi ? " (inverted)" : ""}`;
+        $r("#j-s" + i).textContent = p.servo[i] + "°";
+      }
     },
   };
   upd.sourceChanged();
+  upd.pose(S.pose || (S.st && S.st.sim));
   return upd;
 }
 
@@ -431,7 +460,7 @@ function mountPackets(root) {
   const rowHtml = (p) => `<td>${timeStr(p.t)}</td><td>${p.n}</td><td>${f1(p.s.lx, 2)}</td><td>${f1(p.s.ly, 2)}</td><td>${f1(p.s.rx, 2)}</td><td>${f1(p.s.ry, 2)}</td><td class="chg">${esc(p.d.join(", ") || "no change")}</td>`;
   const show = () => {
     const p = S.packets.find((x) => x.n === selected);
-    $r("#k-raw").textContent = p ? (view === "http" ? rawHttp(p.s) : JSON.stringify(p.s, null, 2)) : "Select a packet to see exactly what was sent.";
+    $r("#k-raw").textContent = p ? (view === "http" ? rawHttp(p.w || p.s) : JSON.stringify(p.w || p.s, null, 2)) : "Select a packet to see exactly what was sent.";
     body.querySelectorAll("tr").forEach((r) => r.setAttribute("aria-selected", String(+r.dataset.n === selected)));
   };
   const match = (p) => { const f = $r("#k-filter").value.trim().toLowerCase(); return !f || p.d.join(" ").toLowerCase().includes(f); };
@@ -704,7 +733,7 @@ function mountProject(root) {
 /* ===================================================================== shell */
 const PAGES = [
   { id: "overview", group: "Monitor", title: "Overview", sub: "Everything at a glance", icon: "squares-four", mount: mountOverview },
-  { id: "control", group: "", title: "Control", sub: "Drive from the browser and watch the preview arm", icon: "game-controller", mount: mountControl },
+  { id: "control", group: "", title: "Control", sub: "Drive from the browser and watch the virtual arm", icon: "game-controller", mount: mountControl },
   { id: "packets", group: "", title: "Packets", sub: "Every controller packet, exactly as sent", icon: "pulse", mount: mountPackets },
   { id: "board", group: "Hardware", title: "Arm and board", sub: "The ESP32 over USB: log, settings and outputs", icon: "cpu", mount: mountBoard },
   { id: "firmware", group: "", title: "Firmware", sub: "Compile and upload the ESP32 sketch", icon: "upload-simple", mount: mountFirmware },
@@ -761,11 +790,12 @@ function connect() {
   const es = new EventSource("/api/events");
   es.addEventListener("hello", (e) => {
     const d = JSON.parse(e.data);
-    S.st = d.status; S.packets = d.packets; S.board = d.board; S.logs = d.logs; S.ok = true;
+    S.st = d.status; S.packets = d.packets; S.board = d.board; S.logs = d.logs; S.ok = true; S.pose = d.status.sim || null;
     S.lastState = d.packets.length ? d.packets[d.packets.length - 1].s : null;
     route(); onStatus();
   });
   es.addEventListener("status", (e) => { S.st = JSON.parse(e.data); S.ok = true; onStatus(); });
+  es.addEventListener("pose", (e) => { S.pose = JSON.parse(e.data); if (cur && cur.pose) cur.pose(S.pose); });
   es.addEventListener("packet", (e) => { const p = JSON.parse(e.data); S.packets.push(p); if (S.packets.length > 500) S.packets.shift(); S.lastState = p.s; if (cur && cur.packet) cur.packet(p); });
   es.addEventListener("board", (e) => { const b = JSON.parse(e.data); S.board.push(b); if (S.board.length > 400) S.board.shift(); if (cur && cur.board) cur.board(b); });
   es.addEventListener("log", (e) => { const l = JSON.parse(e.data); (S.logs[l.src] = S.logs[l.src] || []).push(l); if (S.logs[l.src].length > 200) S.logs[l.src].shift(); if (cur && cur.log) cur.log(l); });

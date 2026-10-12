@@ -256,3 +256,15 @@ dialog .inline { justify-content: flex-end; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---- virtual arm views ---- */
+.armviews { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.armviews figure { margin: 0; border: 1px solid var(--line); background: var(--surface); }
+.armviews svg { width: 100%; height: auto; display: block; }
+.armviews figcaption { font-size: 12.5px; color: var(--muted); padding: 4px 8px; border-top: 1px solid var(--line); }
+.armviews .ground { stroke: var(--line-strong); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.armviews .reach { fill: none; stroke: var(--line-strong); stroke-width: 1px; stroke-dasharray: 5 5; vector-effect: non-scaling-stroke; }
+.armviews .link { fill: none; stroke: var(--accent); stroke-width: 5px; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.armviews .jnt { fill: var(--surface); stroke: var(--text); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.armviews .jnt.tip { fill: var(--warn); }
+@media (max-width: 720px) { .armviews { grid-template-columns: minmax(0, 1fr); } }

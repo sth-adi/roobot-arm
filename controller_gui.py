@@ -236,7 +236,7 @@ class App:
         now = time.time()
         changed = s != self.prev
         if changed:
-            body = json.dumps(s)
+            body = json.dumps(cc.to_wire(s))      # what is actually posted: the UWE-RArm wire format
             self.seq += 1
             moves = describe(self.prev, s)
             ts = time.strftime("%H:%M:%S") + f".{int(now * 1000) % 1000:03d}"

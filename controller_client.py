@@ -67,9 +67,17 @@ def simulated_state(t):
     }
 
 
+def to_wire(state):
+    """The packet the server and the arm firmware use (UWE-RArm format): sticks and A/B/X/Y only.
+    The richer state above (triggers, bumpers, d-pad) stays local for drawing and the dashboard."""
+    b = state["buttons"]
+    return {"LSX": state["lx"], "LSY": state["ly"], "RSX": state["rx"], "RSY": state["ry"],
+            "A": b["a"], "B": b["b"], "X": b["x"], "Y": b["y"]}
+
+
 def post(url, state):
     req = urllib.request.Request(
-        url, data=json.dumps(state).encode(), headers={"Content-Type": "application/json"}, method="POST"
+        url, data=json.dumps(to_wire(state)).encode(), headers={"Content-Type": "application/json"}, method="POST"
     )
     with urllib.request.urlopen(req, timeout=1.0) as r:
         r.read()

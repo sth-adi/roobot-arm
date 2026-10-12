@@ -8,6 +8,11 @@ Endpoints
   POST /control {"forward": true|false} pause/resume forwarding to the next server (used by the dashboard SAFE switch)
   GET  /health  simple liveness check
 
+Arm side channel (same endpoints as the UWE-RArm backend, so its firmware and the virtual arm both work):
+  POST /status       arm status text (<= 4 KB);  GET /status returns it
+  POST /calibration  {"jointLimits": [[min,max] x4], "jointHomes": [x4]}, whole degrees 0-180;  GET returns it (404 if unset)
+  GET  /mode         "Mode" response header (env ARM_MODE, default Normal); the firmware enters training when it is Training
+
 Optionally forwards every received state to another server (--forward-url or
 the FORWARD_URL env var); /state then also reports forwarding status.
 
@@ -32,6 +37,23 @@ _cond = threading.Condition(_lock)  # wakes /stream clients the moment a new sta
 # Forwarding: only the newest state matters, so a worker sends whatever is latest.
 _fwd = {"url": None, "ok": None, "error": None, "sent": 0, "failed": 0, "enabled": True}
 _fwd_wake = threading.Event()
+
+# Arm side channel: status text, calibration and mode (see the docstring).
+_arm = {"status": "", "calibration": None, "mode": os.environ.get("ARM_MODE", "Normal")}
+
+
+def _valid_calibration(p):
+    """Return {"jointLimits", "jointHomes"} if p is a valid calibration, else None."""
+    try:
+        limits, homes = p["jointLimits"], p["jointHomes"]
+    except (KeyError, TypeError):
+        return None
+    is_deg = lambda v: isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 180
+    if (isinstance(limits, list) and len(limits) == 4
+            and all(isinstance(x, list) and len(x) == 2 and all(is_deg(v) for v in x) for x in limits)
+            and isinstance(homes, list) and len(homes) == 4 and all(is_deg(v) for v in homes)):
+        return {"jointLimits": limits, "jointHomes": homes}
+    return None
 
 
 def _forward_worker():
@@ -71,6 +93,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_text(self, code, text, extra=None):
+        body = text.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
     def _stream(self):
         """Hold the connection open and push one JSON line per new state (plus a 0.5 s heartbeat)."""
         self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -98,6 +130,19 @@ class Handler(BaseHTTPRequestHandler):
             self._stream()
         elif self.path == "/health":
             self._send(200, {"status": "ok"})
+        elif self.path == "/status":
+            with _lock:
+                self._send_text(200, _arm["status"])
+        elif self.path == "/mode":
+            with _lock:
+                self._send_text(200, "true", {"Mode": _arm["mode"]})
+        elif self.path == "/calibration":
+            with _lock:
+                cal = _arm["calibration"]
+            if cal is None:
+                self._send(404, {"error": "calibration not available"})
+            else:
+                self._send(200, cal)
         elif self.path == "/state":
             with _lock:
                 age = None if _state["received_at"] is None else round(time.time() - _state["received_at"], 3)
@@ -110,7 +155,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path not in ("/input", "/control"):
+        if self.path not in ("/input", "/control", "/status", "/calibration"):
             return self._send(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -118,6 +163,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "bad Content-Length"})
         if length <= 0 or length > MAX_BODY:
             return self._send(400, {"error": "body missing or too large"})
+        if self.path in ("/status", "/calibration"):          # arm side channel: small bodies only
+            if length > 4096:
+                return self._send(400, {"error": "body too large"})
+            raw = self.rfile.read(length)
+            if self.path == "/status":
+                with _lock:
+                    _arm["status"] = raw.decode("utf-8", "replace")
+            else:
+                try:
+                    cal = _valid_calibration(json.loads(raw))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    cal = None
+                if cal is None:
+                    return self._send(400, {"error": "calibration needs four [min, max] limits and four homes, whole degrees 0-180"})
+                with _lock:
+                    _arm["calibration"] = cal
+            self.send_response(204)
+            self.end_headers()
+            return
         try:
             data = json.loads(self.rfile.read(length))
         except json.JSONDecodeError:

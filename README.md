@@ -2,7 +2,7 @@
 
 Xbox controller -> HTTP server, as the input path for the robot arm.
 
-- `server.py` – HTTP server, standard library only. `POST /input`, `GET /state`, `GET /health`.
+- `server.py` – HTTP server, standard library only. `POST /input`, `GET /state`, `GET /stream`, `GET /health`, and the UWE-RArm backend's `/status`, `/calibration` and `/mode`.
 - `controller_client.py` – reads a generic Xbox One controller (pygame) and POSTs its state as JSON.
 - `controller_gui.py` - live Tk window: draws the controller and logs each move as the raw HTTP packet. `python controller_gui.py [--no-send]`
 
@@ -23,14 +23,13 @@ Check the latest state: `curl http://localhost:8000/state`
 
 ## Payload
 
+The wire format is the one the UWE-RArm firmware reads:
+
 ```json
-{"lx": 0.0, "ly": 0.0, "rx": 0.0, "ry": 0.0, "lt": 0.0, "rt": 0.0,
- "buttons": {"a": false, "b": false, "x": false, "y": false, "lb": false, "rb": false,
-             "back": false, "start": false, "ls": false, "rs": false},
- "dpad": [0, 0]}
+{"LSX": 0.0, "LSY": 0.0, "RSX": 0.0, "RSY": 0.0, "A": false, "B": false, "X": false, "Y": false}
 ```
 
-Sticks are -1..1 with a 0.12 deadzone, triggers 0..1. The client sends on change and at least every 0.5 s.
+Sticks are -1..1 (raw pygame axes, so stick up is negative; the 0.12 client deadzone is followed by the firmware's own 0.2). The client sends on change and at least every 0.5 s. Triggers, bumpers and the d-pad are not on the wire; the client, GUI and dashboard still read them locally for drawing.
 
 ## Notes
 
@@ -111,3 +110,27 @@ python dashboard/hub.py        # opens http://127.0.0.1:8765
 **Adding a page.** Each page is one function in `dashboard/static/app.js` (`mount(root)` returning optional `update/packet/board/log/frame` hooks) plus one line in `PAGES`. The hub already streams packets, board output, logs and status to every page.
 
 Design: dense "cockpit" layout, one accent colour, square corners, dark and light themes, reduced-motion support, following the Taste skill's dashboard guidance. Icons are [Phosphor Icons](https://github.com/phosphor-icons/core) (MIT).
+
+## Virtual arm (no hardware)
+
+`sim/armsim.py` is a Python model of the UWE-RArm firmware (virtual ESP32 + arm, standard library only):
+sticks -> XYZ -> inverse kinematics -> 4 joint angles, with calibration limits and homes (reversed range = inverted servo),
+**B** go home, **A** save a position, hold **A** replay. The hub runs it at 50 Hz on whatever the local server receives
+(always, including while SAFE), draws it on the Control page, mirrors its status to `POST /status`, and keeps
+`/calibration` in step with the Calibration panel.
+
+```
+python server.py                 # terminal 1
+python dashboard/hub.py          # terminal 2: Control page shows the arm
+python controller_client.py --simulate    # terminal 3, or use a real pad / the browser sticks
+python -m unittest sim.test_armsim sim.test_server -v
+```
+
+**Damper.** The slider on the Control page limits how fast any joint moves, in deg/s (0 = no limit, capped at 180). It applies to the sticks,
+Go home and replay; all four joints are scaled together so the tool stays on its path. The firmware has no damper yet; this is the reference for porting it.
+
+**Differences from the firmware** (kept on purpose, see the module docstring): the pose always comes from the joint angles, so moving after Go home no longer
+snaps the arm back to its old position; input older than 1.5 s stops the arm; the tool length is a setting (63 mm with the test ball, 53 mm without).
+Calibration *training* (the A-button flow) is not simulated: enter limits and homes in the panel instead.
+
+The "Arm and board" and "Firmware" pages still target the older USB jog sketch in `arduino/arm_receiver/`.

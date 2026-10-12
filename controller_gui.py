@@ -256,6 +256,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--url", default="http://localhost:8000/input")
     p.add_argument("--index", type=int, default=0)
+    p.add_argument("--profile", choices=["auto", *cc.PROFILES], default="auto",
+                   help="button/axis layout: auto picks from the controller's name (Xbox or PS5)")
     p.add_argument("--no-send", action="store_true", help="view only, don't POST to the server")
     p.add_argument("--serial-port", help="ESP32 COM port (default: auto-detect by USB ID)")
     p.add_argument("--no-serial", action="store_true", help="never use the direct USB-serial path")
@@ -273,6 +275,7 @@ def main():
         raise SystemExit("No controller found. Plug one in.")
     js = pygame.joystick.Joystick(args.index)
     js.init()
+    print(f"Using controller: {js.get_name()} (profile {cc.select_profile(args.profile, js.get_name())})")
 
     cmds = []
     if args.rate is not None:

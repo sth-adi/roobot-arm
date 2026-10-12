@@ -126,12 +126,6 @@ Because position is integrated on the board, a reset or power cycle returns ever
 2. **Plain-TCP stream** - define `STREAM_HOST`/`STREAM_PORT` in `secrets.h` (the PC's IP on the same network as the ESP32); the sketch holds one `GET /stream` connection open (no TLS, no polling). The server pushes a line per new state.
 3. **HTTPS polling** of `STATE_URL` - used when `STREAM_HOST` is not defined.
 
-## Arm Studio (new dashboard)
-
-`http://127.0.0.1:8765/` opens the classic dashboard. **Arm Studio**, an alternative React + three.js app, is at `http://127.0.0.1:8765/studio`: live 3D arm and work cell, a Teach editor (record poses, mark grab/release or just "go to", reorder, save), a library with Run / Reverse / Edit / Rename / Delete (Delete asks twice), Ask the arm, sticks/keyboard control, and Ctrl+K for a command palette. The **System** tab has everything the classic dashboard had: Overview and system map, Arm & tuning (virtual arm, firmware model, damper, calibration, tool length, emulated ESP32 and network), Packets, Board log, Firmware build/upload, Services, Project and the AI packet composer. Arm Studio is optional; the classic dashboard has the same features.
-
-The built app is committed in `dashboard/static/studio`, so you do not need Node to run it. To change it: `cd dashboard/studio && npm install && npm run build` (or `npm run dev` for live reload against a running hub).
-
 ## Dashboard (Arm Hub)
 
 One local web page to watch, control and launch everything. Start it from the repo folder (or double-click `Start Dashboard.bat`):

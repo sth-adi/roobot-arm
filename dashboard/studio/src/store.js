@@ -49,7 +49,28 @@ export async function refreshSeqs() {
 }
 
 // The latest pose is kept outside React state: it arrives ~25 times a second and only the 3D scene needs every frame.
-export const live = { pose: null, listeners: new Set() };
+export const live = { pose: null, listeners: new Set(), buf: [], off: null };
+const DELAY = 110;           // ms the picture runs behind the hub: enough to always have a pose on each side to blend between
+// The pose to draw at time `now` (performance.now()): blends the two hub poses either side of (now - DELAY) on the hub's own clock,
+// so motion is steady at any frame rate. Falls back to the newest pose when the hub sends no timestamps.
+export function samplePose(now) {
+  const b = live.buf, last = live.pose;
+  if (!last || b.length < 2 || live.off == null) return last;
+  const t = now - live.off - DELAY;                  // hub time in ms
+  let i = b.length - 1;
+  while (i > 0 && b[i - 1].ms > t) i--;
+  if (i === 0) return b[0].p;
+  const a = b[i - 1], c = b[i];
+  if (t >= c.ms) return c.p;
+  const k = (t - a.ms) / (c.ms - a.ms || 1), L = (x, y) => x + (y - x) * k;
+  const out = Object.create(c.p);                    // everything else (world flags, limits...) comes from the newer pose
+  out.points = c.p.points.map((q, j) => q.map((v, d) => L(a.p.points[j][d], v)));
+  out.angles = c.p.angles.map((v, j) => L(a.p.angles[j], v));
+  if (c.p.world && a.p.world && a.p.world.keys.length === c.p.world.keys.length) {
+    out.world = { ...c.p.world, keys: c.p.world.keys.map((key, j) => ({ ...key, pos: key.pos.map((v, d) => L(a.p.world.keys[j].pos[d], v)) })) };
+  }
+  return out;
+}
 
 // Streams that only the System pages read (packets, board output, per-service logs). Kept outside the store and handed to a
 // component through useFeed, which re-renders it at most ~7 times a second.
@@ -90,6 +111,12 @@ export function connect() {
   es.addEventListener("board", (e) => { pushCap(feed.board, JSON.parse(e.data), 400); ping(); });
   es.addEventListener("pose", (e) => {
     live.pose = JSON.parse(e.data);
+    if (live.pose.t) {
+      const ms = live.pose.t * 1000, off = performance.now() - ms;
+      live.off = live.off == null ? off : Math.min(off, live.off + 0.02);   // earliest-arrival estimate of the clock offset, creeping up to follow drift
+      if (live.buf.length && live.buf[live.buf.length - 1].ms > ms) { live.buf.length = 0; live.off = off; }   // hub restarted
+      live.buf.push({ ms, p: live.pose }); if (live.buf.length > 16) live.buf.shift();
+    }
     live.listeners.forEach((f) => f(live.pose));
     const p = live.pose, s = state.pose;
     // React only needs to know about the slow-changing parts

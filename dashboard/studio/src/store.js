@@ -67,7 +67,7 @@ export function useFeed() {
   return feed;
 }
 
-let started = false;
+let started = false, pendingStatus = null, statusTimer = null;
 export function connect() {
   if (started) return;
   started = true;
@@ -82,7 +82,9 @@ export function connect() {
   es.addEventListener("status", (e) => {
     const st = JSON.parse(e.data);
     pushCap(feed.ppsHist, st.pps || 0, 120);
-    set({ online: true, status: st }); ping();
+    // status arrives several times a second while input flows; re-rendering the app for each one is what made the view stutter
+    pendingStatus = st;
+    if (!statusTimer) statusTimer = setTimeout(() => { statusTimer = null; set({ online: true, status: pendingStatus }); ping(); }, 250);
   });
   es.addEventListener("packet", (e) => { pushCap(feed.packets, JSON.parse(e.data), 500); ping(); });
   es.addEventListener("board", (e) => { pushCap(feed.board, JSON.parse(e.data), 400); ping(); });

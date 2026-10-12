@@ -197,7 +197,7 @@ function Draft({ poses, onPick }) {
 
 // "fast" is the default: no environment reflections, no antialiasing, no grid shader. Those three are what make a machine without a
 // strong GPU crawl (about 2 fps in software rendering); "rich" turns them on.
-export default function Scene({ view, draft, onPick, rich }) {
+export default React.memo(function Scene({ view, draft, onPick, rich }) {
   const off = (k) => !rich && ["env", "aa", "grid"].includes(k);
   const [dpr, setDpr] = useState(1);          // lowered automatically when the machine cannot keep up
   return (
@@ -221,4 +221,4 @@ export default function Scene({ view, draft, onPick, rich }) {
       <Rig view={view} />
     </Canvas>
   );
-}
+});

@@ -1105,9 +1105,12 @@ function mountArm(root) {
         <p class="note">Sticks have a 20% dead zone. Saved positions live in the ESP32's memory only: they are lost when it restarts.</p></details>
       <div class="sidesec"><h2>Electromagnet and keys</h2>
         <div class="inline"><button class="btn sm" id="w-mag" type="button" aria-pressed="false">Magnet off</button><button class="btn sm" id="w-reset" type="button">Reset keys</button></div>
+        <div class="inline" style="margin-top:8px"><input id="q-ask" placeholder="Ask the arm: put the key on the tray" maxlength="300" aria-label="Ask the arm" style="flex:1"><button class="btn sm" id="q-go" type="button">Do it</button></div>
+        <div class="note" id="q-log" role="status"></div>
         <details class="sidesec" id="s-lib"><summary>Sequences</summary>
           <div class="inline" style="margin-top:6px"><input id="s-name" placeholder="name, e.g. box2_to_tray" maxlength="48" aria-label="Sequence name"><button class="btn sm" id="s-send" type="button">Save to host</button></div>
           <input id="s-desc" placeholder="what it does" maxlength="400" aria-label="Sequence description" style="width:100%;margin-top:4px">
+          <div class="inline" style="margin-top:4px"><input id="s-req" placeholder="needs key in (box2)" maxlength="20" aria-label="Key must start in" size="14"><input id="s-end" placeholder="leaves key on (tray)" maxlength="20" aria-label="Key ends on" size="14"></div>
           <div class="inline" style="margin-top:6px"><select id="s-pick" aria-label="Saved sequences"></select><button class="btn sm" id="s-run" type="button">Run</button><button class="btn sm" id="s-rev" type="button">Run reversed</button></div>
           <div class="inline" style="margin-top:6px"><button class="btn sm" id="s-copy" type="button">Copy JSON</button><button class="btn sm" id="s-load" type="button">Load JSON</button></div>
           <div class="note">Saved positions become poses; the magnet is stored as grab / release so a sequence can be run backwards. Files go in sequences/ on the host.</div>
@@ -1140,11 +1143,19 @@ function mountArm(root) {
       sel.innerHTML = (j.sequences || []).map((q) => `<option value="${q.name}">${q.name} (${q.count})</option>`).join("") || '<option value="">no sequences yet</option>'; sel.value = cur; } catch (e) { /* hub not reachable */ } };
   refreshSeqs();
   $r("#s-send").addEventListener("click", async () => {
-    const r = await api("/api/sequence", { name: $r("#s-name").value.trim(), description: $r("#s-desc").value.trim() });
+    const r = await api("/api/sequence", { name: $r("#s-name").value.trim(), description: $r("#s-desc").value.trim(),
+      requires: $r("#s-req").value.trim() ? { key_in: $r("#s-req").value.trim() } : {}, ends: $r("#s-end").value.trim() ? { key_on: $r("#s-end").value.trim() } : {} });
     toast(r.ok ? `Saved ${r.packet.name} (${r.packet.count} poses) on the host: ${r.path}` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); refreshSeqs(); });
   const runSeq = async (reverse) => { const name = $r("#s-pick").value; if (!name) return toast("Pick a sequence first", "bad");
     const r = await api("/api/sequence", { name, use: true, run: true, reverse });
     toast(r.ok ? `Running ${r.name}${reverse ? " reversed" : ""}` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); };
+  const askIt = async () => { const t = $r("#q-ask").value.trim(); if (!t) return;
+    const r = await api("/api/ask", { request: t }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); };
+  $r("#q-go").addEventListener("click", askIt);
+  $r("#q-ask").addEventListener("keydown", (e) => { if (e.key === "Enter") askIt(); });
+  const showTask = async () => { try { const t = (await (await fetch("/api/state")).json()).task || {};
+    $r("#q-log").textContent = t.log && t.log.length ? `${t.state}: ${t.log[t.log.length - 1]}` : ""; } catch (e) { /* hub not reachable */ } };
+  const taskTimer = setInterval(() => { if (!document.body.contains($r("#q-log"))) return clearInterval(taskTimer); showTask(); }, 1500);
   $r("#s-run").addEventListener("click", () => runSeq(false));
   $r("#s-rev").addEventListener("click", () => runSeq(true));
   $r("#s-copy").addEventListener("click", async () => {

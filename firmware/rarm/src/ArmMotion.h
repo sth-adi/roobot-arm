@@ -89,6 +89,7 @@ struct ArmMotion {
     RobotAngles goal = {0, 0, 0, 0};
     bool hasGoal = false;
     bool prevA = false;
+    bool savedByPress = false;     // the save made when A went down; undone if A is held to start a replay
     bool prevB = false;
     double clock = 0.0;
     double aDownTime = 0.0;
@@ -164,6 +165,7 @@ struct ArmMotion {
         // A pressed: save the current position.
         if (btnA && !prevA) {
             aDownTime = now;
+            savedByPress = savedCount < MaxSavedPositions;
             if (savedCount < MaxSavedPositions) {
                 saved[savedCount++] = Pose();
                 events |= EventPositionSaved;
@@ -172,8 +174,12 @@ struct ArmMotion {
             }
         }
         // A held: start the replay.  A released: stop it.
-        if (btnA && mode != ArmMode::Replay && mode != ArmMode::Home && savedCount > 0
+        if (btnA && mode != ArmMode::Replay && mode != ArmMode::Home && savedCount - (savedByPress ? 1 : 0) > 0
             && now - aDownTime >= ReplayStartHoldSeconds) {
+            if (savedByPress) {        // holding A means replay, not save: drop the position the press added
+                --savedCount;
+                savedByPress = false;
+            }
             mode = ArmMode::Replay;
             replayIndex = 0;
             replayTime = now - ReplayStepSeconds;

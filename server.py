@@ -48,6 +48,9 @@ _fwd_wake = threading.Event()
 
 # Arm side channel: status text, calibration and mode (see the docstring).
 _arm = {"status": "", "calibration": None, "mode": os.environ.get("ARM_MODE", "Normal"), "max_speed": None}
+MIN_PRESS_S = 0.25          # a button press is kept this long: the arm polls slowly and would miss a quick tap
+BUTTONS = ("A", "B", "X", "Y")
+_pressed_at = {}            # button -> when it went down (only while it reads pressed)
 MAX_SPEED_RANGE = (1, 60)   # deg/s per joint; the real firmware clamps to the same range
 
 
@@ -77,6 +80,42 @@ def _neutral_of(data):
     if isinstance(data, dict):
         return {k: _neutral_of(v) for k, v in data.items()}
     return data
+
+
+def _stretch_presses(data, now):
+    """Keep a pressed button reading pressed for at least MIN_PRESS_S, so a quick tap is not lost between two polls.
+    Returns (data, seconds until the stretched release is due, 0 if none). Call with _lock held."""
+    out, wait = data, 0.0
+    for b in BUTTONS:
+        if b not in data:
+            continue
+        if data[b] is True:
+            _pressed_at.setdefault(b, now)
+        elif b in _pressed_at:
+            remain = _pressed_at[b] + MIN_PRESS_S - now
+            if remain > 0:
+                if out is data:
+                    out = dict(data)
+                out[b] = True
+                wait = max(wait, remain)
+            else:
+                del _pressed_at[b]
+    return out, wait
+
+
+def _release_stretched(count):
+    """The stretch is over: send the release, unless a newer packet has arrived (it carries its own truth)."""
+    with _lock:
+        if _state["count"] != count or _state["data"] is None:
+            return
+        data, now = dict(_state["data"]), time.time()
+        for b in BUTTONS:
+            if b in _pressed_at and _pressed_at[b] + MIN_PRESS_S <= now + 0.02:
+                data[b] = False
+                del _pressed_at[b]
+        _state.update(data=data, received_at=now, count=count + 1)
+        _cond.notify_all()
+    _fwd_wake.set()
 
 
 def _with_speed(data):
@@ -279,8 +318,12 @@ class Handler(BaseHTTPRequestHandler):
             _fwd_wake.set()
             return self._send(200, out)
         with _lock:
+            data, wait = _stretch_presses(data, time.time())
             _state.update(data=data, received_at=time.time(), count=_state["count"] + 1)
+            count = _state["count"]
             _cond.notify_all()
+        if wait:
+            threading.Timer(wait + 0.01, _release_stretched, args=(count,)).start()
         print(f"[{_state['count']}] {json.dumps(data)}", flush=True)
         _fwd_wake.set()
         self._send(200, {"ok": True})

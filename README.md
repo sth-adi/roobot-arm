@@ -14,6 +14,9 @@ Switch it with the *Magnet* button in the side panel or the **X** button of the 
 It works with whichever arm is shown, the virtual one or the emulated ESP32. Nothing collides with the arm, and the stock firmware ignores `X`, so a real magnet needs a small firmware addition
 (read `X`, drive a pin); say if you want that as a patch.
 
+**Button taps and replay.** The server keeps a pressed button (A, B, X, Y) reading pressed for at least 0.25 s, because the ESP32 polls slowly and used to miss quick taps entirely.
+The stock firmware saves a position the moment A goes down, so holding A to start a replay also saves where the arm was (usually home). The reference model and the firmware patch drop that one save when the hold turns into a replay; unpatched stock keeps the behaviour.
+
 ## How the ESP32 connection works
 
 The ESP32 never talks to the controller. It is a client that polls a web server, and the controller (or this dashboard) feeds the same server.

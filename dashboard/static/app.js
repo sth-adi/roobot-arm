@@ -46,7 +46,7 @@ const LOG_SRC = [["hub", "Hub"], ["server_docker", "Server (Docker)"], ["server_
 const E = {
   source: "server", virt: neutral(), active: neutral(), idle: false,
   last: performance.now(), lastSend: 0, lastJson: "", inflight: false, sending: false, wasSending: false, gpName: null,
-  userRateT: -1e9, lastLive: 0,
+  userRateT: -1e9, lastLive: 0, sticky: {},
 };
 function readGamepad() {
   const pads = (navigator.getGamepads && navigator.getGamepads()) || [];
@@ -88,16 +88,19 @@ function engine(ts) {
 }
 function maybeSend(ts, st) {
   const should = E.source !== "server" && S.st && (S.st.armed || S.st.emu_input) && S.ok;
+  for (const b of BUTTONS) if (st.buttons[b]) E.sticky[b] = true;      // a tap shorter than one request still gets sent
   if (should) {
-    const body = JSON.stringify({ lx: st.lx, ly: st.ly, rx: st.rx, ry: st.ry, lt: st.lt, rt: st.rt, buttons: st.buttons, dpad: st.dpad });
+    const buttons = Object.assign({}, st.buttons, E.sticky);
+    const body = JSON.stringify({ lx: st.lx, ly: st.ly, rx: st.rx, ry: st.ry, lt: st.lt, rt: st.rt, buttons, dpad: st.dpad });
     if (!E.inflight && (body !== E.lastJson || ts - E.lastSend > 500)) {
-      E.inflight = true; E.lastJson = body; E.lastSend = ts;
+      E.inflight = true; E.lastJson = body; E.lastSend = ts; E.sticky = {};
       fetch("/api/input", { method: "POST", headers: { "Content-Type": "application/json", "X-Hub": "1" }, body })
         .then((r) => r.json()).then((j) => { E.sending = !!j.sent; }).catch(() => { E.sending = false; })
         .finally(() => { E.inflight = false; });
     }
     E.wasSending = true;
   } else {
+    E.sticky = {};
     if (E.wasSending && S.ok) api("/api/input", neutral());   // leaving: tell the arm to stop
     E.wasSending = false; E.sending = false; E.lastJson = "";
   }
@@ -1091,7 +1094,7 @@ function mountArm(root) {
           <dt>Right stick up / down</dt><dd>Moves the tool up and down (z).</dd>
           <dt>Right stick left / right</dt><dd>Tilts the tool angle, about 20 degrees/s.</dd>
           <dt>A (tap)</dt><dd>Saves the current position. Up to 20 are kept; a 21st is ignored.</dd>
-          <dt>A (hold 0.75 s)</dt><dd>Replays the saved positions in order, one every 1.5 s, looping. Let go of A to stop.</dd>
+          <dt>A (hold 0.75 s)</dt><dd>Replays the saved positions in order, one every 1.5 s, looping. Let go of A to stop. The stock firmware also saves one extra position (where the arm was) every time you start a replay; the reference model and the patch undo that save.</dd>
           <dt>B</dt><dd>Go home: every joint returns to its home angle, then the servos are released.</dd>
           <dt>X</dt><dd>Switches the simulated electromagnet on or off (each press toggles it). The real firmware ignores X.</dd>
           <dt>Y, triggers, bumpers, d-pad</dt><dd>Not used.</dd>

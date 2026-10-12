@@ -183,6 +183,7 @@ class ArmSim:
         self._goal = None                             # joint-space goal for home / replay moves
         self._prev = {"A": False, "B": False}
         self._a_down_t = 0.0
+        self._a_saved = False                         # the save made when A went down (undone if A is held to replay)
         self._replay_t = 0.0
         self._home_reached_t = None
         self._clock = 0.0
@@ -320,14 +321,18 @@ class ArmSim:
         # A pressed: save the current position
         if btn_a and not self._prev["A"]:
             self._a_down_t = now
+            self._a_saved = len(self.saved) < MAX_SAVED
             if len(self.saved) < MAX_SAVED:
                 self.saved.append(self.pose())
                 self.say("Position %d saved" % len(self.saved))
             else:
                 self.say("Saved-position list is full")
         # A held: start replay; A released: stop it
-        if btn_a and self.mode != "replay" and self.mode != "home" and self.saved \
+        if btn_a and self.mode != "replay" and self.mode != "home" and len(self.saved) - self._a_saved > 0 \
                 and now - self._a_down_t >= REPLAY_HOLD_S:
+            if self._a_saved:                         # holding A means replay, not save: drop the position the press added
+                self.saved.pop()
+                self._a_saved = False
             self.mode, self.replay_idx = "replay", 0
             self._replay_t = now - REPLAY_STEP_S
             self.say("Replaying saved positions")
@@ -415,12 +420,17 @@ class ArmSim:
             self._prev["B"] = btn_b
             if btn_a and not self._prev["A"]:
                 self._a_press_ms = now
+                self._a_saved = len(self.saved) < MAX_SAVED
                 if len(self.saved) < MAX_SAVED:
                     self.saved.append(self._t_pos)            # stock saves the target, not where the arm is
                     self.say("Position %d saved" % len(self.saved))
                 else:
                     self.say("Saved-position list is full")
-            if btn_a and not self._replaying and now - self._a_press_ms >= 750 and self.saved:
+            n_saved = len(self.saved) - (1 if (self.patch and self._a_saved) else 0)
+            if btn_a and not self._replaying and now - self._a_press_ms >= 750 and n_saved > 0:
+                if self.patch and self._a_saved:      # patch: holding A means replay, not save
+                    self.saved.pop()
+                    self._a_saved = False
                 self._replaying, self.replay_idx = True, 0
                 self._replay_ms = now - 1500
                 self.say("Replaying saved positions")

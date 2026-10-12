@@ -191,3 +191,26 @@ class DeadMan(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StretchTest(unittest.TestCase):
+    def setUp(self):
+        server._pressed_at.clear()
+
+    def test_quick_tap_is_kept_pressed_then_released(self):
+        with server._lock:
+            d, wait = server._stretch_presses({"A": True, "B": False}, 100.0)
+            self.assertEqual((d["A"], wait), (True, 0.0))
+            d, wait = server._stretch_presses({"A": False, "B": False}, 100.05)     # released after 50 ms
+            self.assertTrue(d["A"])
+            self.assertAlmostEqual(wait, server.MIN_PRESS_S - 0.05, places=3)
+            d, wait = server._stretch_presses({"A": False, "B": False}, 100.4)      # a later packet: long enough, released
+            self.assertFalse(d["A"])
+            self.assertEqual(wait, 0.0)
+
+    def test_long_press_is_not_changed(self):
+        with server._lock:
+            server._stretch_presses({"A": True}, 10.0)
+            d, wait = server._stretch_presses({"A": False}, 11.0)
+        self.assertFalse(d["A"])
+        self.assertEqual(wait, 0.0)

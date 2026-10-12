@@ -444,7 +444,11 @@ class ArmSim:
                 self._replaying = False
                 self.say("Position replay stopped")
             self._prev["A"] = btn_a
-            if self._replaying and now - self._replay_ms >= 1500:
+            step_due = now - self._replay_ms >= 1500
+            if self._replaying and self.wait_arrival:      # sequence runs: move on once the arm has got there, not on a fixed clock
+                lag_deg = max(abs(math.degrees(self._t_ang[i] - self.angles[i])) for i in range(4))
+                step_due = now - self._replay_ms >= 300 and (lag_deg < 0.6 or now - self._replay_ms >= 12000)
+            if self._replaying and step_due:
                 target = self.saved[self.replay_idx]
                 goal = inverse_kin(target, self._t_ang, self.limits, self.tool)
                 if goal is not None:
@@ -499,12 +503,15 @@ class ArmSim:
         self.mode = "home" if self._moving_home else "replay" if self._replaying else \
             "manual" if self._sticks_active else "idle"
 
-    def start_replay(self):
+    wait_arrival = False
+
+    def start_replay(self, wait_arrival=False):
         """Play the saved positions in a loop until stop_replay(): one press instead of holding A (the simulation only)."""
         if not self.saved:
             self.say("Nothing saved to replay")
             return False
         self.latched = True
+        self.wait_arrival = bool(wait_arrival) and self.model == "stock"
         if self.model == "stock":
             if not self._replaying:
                 self._replaying, self.replay_idx, self._replay_ms = True, 0, self._ms - 1500
@@ -515,6 +522,7 @@ class ArmSim:
 
     def stop_replay(self):
         self.latched = False
+        self.wait_arrival = False
         if self.model == "stock":
             if self._replaying:
                 self._replaying = False

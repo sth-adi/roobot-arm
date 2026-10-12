@@ -6,6 +6,7 @@ Endpoints
   GET  /state   latest controller state (plus age in seconds)
   GET  /stream  long-lived stream: one JSON line per new state (+ 0.5 s heartbeat), no polling
   POST /control {"forward": true|false} pause/resume forwarding to the next server (used by the dashboard SAFE switch)
+                {"maxSpeed": 1-60} joint speed limit in deg/s, added to every packet sent to the arm (and /controller)
   GET  /health  simple liveness check
   GET  /controller  the latest packet on its own (what the firmware polls on the UWE-RArm backend); neutral once stale
 
@@ -46,7 +47,8 @@ _fwd = {"url": None, "ok": None, "error": None, "sent": 0, "failed": 0, "enabled
 _fwd_wake = threading.Event()
 
 # Arm side channel: status text, calibration and mode (see the docstring).
-_arm = {"status": "", "calibration": None, "mode": os.environ.get("ARM_MODE", "Normal")}
+_arm = {"status": "", "calibration": None, "mode": os.environ.get("ARM_MODE", "Normal"), "max_speed": None}
+MAX_SPEED_RANGE = (1, 60)   # deg/s per joint; the real firmware clamps to the same range
 
 
 def _valid_calibration(p):
@@ -77,9 +79,19 @@ def _neutral_of(data):
     return data
 
 
+def _with_speed(data):
+    """Add the joint speed limit (set with POST /control {"maxSpeed": n}) to a packet going to the arm. The firmware
+    reads it as an optional "maxSpeed" key. Added after _neutral_of, so a neutral packet keeps the limit."""
+    with _lock:
+        speed = _arm["max_speed"]
+    if speed is not None and isinstance(data, dict):
+        return {**data, "maxSpeed": speed}
+    return data
+
+
 def _post_forward(data):
     req = urllib.request.Request(
-        _fwd["url"], data=json.dumps(data).encode(),
+        _fwd["url"], data=json.dumps(_with_speed(data)).encode(),
         headers={"Content-Type": "application/json", "User-Agent": "roobot-arm-server/0.1"},
         method="POST")
     try:
@@ -187,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 age = None if _state["received_at"] is None else round(time.time() - _state["received_at"], 3)
                 out = {"state": _state["data"], "age_s": age, "count": _state["count"],
-                       "forward_enabled": _fwd["enabled"]}
+                       "forward_enabled": _fwd["enabled"], "maxSpeed": _arm["max_speed"]}
                 if _fwd["url"]:
                     out["forward"] = {k: v for k, v in _fwd.items() if k != "flush_neutral"}
                 self._send(200, out)
@@ -200,7 +212,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = {}
             elif rec is None or time.time() - rec >= STALE_S:
                 data = _neutral_of(data)
-            self._send(200, data)
+            self._send(200, _with_speed(data))
         else:
             self._send(404, {"error": "not found"})
 
@@ -238,15 +250,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "invalid JSON"})
         if not isinstance(data, dict):
             return self._send(400, {"error": "expected a JSON object"})
-        if self.path == "/control":      # {"forward": true|false} pauses/resumes forwarding to the next server
-            if not isinstance(data.get("forward"), bool):
-                return self._send(400, {"error": "expected {\"forward\": true|false}"})
+        if self.path == "/control":
+            # {"forward": true|false} pauses/resumes forwarding; {"maxSpeed": 1..60} sets the joint speed limit (deg/s)
+            # that goes to the arm with every packet. Either or both.
+            fwd, speed = data.get("forward"), data.get("maxSpeed")
+            if (fwd is None and speed is None) or (fwd is not None and not isinstance(fwd, bool)):
+                return self._send(400, {"error": "expected {\"forward\": true|false} and/or {\"maxSpeed\": 1-60}"})
+            if speed is not None and (isinstance(speed, bool) or not isinstance(speed, (int, float))
+                                      or not MAX_SPEED_RANGE[0] <= speed <= MAX_SPEED_RANGE[1]):
+                return self._send(400, {"error": "maxSpeed must be a number from %d to %d deg/s" % MAX_SPEED_RANGE})
             with _lock:
-                if _fwd["enabled"] and not data["forward"]:
-                    _fwd["flush_neutral"] = True      # pausing must also stop the arm: the next server holds the last packet
-                _fwd["enabled"] = data["forward"]
+                if speed is not None:
+                    _arm["max_speed"] = speed
+                if fwd is not None:
+                    if _fwd["enabled"] and not fwd:
+                        _fwd["flush_neutral"] = True      # pausing must also stop the arm: the next server holds the last packet
+                    _fwd["enabled"] = fwd
+                out = {"ok": True, "forward_enabled": _fwd["enabled"], "maxSpeed": _arm["max_speed"]}
             _fwd_wake.set()
-            return self._send(200, {"ok": True, "forward_enabled": data["forward"]})
+            return self._send(200, out)
         with _lock:
             _state.update(data=data, received_at=time.time(), count=_state["count"] + 1)
             _cond.notify_all()

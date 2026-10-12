@@ -146,6 +146,11 @@ pre-home pose 3 s after Go home, has no speed limit, and integrates packet gaps 
 `emu/` runs the firmware's real `main.cpp` on your PC against the real server over real sockets, with a proxy (`emu/netproxy.py`) that makes the link behave like the network you pick
 (latency, jitter, loss, outages, TLS handshake cost). See `emu/README.md` (includes Windows setup via MSYS2 or WSL). The preset numbers are assumptions until calibrated against the board.
 
+**From the dashboard:** the Control page has an *Emulated ESP32 and network* section. Pick the firmware and a network preset and press Start emulator (it compiles the firmware first, a few seconds;
+needs g++, see `emu/README.md`). The arm drawn on that page then shows the emulated servos, and the sticks on the page travel through the emulated controller link, even while output is SAFE (nothing is
+forwarded to the real arm). Change the round trip, jitter, loss or connection reuse for the ESP32 link, the controller link or both while it runs, or drop a link for 3 s, and watch the poll times and
+longest stall. Run `python server.py` first, then `python dashboard/hub.py`.
+
 ## Real firmware (firmware/rarm)
 
 `firmware/rarm/` is the UWE-RArm ESP32 firmware (copied from Samwally1/UWE-RArm at 3b9b8aa) with the damper and a stale-input stop added, plus a PC test that runs its movement code against the Python arm. This is a larger rewrite and optional; the smaller route is the patch in `firmware/stock/`. The stock firmware works with everything else here unchanged. See `firmware/rarm/README.md` before flashing it.

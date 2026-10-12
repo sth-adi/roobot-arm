@@ -10,6 +10,7 @@ network proxy (emu/netproxy.py) for a link with latency, loss and handshake cost
 Prints the servo positions as they change and the network statistics every 5 s. Library use: see class Emulator.
 """
 import argparse
+import collections
 import json
 import os
 import shutil
@@ -94,7 +95,9 @@ class Emulator:
         if serial:
             env["EMU_SERIAL"] = "1"
         self.proc = subprocess.Popen([exe], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.servo, self.stats, self.history, self.log = None, {}, [], []
+        self.servo, self.stats = None, {}
+        self.history = collections.deque(maxlen=5000)    # (monotonic time, servo line)
+        self.log = collections.deque(maxlen=200)
         self._threads = [threading.Thread(target=self._read_out, daemon=True), threading.Thread(target=self._read_err, daemon=True)]
         for t in self._threads:
             t.start()

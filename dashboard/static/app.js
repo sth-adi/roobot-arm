@@ -87,7 +87,7 @@ function engine(ts) {
   requestAnimationFrame(engine);
 }
 function maybeSend(ts, st) {
-  const should = E.source !== "server" && S.st && S.st.armed && S.ok;
+  const should = E.source !== "server" && S.st && (S.st.armed || S.st.emu_input) && S.ok;
   if (should) {
     const body = JSON.stringify({ lx: st.lx, ly: st.ly, rx: st.rx, ry: st.ry, lt: st.lt, rt: st.rt, buttons: st.buttons, dpad: st.dpad });
     if (!E.inflight && (body !== E.lastJson || ts - E.lastSend > 500)) {
@@ -309,6 +309,28 @@ function mountControl(root) {
           <option value="stock-patch">Stock + damper and failsafes patch</option></select>
           <div class="note" id="c-model-n"></div></div>
       </section>
+      <section class="sec" id="emu-sec"><h2>Emulated ESP32 and network</h2>
+        <p class="lead">Runs the real firmware code on this computer as an ESP32 that polls the local server over a simulated network. While it runs, the arm drawn above is the emulated servos, and the sticks on this page travel over the controller link (even while output is SAFE: nothing reaches the real arm). The link numbers are assumptions until calibrated against the board.</p>
+        <div class="inline"><label class="muted" for="e-fw">Firmware</label><select id="e-fw"><option value="stock">Stock UWE-RArm</option><option value="patched">Stock + patch</option><option value="rarm">Rewrite (firmware/rarm)</option></select>
+          <label class="muted" for="e-preset">Network</label><select id="e-preset"></select>
+          <button class="btn sm" id="e-go" type="button">Start emulator</button><span class="st idle" id="e-state">Off</span></div>
+        <div class="note" id="e-err" style="color:var(--bad)"></div>
+        <div id="e-live" hidden>
+          <div class="inline" style="margin-top:14px"><label class="muted" for="e-path">Link</label><select id="e-path"><option value="esp">ESP32 to server</option><option value="ctl">Controller to server</option><option value="both">Both</option></select>
+            <select id="e-lp" aria-label="Link preset"></select>
+            <label class="muted" for="e-rtt">Round trip</label><input type="number" id="e-rtt" min="0" max="2000" step="5" style="width:72px"><span class="muted">ms</span>
+            <label class="muted" for="e-jit">Jitter</label><input type="number" id="e-jit" min="0" max="2000" step="5" style="width:72px"><span class="muted">ms</span>
+            <label class="muted" for="e-loss">Loss</label><input type="number" id="e-loss" min="0" max="50" step="0.5" style="width:64px"><span class="muted">%</span>
+            <label class="muted"><input type="checkbox" id="e-keep"> reuse connection</label>
+            <button class="btn sm" id="e-apply" type="button">Apply</button><button class="btn sm" id="e-drop" type="button">Drop link 3 s</button></div>
+          <div class="strip" style="margin-top:14px">
+            <div><div class="k">ESP32 polls</div><div class="v" id="e-polls">-</div><div class="sub" id="e-polls-s"></div></div>
+            <div><div class="k">Poll time</div><div class="v" id="e-ms">-</div><div class="sub" id="e-ms-s"></div></div>
+            <div><div class="k">Longest stall</div><div class="v" id="e-gap">-</div><div class="sub">longest gap between loop passes</div></div>
+            <div><div class="k">Links</div><div class="v s" id="e-links">-</div><div class="sub" id="e-links-s"></div></div>
+          </div>
+        </div>
+      </section>
       <section class="sec"><h2>Damper</h2>
         <p class="lead">The fastest any joint may move, in degrees per second. It applies to the sticks, Go home and replay. All four joints are slowed together, so the tool keeps to its path. A joint is never faster than this.</p>
         <div class="field"><div class="inline"><input type="range" id="c-rate" min="0" max="60" step="1" aria-label="Fastest joint speed in degrees per second"><span class="mono" id="c-rate-v" style="min-width:90px;text-align:right"></span></div>
@@ -365,6 +387,58 @@ function mountControl(root) {
     const v = modelSel.value, r = await api("/api/sim", { model: v === "improved" ? "improved" : "stock", patch: v === "stock-patch" });
     if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
   });
+  // emulated ESP32 and network
+  const eFw = $r("#e-fw"), ePre = $r("#e-preset"), eLp = $r("#e-lp"), ePath = $r("#e-path");
+  const emu = async (body) => { const r = await api("/api/emu", body); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); return r; };
+  $r("#e-go").addEventListener("click", async () => {
+    const e = S.st && S.st.emu;
+    if (e && (e.state === "running" || e.state === "building")) await emu({ action: "stop" });
+    else await emu({ action: "start", firmware: eFw.value, preset: ePre.value });
+  });
+  $r("#e-apply").addEventListener("click", async () => {
+    const preset = eLp.value, body = { action: "link", path: ePath.value };
+    if (preset) body.preset = preset;
+    else Object.assign(body, { rtt_ms: +$r("#e-rtt").value, jitter_ms: +$r("#e-jit").value, loss: +$r("#e-loss").value / 100, keepalive: $r("#e-keep").checked });
+    await emu(body);
+  });
+  $r("#e-drop").addEventListener("click", () => emu({ action: "outage", path: ePath.value, seconds: 3 }));
+  let eShown = "";
+  const emuUpdate = (e) => {
+    const go = $r("#e-go"), state = $r("#e-state"), busy = e && (e.state === "running" || e.state === "building");
+    if (e && !ePre.options.length) {
+      const names = Object.keys(e.presets);
+      ePre.innerHTML = names.map((n) => `<option>${n}</option>`).join(""); ePre.value = "home_wifi";
+      eLp.innerHTML = `<option value="">custom values</option>` + names.map((n) => `<option>${n}</option>`).join("");
+    }
+    go.textContent = busy ? "Stop emulator" : "Start emulator";
+    eFw.disabled = ePre.disabled = !!busy;
+    state.className = "st " + (!e || e.state === "off" ? "idle" : e.state === "error" ? "bad" : e.state === "building" ? "warn" : "ok");
+    state.textContent = !e ? "Off" : { off: "Off", building: "Compiling the firmware...", running: `Running ${e.firmware} for ${Math.round(e.uptime)} s`, error: "Stopped" }[e.state];
+    $r("#e-err").textContent = e ? e.error : "";
+    $r("#e-live").hidden = !(e && e.state === "running");
+    if (!e || e.state !== "running") { eShown = ""; return; }
+    const n = e.net, L = e.links;
+    $r("#e-polls").textContent = n ? n.polls : "-";
+    $r("#e-polls-s").textContent = n ? `${n.poll_fails} failed, ${n.connects} connections` : "waiting for the first poll";
+    $r("#e-ms").textContent = n ? `${f1(n.poll_ms_mean, 0)} ms` : "-";
+    $r("#e-ms-s").textContent = n ? `95% under ${f1(n.poll_ms_p95, 0)} ms, worst ${f1(n.poll_ms_max, 0)} ms` : "";
+    $r("#e-gap").textContent = n ? `${f1(n.loop_gap_ms_max, 0)} ms` : "-";
+    const lk = (k) => `${L[k].preset}${L[k].outage_s > 0 ? " (down)" : ""}`;
+    $r("#e-links").textContent = `ESP32 ${lk("esp")}, controller ${lk("ctl")}`;
+    $r("#e-links-s").textContent = `last request: ESP32 ${f1(L.esp.stats.last_delay_ms, 0)} ms, controller ${f1(L.ctl.stats.last_delay_ms, 0)} ms`;
+    const L0 = L[ePath.value === "both" ? "esp" : ePath.value], sig = JSON.stringify([ePath.value, L0.profile]);
+    if (sig !== eShown && !root.querySelector("#e-live").contains(document.activeElement)) {
+      eShown = sig;
+      eLp.value = L0.preset in e.presets ? L0.preset : "";
+      $r("#e-rtt").value = L0.profile.rtt_ms; $r("#e-jit").value = L0.profile.jitter_ms;
+      $r("#e-loss").value = +(L0.profile.loss * 100).toFixed(2); $r("#e-keep").checked = !!L0.profile.keepalive;
+    }
+  };
+  ePath.addEventListener("change", () => { eShown = ""; });
+  eLp.addEventListener("change", () => { if (eLp.value && S.st && S.st.emu && S.st.emu.presets[eLp.value]) {
+    const p = S.st.emu.presets[eLp.value];
+    $r("#e-rtt").value = p.rtt_ms; $r("#e-jit").value = p.jitter_ms; $r("#e-loss").value = +(p.loss * 100).toFixed(2); $r("#e-keep").checked = !!p.keepalive; } });
+  for (const id of ["#e-rtt", "#e-jit", "#e-loss", "#e-keep"]) $r(id).addEventListener("input", () => { eLp.value = ""; });
   // actions
   $r("#a-home").addEventListener("click", async () => { const r = await api("/api/sim", { home: true }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
   $r("#a-clear").addEventListener("click", async () => { const r = await api("/api/sim", { clear_saved: true }); toast(r.ok ? "Saved positions cleared" : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); });
@@ -397,6 +471,7 @@ function mountControl(root) {
       const armed = st.armed;
       const el = $r("#c-send");
       if (E.source === "server") { el.className = "st idle"; el.textContent = "Not sending from this page"; }
+      else if (!armed && st.emu_input) { el.className = "st ok"; el.textContent = E.sending ? "Sending to the emulated ESP32 (output is SAFE)" : "Emulator ready, waiting to send"; }
       else if (!armed) { el.className = "st warn"; el.textContent = "Virtual arm only: output is SAFE"; }
       else if (E.sending) { el.className = "st bad"; el.textContent = "Sending to the arm"; }
       else { el.className = "st warn"; el.textContent = "ARMED, waiting to send"; }
@@ -412,6 +487,7 @@ function mountControl(root) {
       $r("#c-rate-v").textContent = cfg.rate > 0 ? `${cfg.rate} deg/s` : "no limit";
       $r("#c-rate-n").textContent = sm && sm.model === "stock" && !sm.patch ? "The stock firmware has no speed limiter: this setting is ignored in this mode." : cfg.rate > 0 ? `A 90 degree joint move takes at least ${Math.round(90 / cfg.rate)} s.` : "No limit: joints are capped at 180 deg/s.";
       if (!dirty && st.sim) fill(st.sim);
+      emuUpdate(st.emu);
     },
     frame(st) {
       const k = (id) => $r("#p-" + id);

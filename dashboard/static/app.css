@@ -307,3 +307,25 @@ body.fill #main { max-width: none; padding: 0; }
 #a-play[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .seqlist { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; max-height: 240px; overflow: auto; }
 .seqrow { display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--line, #2a2f37); border-radius: 8px; }
+
+/* ---- polish: softer corners, calmer surfaces, clearer hover and focus ---- */
+.btn, button.btn, input[type=text], input[type=number], select, textarea, .raw, .term, .tabs, .toast, .seqrow, .mapwrap, .map, .scroll { border-radius: 8px; }
+.btn { transition: background .15s var(--ease), border-color .15s var(--ease), transform .1s var(--ease); }
+.btn:hover:not(:disabled) { background: var(--surface-2); border-color: var(--line-strong); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn.primary { box-shadow: 0 1px 0 rgba(255,255,255,.12) inset, 0 6px 16px -8px var(--accent); }
+.strip { border-radius: 10px; overflow: hidden; }
+.strip > div { transition: background .2s; } .strip > div:hover { background: var(--surface); }
+.strip .v { letter-spacing: -.01em; }
+.sec { padding-top: 22px; }
+.sec h2 { letter-spacing: .06em; }
+.st { border-radius: 999px; padding: 1px 9px; }
+.tbl tbody tr { transition: background .12s; } .tbl tbody tr:hover { background: var(--surface); }
+.tabs button { border-radius: 7px; transition: background .15s, color .15s; }
+.term, .raw { background: var(--surface); }
+.toast { box-shadow: 0 14px 34px -14px rgba(0,0,0,.7); animation: toastin .25s var(--ease); }
+@keyframes toastin { from { opacity: 0; transform: translateY(10px); } }
+#nav a { border-radius: 8px; margin: 1px 6px; transition: background .15s, color .15s; }
+#nav a:hover { background: var(--surface-2); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
+::-webkit-scrollbar { width: 10px; height: 10px; } ::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; border: 2px solid var(--bg); } ::-webkit-scrollbar-track { background: transparent; }

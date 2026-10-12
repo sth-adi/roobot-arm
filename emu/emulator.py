@@ -6,7 +6,7 @@
 
 --firmware: stock (firmware/stock/src as shipped), patched (stock + firmware/stock/patches/damper-and-failsafes.patch),
 or rarm (the rewrite in firmware/rarm/src). --host is the server the firmware polls: the local server directly, or the
-network proxy (emu/netproxy.py) for a link with latency, loss and handshake cost. Needs g++ (and `patch` for patched).
+network proxy (emu/netproxy.py) for a link with latency, loss and handshake cost. Needs a C++ compiler (g++; on Windows MinGW-w64 via MSYS2) and git or patch for `patched`.
 Prints the servo positions as they change and the network statistics every 5 s. Library use: see class Emulator.
 """
 import argparse
@@ -25,6 +25,39 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STUBS = os.path.join(FW, "rarm", "test", "stubs")
 
 
+EXE = ".exe" if os.name == "nt" else ""
+
+
+def compiler():
+    """The C++ compiler: $CXX, else g++ (on Windows that is MinGW-w64, e.g. from MSYS2), else c++."""
+    for c in (os.environ.get("CXX"), "g++", "c++"):
+        if c and shutil.which(c):
+            return c
+    raise RuntimeError("no C++ compiler found. Linux/macOS: install g++. Windows: install MSYS2 and run "
+                       "'pacman -S mingw-w64-ucrt-x86_64-gcc git', then use the 'MSYS2 UCRT64' shell, or use WSL.")
+
+
+def apply_patch(tree, patch_file):
+    """Apply a unified diff (paths a/src/..) inside `tree`. Uses git apply (Windows has git) and falls back to patch."""
+    attempts = []
+    if shutil.which("git"):
+        attempts.append(["git", "apply", "-p1", patch_file])
+    if shutil.which("patch"):
+        attempts.append(["patch", "-p1", "-i", patch_file])
+    if not attempts:
+        raise RuntimeError("need git or patch to apply the firmware patch")
+    r = None
+    for cmd in attempts:
+        r = subprocess.run(cmd, cwd=tree, capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+    raise RuntimeError("patch does not apply:\n" + r.stdout + r.stderr)
+
+
+def have_patch_tool():
+    return bool(shutil.which("git") or shutil.which("patch"))
+
+
 def firmware_src(kind, workdir):
     """Return the src directory for a firmware variant (patched is built in workdir)."""
     if kind == "stock":
@@ -34,18 +67,17 @@ def firmware_src(kind, workdir):
     if kind == "patched":
         tree = os.path.join(workdir, "patched")
         shutil.copytree(os.path.join(FW, "stock", "src"), os.path.join(tree, "src"))
-        r = subprocess.run(["patch", "-p1", "-d", tree, "-i", os.path.join(FW, "stock", "patches", "damper-and-failsafes.patch")],
-                           capture_output=True, text=True)
-        if r.returncode:
-            raise RuntimeError("patch does not apply:\n" + r.stdout + r.stderr)
+        apply_patch(tree, os.path.join(FW, "stock", "patches", "damper-and-failsafes.patch"))
         return os.path.join(tree, "src")
     raise ValueError("firmware must be stock, patched or rarm")
 
 
 def build(kind, out_dir):
     src = firmware_src(kind, out_dir)
-    exe = os.path.join(out_dir, "esp32_" + kind)
-    cmd = ["g++", "-std=c++17", "-O1", "-I" + os.path.join(HERE, "shim"), "-I" + STUBS, "-I" + src, os.path.join(HERE, "emu_main.cpp"), "-o", exe]
+    exe = os.path.join(out_dir, "esp32_" + kind + EXE)
+    cmd = [compiler(), "-std=c++17", "-O1", "-I" + os.path.join(HERE, "shim"), "-I" + STUBS, "-I" + src, os.path.join(HERE, "emu_main.cpp"), "-o", exe]
+    if os.name == "nt":
+        cmd.append("-lws2_32")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError("build failed:\n" + r.stderr)

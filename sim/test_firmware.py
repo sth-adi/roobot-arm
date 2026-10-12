@@ -48,7 +48,7 @@ class FirmwareMatchesSim(unittest.TestCase):
         if not cxx:
             raise unittest.SkipTest("no C++ compiler")
         cls.dir = tempfile.mkdtemp()
-        cls.exe = os.path.join(cls.dir, "harness")
+        cls.exe = os.path.join(cls.dir, "harness" + (".exe" if os.name == "nt" else ""))
         r = subprocess.run([cxx, "-std=c++17", "-Wall", "-Wextra", "-I" + os.path.join(FW, "test", "stubs"),
                             "-I" + os.path.join(FW, "src"), os.path.join(FW, "test", "motion_harness.cpp"),
                             "-o", cls.exe], capture_output=True, text=True)

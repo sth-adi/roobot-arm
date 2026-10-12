@@ -1,5 +1,12 @@
 // Minimal Arduino core stand-in so the firmware headers compile and run on a PC (tests only).
 #pragma once
+#if defined(_WIN32) && defined(EMU_REALTIME)
+// Winsock first: its headers must be read before the Arduino-style abs() macro below.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>

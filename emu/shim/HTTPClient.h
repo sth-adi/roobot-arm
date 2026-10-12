@@ -4,13 +4,26 @@
 // the cost of a TLS handshake is added by the network proxy, not computed here.
 #include <Arduino.h>
 #include <WiFiClientSecure.h>
+#ifdef _WIN32
+// Winsock (headers already included by Arduino.h). Link with -lws2_32.
+typedef SOCKET emu_sock_t;
+#define EMU_BAD_SOCK INVALID_SOCKET
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+typedef int emu_sock_t;
+#define EMU_BAD_SOCK (-1)
+#endif
 #include <cerrno>
 #include <chrono>
 #include <map>
@@ -32,9 +45,53 @@ struct EmuNetStats {
 };
 inline EmuNetStats& emuNet() { static EmuNetStats s; return s; }
 
+// Small portability layer: the same code on Linux/macOS and Windows.
+namespace emu_net {
+#ifdef _WIN32
+inline void init() { static bool done = false; if (!done) { WSADATA d; WSAStartup(MAKEWORD(2, 2), &d); done = true; } }
+inline void closeSock(emu_sock_t s) { closesocket(s); }
+inline bool timedOut() { const int e = WSAGetLastError(); return e == WSAETIMEDOUT || e == WSAEWOULDBLOCK; }
+inline void setNonBlocking(emu_sock_t s, bool nb) { u_long m = nb ? 1 : 0; ioctlsocket(s, FIONBIO, &m); }
+inline void setTimeouts(emu_sock_t s, int ms) { DWORD t = (DWORD)ms; setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&t, sizeof t); setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&t, sizeof t); }
+inline void noDelay(emu_sock_t s) { int one = 1; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof one); }
+#else
+inline void init() {}
+inline void closeSock(emu_sock_t s) { ::close(s); }
+inline bool timedOut() { return errno == EAGAIN || errno == EWOULDBLOCK; }
+inline void setNonBlocking(emu_sock_t s, bool nb) { const int f = fcntl(s, F_GETFL, 0); fcntl(s, F_SETFL, nb ? (f | O_NONBLOCK) : (f & ~O_NONBLOCK)); }
+inline void setTimeouts(emu_sock_t s, int ms) { struct timeval tv = {ms / 1000, (ms % 1000) * 1000}; setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv); setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv); }
+inline void noDelay(emu_sock_t s) { int one = 1; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one); }
+#endif
+// connect() with a 5 s limit on every platform (SO_SNDTIMEO does not cover connect on Windows).
+inline bool connectTimeout(emu_sock_t s, const sockaddr* a, int len, int ms, bool& timedOutOut)
+{
+    timedOutOut = false;
+    setNonBlocking(s, true);
+    int rc = ::connect(s, a, len);
+    if (rc != 0) {
+#ifdef _WIN32
+        const bool pending = WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+        const bool pending = errno == EINPROGRESS;
+#endif
+        if (!pending) { setNonBlocking(s, false); return false; }
+        fd_set wr, ex; FD_ZERO(&wr); FD_ZERO(&ex); FD_SET(s, &wr); FD_SET(s, &ex);
+        struct timeval tv = {ms / 1000, (ms % 1000) * 1000};
+        rc = select((int)s + 1, nullptr, &wr, &ex, &tv);
+        if (rc == 0) { timedOutOut = true; setNonBlocking(s, false); return false; }
+        int err = 0; socklen_t el = sizeof err;
+        getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &el);
+        if (rc < 0 || err != 0 || FD_ISSET(s, &ex)) { setNonBlocking(s, false); return false; }
+    }
+    setNonBlocking(s, false);
+    return true;
+}
+}  // namespace emu_net
+
 class HTTPClient {
     std::string host_, path_;
-    int port_ = 80, fd_ = -1;
+    int port_ = 80;
+    emu_sock_t fd_ = EMU_BAD_SOCK;
     bool reuse_ = false;
     std::map<std::string, std::string> reqHeaders_, respHeaders_;
     std::vector<std::string> collect_;
@@ -42,22 +99,23 @@ class HTTPClient {
 
     static double nowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
-    void closeSocket() { if (fd_ >= 0) { ::close(fd_); fd_ = -1; } }
+    void closeSocket() { if (fd_ != EMU_BAD_SOCK) { emu_net::closeSock(fd_); fd_ = EMU_BAD_SOCK; } }
 
     int connectNow()
     {
+        emu_net::init();
         struct addrinfo hints = {}, *res = nullptr;
         hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
         if (getaddrinfo(host_.c_str(), std::to_string(port_).c_str(), &hints, &res) != 0 || !res) return HTTPC_ERROR_CONNECTION_REFUSED;
-        int fd = ::socket(res->ai_family, res->ai_socktype, 0);
-        struct timeval tv = {5, 0};                     // the ESP32 HTTPClient default timeout is 5 s
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-        int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        emu_sock_t fd = ::socket(res->ai_family, res->ai_socktype, 0);
+        if (fd == EMU_BAD_SOCK) { freeaddrinfo(res); return HTTPC_ERROR_CONNECTION_REFUSED; }
+        emu_net::setTimeouts(fd, 5000);                  // the ESP32 HTTPClient default timeout is 5 s
+        emu_net::noDelay(fd);
         const double t0 = nowMs();
-        const int rc = ::connect(fd, res->ai_addr, res->ai_addrlen);
+        bool timedOut = false;
+        const bool ok = emu_net::connectTimeout(fd, res->ai_addr, (int)res->ai_addrlen, 5000, timedOut);
         freeaddrinfo(res);
-        if (rc != 0) { ::close(fd); return errno == EINPROGRESS || errno == EAGAIN ? HTTPC_ERROR_READ_TIMEOUT : HTTPC_ERROR_CONNECTION_REFUSED; }
+        if (!ok) { emu_net::closeSock(fd); return timedOut ? HTTPC_ERROR_READ_TIMEOUT : HTTPC_ERROR_CONNECTION_REFUSED; }
         EmuNetStats& st = emuNet();
         ++st.connects; st.connectMsMax = std::max(st.connectMsMax, nowMs() - t0);
         fd_ = fd;
@@ -68,7 +126,7 @@ class HTTPClient {
     {
         size_t off = 0;
         while (off < s.size()) {
-            const ssize_t n = ::send(fd_, s.data() + off, s.size() - off, MSG_NOSIGNAL);
+            const int n = (int)::send(fd_, s.data() + off, (int)(s.size() - off), MSG_NOSIGNAL);
             if (n <= 0) return false;
             off += (size_t)n;
         }
@@ -82,9 +140,9 @@ class HTTPClient {
         char tmp[2048];
         size_t headEnd = std::string::npos;
         while ((headEnd = buf.find("\r\n\r\n")) == std::string::npos) {
-            const ssize_t n = ::recv(fd_, tmp, sizeof tmp, 0);
+            const int n = (int)::recv(fd_, tmp, (int)sizeof tmp, 0);
             if (n == 0) return HTTPC_ERROR_CONNECTION_LOST;
-            if (n < 0) return (errno == EAGAIN || errno == EWOULDBLOCK) ? HTTPC_ERROR_READ_TIMEOUT : HTTPC_ERROR_CONNECTION_LOST;
+            if (n < 0) return emu_net::timedOut() ? HTTPC_ERROR_READ_TIMEOUT : HTTPC_ERROR_CONNECTION_LOST;
             buf.append(tmp, (size_t)n);
         }
         const std::string head = buf.substr(0, headEnd);
@@ -115,7 +173,7 @@ class HTTPClient {
         body_ = rest;
         if (status == 204 || status == 304) contentLength = 0;
         while (contentLength >= 0 ? (long)body_.size() < contentLength : true) {
-            const ssize_t n = ::recv(fd_, tmp, sizeof tmp, 0);
+            const int n = (int)::recv(fd_, tmp, (int)sizeof tmp, 0);
             if (n == 0) { serverCloses = true; break; }
             if (n < 0) return HTTPC_ERROR_READ_TIMEOUT;
             body_.append(tmp, (size_t)n);
@@ -129,8 +187,8 @@ class HTTPClient {
         const bool isPoll = path_ == "/controller" && std::string(method) == "GET";
         int status = HTTPC_ERROR_NOT_CONNECTED;
         for (int attempt = 0; attempt < 2; ++attempt) {
-            const bool reusedSocket = fd_ >= 0;
-            if (fd_ < 0) {
+            const bool reusedSocket = fd_ != EMU_BAD_SOCK;
+            if (fd_ == EMU_BAD_SOCK) {
                 status = connectNow();
                 if (status != 0) break;
             }

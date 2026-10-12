@@ -110,8 +110,8 @@ class EmulatedEsp32(unittest.TestCase):
     def setUpClass(cls):
         if os.environ.get("ROOBOT_SKIP_SLOW"):
             raise unittest.SkipTest("ROOBOT_SKIP_SLOW is set")
-        if not (shutil.which("g++") and shutil.which("patch")):
-            raise unittest.SkipTest("needs g++ and patch")
+        if not (shutil.which("g++") and emulator.have_patch_tool()):
+            raise unittest.SkipTest("needs g++ and git or patch")
         cls.tmp = tempfile.mkdtemp()
         cls.exe = {k: emulator.build(k, cls.tmp) for k in ("stock", "patched")}
 

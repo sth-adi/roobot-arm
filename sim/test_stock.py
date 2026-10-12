@@ -8,11 +8,15 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 from armsim import ArmSim, forward_kin
 from test_firmware import ticks
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "emu"))
+from emulator import EXE, apply_patch, compiler, have_patch_tool  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FW = os.path.join(HERE, "..", "firmware")
@@ -22,27 +26,27 @@ PATCH = os.path.join(FW, "stock", "patches", "damper-and-failsafes.patch")
 
 
 def build(src_dir, out):
-    r = subprocess.run(["g++", "-std=c++17", "-I" + STUBS, "-I" + src_dir, HARNESS, "-o", out],
+    out += EXE
+    r = subprocess.run([compiler(), "-std=c++17", "-I" + STUBS, "-I" + src_dir, HARNESS, "-o", out],
                        capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError(r.stderr)
+    return out
 
 
 class StockFirmware(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if not (shutil.which("g++") and shutil.which("patch")):
-            raise unittest.SkipTest("needs g++ and patch")
+        if not (shutil.which("g++") and have_patch_tool()):
+            raise unittest.SkipTest("needs g++ and git or patch")
         cls.dir = tempfile.mkdtemp()
         cls.stock = os.path.join(cls.dir, "stock")
         cls.patched = os.path.join(cls.dir, "patched")
-        build(os.path.join(FW, "stock", "src"), cls.stock)
+        cls.stock = build(os.path.join(FW, "stock", "src"), cls.stock)
         tree = os.path.join(cls.dir, "tree")
         shutil.copytree(os.path.join(FW, "stock", "src"), os.path.join(tree, "src"))
-        r = subprocess.run(["patch", "-p1", "-d", tree, "-i", PATCH], capture_output=True, text=True)
-        if r.returncode:
-            raise RuntimeError("patch does not apply to the stock firmware:\n" + r.stdout + r.stderr)
-        build(os.path.join(tree, "src"), cls.patched)
+        apply_patch(tree, PATCH)
+        cls.patched = build(os.path.join(tree, "src"), cls.patched)
 
     @classmethod
     def tearDownClass(cls):

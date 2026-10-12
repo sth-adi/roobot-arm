@@ -40,6 +40,14 @@ def hub_build(hub_url):
         return None
 
 
+def hub_phone_url(hub_url):
+    try:
+        import json
+        return json.loads(urllib.request.urlopen(hub_url + "/api/status", timeout=1.5).read()).get("phone_url")
+    except Exception:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--local-only", action="store_true", help="do not accept connections from other devices")
@@ -83,6 +91,15 @@ def main():
                 time.sleep(0.2)
             else:
                 raise SystemExit("the hub did not start")
+        phone = hub_phone_url(hub_url)
+        if phone:
+            bar = "=" * (len(phone) + 4)
+            print("\n" + bar + "\n  PHONE LINK (same WiFi):\n  " + phone + "\n" + bar + "\n")
+            try:
+                with open(os.path.join(ROOT, "phone_link.txt"), "w") as f:
+                    f.write(phone + "\n")
+            except OSError:
+                pass
         if not a.no_open:
             webbrowser.open(hub_url + "/#/arm")
         if kids:

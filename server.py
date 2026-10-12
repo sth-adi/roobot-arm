@@ -111,27 +111,36 @@ def _forward_worker():
     while True:
         _fwd_wake.wait(timeout=0.5)
         _fwd_wake.clear()
+        try:
+            last_count, neutral_sent = _forward_once(last_count, neutral_sent)
+        except Exception as e:          # never let the forwarder die: a dead one stops the arm being told to stop
+            print("forwarder error:", e, flush=True)
+            time.sleep(0.5)
+
+
+def _forward_once(last_count, neutral_sent):
+    with _lock:
+        data, count, rec = _state["data"], _state["count"], _state["received_at"]
+        flush = _fwd["flush_neutral"]
+        _fwd["flush_neutral"] = False
+    if data is None:
+        return last_count, neutral_sent
+    if flush:                         # forwarding was just paused (SAFE): stop whatever the arm is doing
+        neutral_sent = True
         with _lock:
-            data, count, rec = _state["data"], _state["count"], _state["received_at"]
-            flush = _fwd["flush_neutral"]
-            _fwd["flush_neutral"] = False
-        if data is None:
-            continue
-        if flush:                         # forwarding was just paused (SAFE): stop whatever the arm is doing
-            neutral_sent = True
+            _fwd["neutrals"] += 1
+        _post_forward(_neutral_of(data))
+    if count != last_count:
+        last_count, neutral_sent = count, False
+        if _fwd["enabled"]:           # paused via POST /control: drop it, never queue for later
+            _post_forward(data)
+    elif not neutral_sent and rec is not None and time.time() - rec >= STALE_S:
+        neutral_sent = True
+        if _fwd["enabled"]:
             with _lock:
                 _fwd["neutrals"] += 1
             _post_forward(_neutral_of(data))
-        if count != last_count:
-            last_count, neutral_sent = count, False
-            if _fwd["enabled"]:           # paused via POST /control: drop it, never queue for later
-                _post_forward(data)
-        elif not neutral_sent and rec is not None and time.time() - rec >= STALE_S:
-            neutral_sent = True
-            if _fwd["enabled"]:
-                with _lock:
-                    _fwd["neutrals"] += 1
-                _post_forward(_neutral_of(data))
+    return last_count, neutral_sent
 
 
 class Handler(BaseHTTPRequestHandler):

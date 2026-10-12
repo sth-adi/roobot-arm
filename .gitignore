@@ -14,5 +14,3 @@ secrets.h
 .hub_token
 phone_link.txt
 sequences/
-
-dashboard/studio/node_modules/

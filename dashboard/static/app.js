@@ -1105,6 +1105,7 @@ function mountArm(root) {
         <p class="note">Sticks have a 20% dead zone. Saved positions live in the ESP32's memory only: they are lost when it restarts.</p></details>
       <div class="sidesec"><h2>Electromagnet and keys</h2>
         <div class="inline"><button class="btn sm" id="w-mag" type="button" aria-pressed="false">Magnet off</button><button class="btn sm" id="w-reset" type="button">Reset keys</button></div>
+        <div class="inline" style="margin-top:6px"><button class="btn sm" id="s-send" type="button">Send sequence to host</button><button class="btn sm" id="s-copy" type="button">Copy JSON</button><button class="btn sm" id="s-load" type="button">Load JSON</button></div>
         <div class="note" style="margin-top:6px">Hold the tip within 2 cm of a key and switch the magnet on to pick it up. Switch it off to let go: it falls onto whatever is below. The X button does the same.</div>
         <div class="note mono" id="w-keys"></div></div>
       <div class="sidesec"><h2>Emulated ESP32</h2>
@@ -1128,6 +1129,14 @@ function mountArm(root) {
   const model = $r("#a-model");
   model.addEventListener("change", async () => { const v = model.value; await api("/api/sim", { model: v === "improved" ? "improved" : "stock", patch: v === "stock-patch" }); });
   $r("#w-mag").addEventListener("click", async () => { const r = await api("/api/world", { magnet: "toggle" }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
+  $r("#s-send").addEventListener("click", async () => { const r = await api("/api/sequence", {}); toast(r.ok ? `Sent ${r.packet.count} positions to the host: ${r.path}` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); });
+  $r("#s-copy").addEventListener("click", async () => {
+    try { const j = JSON.stringify(await (await fetch("/api/sequence")).json(), null, 2); await navigator.clipboard.writeText(j); toast("Sequence JSON copied", "ok"); }
+    catch (e) { toast("Could not copy; use Send sequence to host", "bad"); } });
+  $r("#s-load").addEventListener("click", async () => {
+    const t = window.prompt("Paste a sequence JSON packet"); if (!t) return;
+    let pkt; try { pkt = JSON.parse(t); } catch (e) { return toast("That is not valid JSON", "bad"); }
+    const r = await api("/api/sequence", { load: pkt }); toast(r.ok ? `Loaded ${r.loaded} positions` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); });
   $r("#w-reset").addEventListener("click", () => api("/api/world", { reset: true }));
   $r("#s-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($r("#s-url").value); toast("Link copied", "ok"); } catch (e) { $r("#s-url").select(); } });
   const emu = async (b) => { const r = await api("/api/emu", b); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); };

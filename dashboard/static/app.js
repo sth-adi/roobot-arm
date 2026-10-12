@@ -1240,7 +1240,7 @@ function onStatus() {
   S.ppsHist.push(S.st.pps); if (S.ppsHist.length > 120) S.ppsHist.shift();
   updateArm();
   const h = $("#hubState");
-  h.className = "st " + (S.ok ? "ok" : "bad"); h.textContent = S.ok ? "Hub connected" : "Hub offline";
+  h.className = "st " + (S.ok ? "ok" : "bad"); h.textContent = S.ok ? "Hub connected" + (S.st.build ? " (build " + S.st.build + ")" : "") : "Hub offline";
   const bn = $("#banner");
   bn.hidden = S.ok;
   if (!S.ok) bn.textContent = "The hub is not reachable. Start it with: python dashboard/hub.py. This page reconnects by itself.";

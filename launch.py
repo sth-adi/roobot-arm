@@ -19,6 +19,8 @@ import urllib.request
 import webbrowser
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(ROOT, "dashboard"))
+from stamp import code_stamp  # noqa: E402
 
 
 def up(url, timeout=0.6):
@@ -27,6 +29,15 @@ def up(url, timeout=0.6):
         return True
     except Exception:
         return False
+
+
+def hub_build(hub_url):
+    """The build id of a hub that is already running, None if there is none (or it is too old to say)."""
+    try:
+        import json
+        return json.loads(urllib.request.urlopen(hub_url + "/api/status", timeout=1.5).read()).get("build") or "unknown"
+    except Exception:
+        return None
 
 
 def main():
@@ -45,6 +56,20 @@ def main():
             print("input server already running on :%d" % a.server_port)
         else:
             kids.append(subprocess.Popen([py, os.path.join(ROOT, "server.py")], cwd=ROOT))
+        old = hub_build(hub_url)
+        if old is not None and old != code_stamp():
+            print("an older hub is running (build %s, files are %s): replacing it" % (old, code_stamp()))
+            try:
+                urllib.request.urlopen(urllib.request.Request(hub_url + "/api/shutdown", data=b"{}", method="POST", headers={"X-Hub": "1"}), timeout=3).read()
+            except Exception:
+                pass
+            for _ in range(30):
+                if not up(hub_url + "/api/status"):
+                    break
+                time.sleep(0.2)
+            else:
+                print("could not stop the old hub: close its window (or end its python process) and run this again")
+                return
         if up(hub_url + "/api/status"):
             print("hub already running: opening it")
         else:

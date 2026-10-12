@@ -778,7 +778,8 @@ class Hub:
                     "holding": held is not None, "home_grip": at_home and not esp.get("magnet") and held is None,
                     "mode": "running" if esp.get("mode") == "sequence" else esp.get("mode"), "saved": esp.get("saved"),
                     "running_step": esp.get("step") if esp.get("mode") == "sequence" else None, "keys": keys,
-                    "last_run": self.last_run, "task": dict(self.task)}
+                    "last_run": self.last_run, "task": dict(self.task),
+                    "ai": "groq" if AGENT.api_key() else "keywords", "armed": self.armed, "poses": [list(p) for p in self.sim.saved]}
         with self.sim_lock:
             x, y, z, th = self.sim.pose()
             hx, hy, hz, _ = forward_kin(self.sim._home_angles(), self.sim.tool)
@@ -788,7 +789,8 @@ class Hub:
                     "pose": {"x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "angle": round(th, 1)},
                     "at_home": at_home, "magnet": self.cell.magnet, "holding": held is not None, "home_grip": at_home and not self.cell.magnet and held is None,
                     "mode": "running" if self.sim.replaying else self.sim.mode, "saved": len(self.sim.saved), "running_step": self.sim.replay_idx if self.sim.replaying else None,
-                    "keys": {str(k["id"]): self.cell.where(k) for k in self.cell.keys}, "last_run": self.last_run, "task": dict(self.task)}
+                    "keys": {str(k["id"]): self.cell.where(k) for k in self.cell.keys}, "last_run": self.last_run, "task": dict(self.task),
+                    "ai": "groq" if AGENT.api_key() else "keywords", "armed": self.armed, "poses": [list(p) for p in self.sim.saved]}
 
     task = {"state": "idle"}
     last_run = None
@@ -869,7 +871,9 @@ class Hub:
         seq = SEQ.validate(pkt)
         if reverse:
             seq = SEQ.reverse(seq)
-        if run and self.esp_state():                   # the ESP32 runs it itself: wipe, load, go, wait for arrival at each pose
+        if run and self.esp_state():                   # the ESP32 runs it itself
+            if not (self.armed or self.emu.running):
+                raise ValueError("the output is SAFE: arm it first, because this would move the real arm")
             r = self._http("/sequence", {"poses": seq["poses"]}, timeout=2.0)
             self._run_once, self._esp_run = len(seq["poses"]), r["id"]
             self.log("hub", "sent sequence %s%s to the ESP32 (id %d)" % (seq["name"] or "(unnamed)", " (reversed)" if reverse else "", r["id"]))
@@ -1064,6 +1068,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/events":
             return self._events()
         if path == "/":
+            path = "/studio/index.html" if (STATIC / "studio" / "index.html").is_file() and "legacy" not in self.path else "/index.html"
+        elif path in ("/legacy", "/legacy.html"):
             path = "/index.html"
         f = (STATIC / path.lstrip("/")).resolve()
         if STATIC.resolve() not in f.parents or not f.is_file():
@@ -1142,6 +1148,10 @@ class Handler(BaseHTTPRequestHandler):
                         HUB.sim.toggle_replay() if r == "toggle" else (HUB.sim.start_replay() if r else HUB.sim.stop_replay())
                     if "model" in d:
                         HUB.sim.set_model(d["model"], bool(d.get("patch")))
+                    if d.get("save_here"):
+                        if not HUB.sim.save_here():
+                            return self._json(409, {"error": "the saved list is full (20 poses)"})
+                        HUB.cell.saved_magnet = (HUB.cell.saved_magnet + [HUB.cell.magnet])[:len(HUB.sim.saved)]
                     if d.get("home"):
                         HUB.sim.go_home()
                     if d.get("clear_saved"):

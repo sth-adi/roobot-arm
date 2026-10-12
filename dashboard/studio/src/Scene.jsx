@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Environment, Grid, PerformanceMonitor, Html, Lightformer, Line, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
-import { live, useStore } from "./store.js";
+import { live, samplePose, useStore } from "./store.js";
 
 const V = (a) => new THREE.Vector3(a[0], a[1], a[2]);
 const AL = "#b9c2cf", AL2 = "#8e98a8", SERVO = "#232830", COPPER = "#c0743a";
@@ -55,13 +55,10 @@ function Arm() {
   const trailGeo = useMemo(() => { const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(160 * 3), 3)); g.setDrawRange(0, 0); return g; }, []);
 
   useFrame((_, dt) => {
-    const p = live.pose;
+    const p = samplePose(performance.now());
     if (!p || !p.points) return;
     const target = p.points.map(V);
-    if (!disp.current) disp.current = target.map((v) => v.clone());
-    const k = 1 - Math.exp(-dt * 20);
-    disp.current.forEach((v, i) => v.lerp(target[i], k));
-    const P = disp.current, ref = refs.current;
+    const P = target, ref = refs.current;
     const base = ((p.angles[0] - 90) * Math.PI) / 180;
     const d = _x.set(Math.sin(base), Math.cos(base), 0).clone(), l = new THREE.Vector3(Math.cos(base), -Math.sin(base), 0), up = new THREE.Vector3(0, 0, 1);
     const S = (v, s) => v.clone().multiplyScalar(s);
@@ -130,7 +127,7 @@ function Cell() {
   const w = useStore((s) => s.pose && s.pose.world ? { boxes: s.pose.world.boxes, inner: s.pose.world.box_inner, wall: s.pose.world.box_wall, h: s.pose.world.box_height, fl: s.pose.world.box_floor, tray: s.pose.world.tray, half: s.pose.world.tray_half, top: s.pose.world.tray_top, n: s.pose.world.keys.length } : null);
   const keys = useRef([]);
   useFrame(() => {
-    const p = live.pose;
+    const p = samplePose(performance.now());
     if (!p || !p.world) return;
     p.world.keys.forEach((k, i) => {
       const g = keys.current[i]; if (!g) return;

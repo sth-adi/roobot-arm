@@ -737,7 +737,7 @@ class Hub:
             try:
                 r = self._http("/armstate", timeout=0.8)
                 st = r.get("state")
-                if st and "seqDone" in st and r.get("age_s") is not None and r["age_s"] < 4.0:
+                if st and "seqDone" in st and r.get("age_s") is not None and r["age_s"] < 15.0:
                     self._esp = (st, time.time() - r["age_s"])
                 else:
                     self._esp = None
@@ -753,7 +753,7 @@ class Hub:
 
     def esp_state(self):
         e = self._esp
-        return e[0] if e and time.time() - e[1] < 4.0 else None
+        return e[0] if e and time.time() - e[1] < 15.0 else None
 
     def _esp_tap(self, button, hold=0.8):
         try:

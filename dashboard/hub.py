@@ -820,6 +820,8 @@ class Handler(BaseHTTPRequestHandler):
                         HUB.sim.set_rate(d["rate"])
                     if "tool" in d:
                         HUB.sim.set_tool(d["tool"])
+                    if "model" in d:
+                        HUB.sim.set_model(d["model"], bool(d.get("patch")))
                     if d.get("home"):
                         HUB.sim.go_home()
                     if d.get("clear_saved"):

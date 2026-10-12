@@ -301,6 +301,14 @@ function mountControl(root) {
         <div class="inline" style="margin-top:12px"><button class="btn sm" id="a-home" type="button">${icon("arrows-clockwise", "sm")}Go home</button>
           <button class="btn sm" id="a-clear" type="button">${icon("trash", "sm")}Clear saved positions</button></div>
       </section>
+      <section class="sec"><h2>Firmware to simulate</h2>
+        <p class="lead">Which control logic the virtual arm runs. Stock is the UWE-RArm firmware exactly as it is, quirks included; the patched version adds only the damper and a few failsafes.</p>
+        <div class="field"><select id="c-model" aria-label="Firmware to simulate">
+          <option value="improved">Reference (this repo's model)</option>
+          <option value="stock">Stock UWE-RArm firmware</option>
+          <option value="stock-patch">Stock + damper and failsafes patch</option></select>
+          <div class="note" id="c-model-n"></div></div>
+      </section>
       <section class="sec"><h2>Damper</h2>
         <p class="lead">The fastest any joint may move, in degrees per second. It applies to the sticks, Go home and replay. All four joints are slowed together, so the tool keeps to its path. A joint is never faster than this.</p>
         <div class="field"><div class="inline"><input type="range" id="c-rate" min="0" max="60" step="1" aria-label="Fastest joint speed in degrees per second"><span class="mono" id="c-rate-v" style="min-width:90px;text-align:right"></span></div>
@@ -351,6 +359,12 @@ function mountControl(root) {
   slider.value = cfg.rate;
   slider.addEventListener("input", () => { cfg.rate = +slider.value; E.userRateT = performance.now(); pushRate(cfg.rate); });
   slider.addEventListener("change", () => { E.userRateT = performance.now(); pushRate(+slider.value, true); });
+  // firmware model
+  const modelSel = $r("#c-model");
+  modelSel.addEventListener("change", async () => {
+    const v = modelSel.value, r = await api("/api/sim", { model: v === "improved" ? "improved" : "stock", patch: v === "stock-patch" });
+    if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
+  });
   // actions
   $r("#a-home").addEventListener("click", async () => { const r = await api("/api/sim", { home: true }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
   $r("#a-clear").addEventListener("click", async () => { const r = await api("/api/sim", { clear_saved: true }); toast(r.ok ? "Saved positions cleared" : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); });
@@ -388,9 +402,15 @@ function mountControl(root) {
       else { el.className = "st warn"; el.textContent = "ARMED, waiting to send"; }
       $r("#c-info").textContent = E.source === "gamepad" ? (E.gpName ? `Controller found: ${E.gpName}${E.gpStd ? "" : ". Not the standard layout, so buttons may be mapped wrongly: use the pygame window instead."}` : "No controller reported yet. Press a button on it.")
         : E.source === "server" && E.idle ? "No live input at the local server right now." : "";
+      const sm = st.sim;
+      if (sm && document.activeElement !== modelSel) modelSel.value = sm.model === "stock" ? (sm.patch ? "stock-patch" : "stock") : "improved";
+      $r("#c-model-n").textContent = !sm ? "" : sm.model !== "stock"
+        ? "Single source of truth for the pose: moving after Go home starts from home."
+        : sm.patch ? "Stock logic plus: speed limit on the servo output, input capped at 100 ms per packet, stick input pauses while the arm lags its target by 25 degrees, Go home waits for arrival and re-syncs the target."
+        : `As shipped: no speed limit, the XYZ target is separate from the arm (target ${sm.target ? sm.target.join(", ") : "-"}), Go home gives up after 3 s, and once it ends the arm swings back to the pre-home target.`;
       slider.value = cfg.rate;
       $r("#c-rate-v").textContent = cfg.rate > 0 ? `${cfg.rate} deg/s` : "no limit";
-      $r("#c-rate-n").textContent = cfg.rate > 0 ? `A 90 degree joint move takes at least ${Math.round(90 / cfg.rate)} s.` : "No limit: joints are capped at 180 deg/s.";
+      $r("#c-rate-n").textContent = sm && sm.model === "stock" && !sm.patch ? "The stock firmware has no speed limiter: this setting is ignored in this mode." : cfg.rate > 0 ? `A 90 degree joint move takes at least ${Math.round(90 / cfg.rate)} s.` : "No limit: joints are capped at 180 deg/s.";
       if (!dirty && st.sim) fill(st.sim);
     },
     frame(st) {

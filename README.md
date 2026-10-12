@@ -14,6 +14,9 @@ Unmodified stock and the reference model are still selectable for comparison.
 The Robot page shows a small work cell: three boxes, each holding a key, and a tray (`sim/workcell.py` has the positions). The arm ends in a simulated electromagnet.
 Bring the tool tip within 2 cm of a key and switch the magnet on to pick it up; it travels with the tip. Switch the magnet off and it falls onto whatever is below: a box floor, the tray, or the floor.
 Switch it with the *Magnet* button in the side panel or the **X** button of the controller (each press toggles it; the packet field `X` is already sent). *Reset keys* puts the keys back.
+**One-press replay:** the *Play saved* button (or **Y** on the controller) starts the replay and keeps it looping with nothing held; press again to stop. Holding A still works but stops whenever A or the connection blips.
+One-press replay is simulation only: the real firmware replays only while A is held.
+
 **Recording the magnet in a sequence:** each saved position (tap A) also remembers whether the magnet was on. To record a pick-up, move to the key, tap A (magnet off), switch the magnet on, tap A again (same spot, magnet on);
 carry the key over, tap A, switch the magnet off, tap A. Holding A then replays the moves and switches the magnet to each saved state when the arm gets there. The Robot page shows which saved positions have the magnet on.
 This is simulated only (the virtual arm, not the emulated ESP32, since the emulated firmware keeps its own saved list) and lives in the hub: the firmware's saved positions have no magnet field.

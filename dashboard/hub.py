@@ -261,7 +261,7 @@ class Hub:
                         # emulated firmware's (which the hub cannot see); arrival is judged from the arm that is drawn
                         before = self.cell.magnet
                         self.cell.track_saved(self.sim.saved, self.sim.replaying, self.sim.replay_idx, snap["points"][4])
-                        if self._run_once and self.cell.last_applied == self._run_once - 1 and self.cell._pending is None:
+                        if self._run_once and self.cell.run_finished(self._run_once):
                             self._run_once = None
                             self.sim.stop_replay()
                             self.log("hub", "sequence finished")
@@ -822,7 +822,7 @@ class Hub:
             self.cell.last_applied = None
             self._run_once = len(saved) if run else None
             if run:
-                self.sim.start_replay(wait_arrival=True)
+                self.sim.start_replay(wait_arrival=True, once=True)
         if run:
             self.log("hub", "running sequence %s%s once" % (seq["name"] or "(unnamed)", " (reversed)" if reverse else ""))
         return seq

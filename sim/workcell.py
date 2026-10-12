@@ -132,6 +132,11 @@ class Workcell:
             self.set_magnet(self.saved_magnet[self._pending])
             self._pending = None
 
+    def run_finished(self, n):
+        """A one-off run of n positions is over once the magnet action of the last one has been applied (on arrival, or when the replay
+        moved on before the check saw the arrival: then a new target is already pending, which must not count as a second lap)."""
+        return n > 0 and self.last_applied == n - 1
+
     def snapshot(self):
         r1 = lambda v: round(v, 1)
         return {"magnet": self.magnet, "held": self.held, "saved_magnet": list(self.saved_magnet),

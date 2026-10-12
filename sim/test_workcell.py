@@ -110,3 +110,19 @@ class RepeatRunTest(unittest.TestCase):
             c.keys[1]["pos"] = [222, 60, 5]                      # the key ends up on the tray
             c.track_saved(saved, True, 4, saved[0][:3])          # next lap starts
             self.assertEqual(c.keys[1]["pos"][:2], [0, 240], "run %d" % run)
+
+
+class RunOnceTest(unittest.TestCase):
+    def test_finished_even_when_the_replay_moved_on_before_arrival_was_seen(self):
+        c = Workcell()
+        saved = [(0, 240, 60, 0), (0, 240, 20, 0), (222, 60, 60, 0)]
+        c.saved_magnet = [False, True, False]
+        c.reset_keys_on_lap = False
+        c.last_applied = None
+        c.track_saved(saved, True, 1, (0, 100, 200))      # heading for #1
+        c.track_saved(saved, True, 2, saved[1][:3])
+        c.track_saved(saved, True, 3, (200, 80, 80))      # heading for the last pose, not there yet
+        self.assertFalse(c.run_finished(3))
+        c.track_saved(saved, True, 4, (210, 70, 70))      # the replay wrapped to #1 before the arrival was seen: flush applies #3
+        self.assertTrue(c.run_finished(3))
+        self.assertFalse(c.magnet)

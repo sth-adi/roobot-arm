@@ -18,6 +18,7 @@ The hub only listens on 127.0.0.1 and rejects cross-origin requests.
 import argparse
 import collections
 import json
+import math
 import mimetypes
 import os
 import queue
@@ -37,8 +38,10 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 STATIC = HERE / "static"
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(HERE))
 from serial_link import SerialLink, BUTTON_ORDER  # noqa: E402
 from sim.armsim import ArmSim, STALE_S, internal_from_wire, wire_from_internal  # noqa: E402
+from emu_runner import EmuRunner  # noqa: E402
 
 IS_WIN = sys.platform == "win32"
 NOWIN = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
@@ -108,6 +111,8 @@ class Hub:
         self.sim_lock = threading.Lock()
         self._sim_status_sent = None
         self._cal_synced = False
+        self.emu = EmuRunner(self.server, self.log)   # emulated ESP32 + network (Control page)
+        self.emu_view = ArmSim()                # the emulated servos drawn as an arm
         self.packets = collections.deque(maxlen=500)
         self.packet_times = collections.deque(maxlen=400)
         self.stream_ok = False
@@ -230,12 +235,29 @@ class Hub:
             try:
                 with self.sim_lock:
                     self.sim.step(wire, dt)
-                    snap = self.sim.snapshot() if now - pose_t >= 0.04 else None
+                    snap = self._pose_snapshot() if now - pose_t >= 0.04 else None
                 if snap is not None:
                     pose_t = now
                     self.publish("pose", snap)
             except Exception as e:                  # never let the simulation die
                 self.log("hub", f"simulation error: {e}")
+
+    def _pose_snapshot(self):
+        """What the Control page draws: the virtual arm, or the emulated ESP32's servos while that is running.
+        Call with sim_lock held."""
+        got = self.emu.servo_angles_deg(self.sim.limits) if self.emu.running else None
+        if got is None:
+            return self.sim.snapshot()
+        deg, attached = got
+        v = self.emu_view
+        v.limits, v.homes, v.tool = self.sim.limits, self.sim.homes, self.sim.tool
+        v.angles = [math.radians(a) for a in deg]
+        v.attached, v.mode, v.model, v.patch = attached, "emulated", "improved", False
+        v.status, v.rate = "emulated ESP32", self.sim.rate
+        v.saved, v.replay_idx = [], 0
+        snap = v.snapshot()
+        snap["emulated"] = True
+        return snap
 
     def _post_text(self, path, text, timeout=0.6):
         req = urllib.request.Request(self.server + path, data=text.encode("utf-8"), method="POST",
@@ -293,6 +315,8 @@ class Hub:
             self._speed_synced = self.push_speed()
         with self.sim_lock:
             status = self.sim.status
+        if self.emu.state in ("building", "running"):
+            return                                  # the emulated firmware reports its own status
         if status != self._sim_status_sent:
             try:
                 self._post_text("/status", status)
@@ -656,11 +680,28 @@ class Hub:
             "config": {"env_present": (ROOT / ".env").exists(), "forward_url_set": bool(self.env_forward())},
             "project": self.cache["git"],
             "sim": self._sim_snapshot(),
+            "emu": self.emu.snapshot(),
+            "emu_input": self.emu.running and self.forward_control is True and not self.armed,
         }
 
     def _sim_snapshot(self):
         with self.sim_lock:
-            return self.sim.snapshot()
+            return self._pose_snapshot()
+
+    def emu_action(self, d):
+        a = d.get("action")
+        if a == "start":
+            self.push_calibration()                 # the firmware reads /calibration at boot
+            self.emu.start(str(d.get("firmware", "stock")), str(d.get("preset", "home_wifi")))
+        elif a == "stop":
+            self.emu.stop()
+        elif a == "link":
+            fields = {k: d[k] for k in ("preset", "rtt_ms", "jitter_ms", "loss", "tls_cpu_ms", "keepalive") if k in d}
+            self.emu.set_link(str(d.get("path", "both")), **fields)
+        elif a == "outage":
+            self.emu.outage(str(d.get("path", "esp")), d.get("seconds", 3))
+        else:
+            raise ValueError("unknown action")
 
     def hello(self):
         return {"status": self.snapshot(), "packets": list(self.packets)[-120:],
@@ -685,6 +726,7 @@ class Hub:
             self.link.update(NEUTRAL)
         except Exception:
             pass
+        self.emu.stop()
         self.set_forward(True)                      # leave the server as it behaved before the hub existed
         self.link.close()
 
@@ -805,10 +847,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"armed": HUB.armed, "forward_control": HUB.forward_control})
             if path == "/api/input":
                 st = clean_state(d)
-                if not HUB.armed:
+                ctl = HUB.emu.ctl_url()             # emulator running: sticks travel over its controller link
+                virtual = ctl is not None and HUB.forward_control is True
+                if not HUB.armed and not virtual:
                     return self._json(200, {"sent": False, "reason": "safe"})
                 try:
-                    HUB._http("/input", wire_from_internal(st), timeout=1.0)
+                    if ctl:
+                        req = urllib.request.Request(ctl + "/input", data=json.dumps(wire_from_internal(st)).encode(), method="POST",
+                                                     headers={"Content-Type": "application/json"})
+                        urllib.request.urlopen(req, timeout=3).read()
+                    else:
+                        HUB._http("/input", wire_from_internal(st), timeout=1.0)
                     return self._json(200, {"sent": True})
                 except Exception:
                     return self._json(502, {"sent": False, "reason": "local server unreachable"})
@@ -837,6 +886,12 @@ class Handler(BaseHTTPRequestHandler):
                 if push_rate:
                     HUB.push_speed()
                 return self._json(200, {"ok": True, "sim": HUB._sim_snapshot()})
+            if path == "/api/emu":              # the emulated ESP32 and its network
+                try:
+                    HUB.emu_action(d)
+                except RuntimeError as e:
+                    return self._json(409, {"error": str(e)})
+                return self._json(200, {"ok": True, "emu": HUB.emu.snapshot()})
             if path == "/api/board":
                 cmd = str(d.get("cmd", "")).strip()
                 if not BOARD_CMD_RE.match(cmd):

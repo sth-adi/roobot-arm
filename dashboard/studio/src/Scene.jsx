@@ -1,8 +1,8 @@
 // The 3D view: an AL5D-style arm (last joint and gripper removed, electromagnet at the tip), the work cell and the taught path.
 // Units are millimetres, z up, the same frame as the hub's arm model. The hub streams the five joint points; this only draws them.
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Environment, Grid, Html, Lightformer, Line, OrbitControls } from "@react-three/drei";
+import { Environment, Grid, PerformanceMonitor, Html, Lightformer, Line, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { live, useStore } from "./store.js";
 
@@ -195,20 +195,26 @@ function Draft({ poses, onPick }) {
   );
 }
 
-export default function Scene({ view, draft, onPick }) {
+// "fast" is the default: no environment reflections, no antialiasing, no grid shader. Those three are what make a machine without a
+// strong GPU crawl (about 2 fps in software rendering); "rich" turns them on.
+export default function Scene({ view, draft, onPick, rich }) {
+  const off = (k) => !rich && ["env", "aa", "grid"].includes(k);
+  const [dpr, setDpr] = useState(1);          // lowered automatically when the machine cannot keep up
   return (
-    <Canvas shadows="soft" dpr={[1, 2]} camera={{ position: PRESETS.iso.pos, fov: 38, near: 10, far: 6000, up: [0, 0, 1] }} gl={{ antialias: true, alpha: true }}
+    <Canvas key={rich ? "rich" : "fast"} shadows dpr={dpr} frameloop="always" camera={{ position: PRESETS.iso.pos, fov: 38, near: 10, far: 6000, up: [0, 0, 1] }} gl={{ antialias: !off("aa"), alpha: true }}
       onCreated={({ gl }) => { gl.toneMapping = THREE.ACESFilmicToneMapping; gl.toneMappingExposure = 1.05; }}>
-      <Environment resolution={256} frames={1} background={false}>
+      {!off("env") && <Environment resolution={256} frames={1} background={false}>
         <Lightformer form="rect" intensity={2.6} position={[0, -6, 6]} scale={[14, 3, 1]} rotation-x={Math.PI / 3} color="#cfe3ff" />
         <Lightformer form="rect" intensity={1.4} position={[-8, 4, 3]} scale={[8, 6, 1]} rotation-y={Math.PI / 2} color="#9bb8ff" />
         <Lightformer form="rect" intensity={1.8} position={[8, 3, 4]} scale={[6, 6, 1]} rotation-y={-Math.PI / 2} color="#ffd9b0" />
-      </Environment>
-      <hemisphereLight args={["#aebfd8", "#10131a", 0.55]} />
-      <directionalLight position={[350, -450, 900]} intensity={2.2} castShadow shadow-mapSize={[2048, 2048]} shadow-bias={-0.0004}
+      </Environment>}
+      <hemisphereLight args={["#aebfd8", "#10131a", rich ? 0.55 : 1.1]} />
+      {!rich && <directionalLight position={[-500, 300, 500]} intensity={0.9} color="#9bb8ff" />}
+      <directionalLight position={[350, -450, 900]} intensity={2.2} castShadow shadow-mapSize={[1024, 1024]} shadow-bias={-0.0004}
         shadow-camera-left={-650} shadow-camera-right={650} shadow-camera-top={650} shadow-camera-bottom={-650} shadow-camera-near={100} shadow-camera-far={2400} />
       <mesh position={[0, 150, -0.5]} receiveShadow><circleGeometry args={[1500, 96]} /><meshStandardMaterial color="#0d1015" roughness={0.95} metalness={0} /></mesh>
-      <Grid position={[0, 150, 0.2]} rotation={[Math.PI / 2, 0, 0]} args={[2400, 2400]} cellSize={50} cellThickness={0.6} cellColor="#1d242f" sectionSize={250} sectionThickness={1.1} sectionColor="#2b3646" fadeDistance={1700} fadeStrength={2.2} infiniteGrid />
+      {!off("grid") && <Grid position={[0, 150, 0.2]} rotation={[Math.PI / 2, 0, 0]} args={[2400, 2400]} cellSize={50} cellThickness={0.6} cellColor="#1d242f" sectionSize={250} sectionThickness={1.1} sectionColor="#2b3646" fadeDistance={1700} fadeStrength={2.2} infiniteGrid />}
+      <PerformanceMonitor onDecline={() => setDpr((d) => Math.max(0.6, d - 0.25))} onIncline={() => setDpr((d) => Math.min(1.5, d + 0.25))} flipflops={4} />
       <Arm />
       <Cell />
       <Draft poses={draft} onPick={onPick} />

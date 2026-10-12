@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Robot arm hub: the local dashboard and its control API (Python standard library; pyserial optional).
 
-    python dashboard/hub.py [--port 8765] [--server http://127.0.0.1:8000] [--no-open]
+    python dashboard/hub.py [--port 8765] [--server http://127.0.0.1:8000] [--no-open] [--send-speed]
 
 Serves the dashboard at http://127.0.0.1:8765 and gives it one place to
   - watch live controller packets (from the local server's /stream),
@@ -89,8 +89,9 @@ def describe(prev, cur):
 
 
 class Hub:
-    def __init__(self, server_url):
+    def __init__(self, server_url, send_speed=False):
         self.server = server_url.rstrip("/")
+        self.send_speed = send_speed            # off: packets reach the arm exactly as the stock UWE-RArm firmware expects
         self.stop = threading.Event()
         self.lock = threading.RLock()
         self.clients = []                       # SSE queues
@@ -253,7 +254,10 @@ class Hub:
 
     def push_speed(self):
         """Send the damper to the server as "maxSpeed", which it adds to every packet for the real arm. The firmware
-        accepts 1-60 deg/s, so 0 (no limit in the simulation) goes as the 60 deg/s ceiling."""
+        accepts 1-60 deg/s, so 0 (no limit in the simulation) goes as the 60 deg/s ceiling.
+        Only with --send-speed: the stock firmware has no damper, so by default the slider affects the simulation only."""
+        if not self.send_speed:
+            return True
         with self.sim_lock:
             rate = self.sim.rate
         try:
@@ -857,8 +861,10 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--server", default="http://127.0.0.1:8000", help="the local input server")
     ap.add_argument("--no-open", action="store_true", help="do not open the browser")
+    ap.add_argument("--send-speed", action="store_true",
+                    help="also send the damper to the arm as maxSpeed (needs the modified firmware in firmware/rarm)")
     args = ap.parse_args()
-    HUB = Hub(args.server)
+    HUB = Hub(args.server, send_speed=args.send_speed)
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     except OSError as e:

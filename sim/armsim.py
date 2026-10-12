@@ -183,6 +183,7 @@ class ArmSim:
         self._goal = None                             # joint-space goal for home / replay moves
         self._prev = {"A": False, "B": False}
         self._a_down_t = 0.0
+        self.latched = False                          # replay started with start_replay(): keeps going without A held
         self._a_saved = False                         # the save made when A went down (undone if A is held to replay)
         self._replay_t = 0.0
         self._home_reached_t = None
@@ -340,7 +341,7 @@ class ArmSim:
             self.mode, self.replay_idx = "replay", 0
             self._replay_t = now - REPLAY_STEP_S
             self.say("Replaying saved positions")
-        if not btn_a and self.mode == "replay":
+        if not btn_a and self.mode == "replay" and not self.latched:
             self.mode, self._goal = "idle", None
             self.say("Position replay stopped")
         self._prev["A"], self._prev["B"] = btn_a, btn_b
@@ -420,6 +421,7 @@ class ArmSim:
             a = inp
             btn_a, btn_b = bool(a.get("A")), bool(a.get("B"))
             if btn_b and not self._prev["B"]:
+                self.latched = False
                 self._stock_start_home()
             self._prev["B"] = btn_b
             if btn_a and not self._prev["A"]:
@@ -438,7 +440,7 @@ class ArmSim:
                 self._replaying, self.replay_idx = True, 0
                 self._replay_ms = now - 1500
                 self.say("Replaying saved positions")
-            if not btn_a and self._replaying:
+            if not btn_a and self._replaying and not self.latched:
                 self._replaying = False
                 self.say("Position replay stopped")
             self._prev["A"] = btn_a
@@ -497,7 +499,35 @@ class ArmSim:
         self.mode = "home" if self._moving_home else "replay" if self._replaying else \
             "manual" if self._sticks_active else "idle"
 
+    def start_replay(self):
+        """Play the saved positions in a loop until stop_replay(): one press instead of holding A (the simulation only)."""
+        if not self.saved:
+            self.say("Nothing saved to replay")
+            return False
+        self.latched = True
+        if self.model == "stock":
+            if not self._replaying:
+                self._replaying, self.replay_idx, self._replay_ms = True, 0, self._ms - 1500
+        elif self.mode != "replay":
+            self.mode, self.replay_idx, self._replay_t = "replay", 0, self._clock - REPLAY_STEP_S
+        self.say("Replaying saved positions")
+        return True
+
+    def stop_replay(self):
+        self.latched = False
+        if self.model == "stock":
+            if self._replaying:
+                self._replaying = False
+                self.say("Position replay stopped")
+        else:
+            self.saved_replay_stop()
+            self._goal = None
+
+    def toggle_replay(self):
+        return self.stop_replay() if self.replaying else self.start_replay()
+
     def saved_replay_stop(self):
+        self.latched = False
         if self.mode == "replay":
             self.say("Position replay stopped")
         self.mode = "idle"
@@ -512,7 +542,7 @@ class ArmSim:
             "servo": self.servo_commands(),
             "xyz": [r1(x), r1(y), r1(z)], "tool_angle": r1(th),
             "points": [[r1(c) for c in p] for p in joint_points(self.angles, self.tool)],
-            "saved": len(self.saved), "replay_idx": self.replay_idx,
+            "saved": len(self.saved), "replay_idx": self.replay_idx, "replaying": self.replaying, "latched": self.latched,
             "rate": self.rate, "tool": self.tool, "model": self.model, "patch": self.patch,
             "target": [r1(v) for v in self._t_pos[:3]] if self.model == "stock" else None,
             "limits": self.limits, "homes": self.homes,

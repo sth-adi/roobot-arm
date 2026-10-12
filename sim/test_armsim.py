@@ -241,3 +241,36 @@ class TapAndHoldTest(unittest.TestCase):
         self._run(sim, True, 1.2)
         self.assertEqual(len(sim.saved), 1)
         self.assertNotEqual(sim.mode, "replay")
+
+
+class LatchedReplayTest(unittest.TestCase):
+    """Play saved starts a replay that needs no button held, and stop ends it."""
+
+    def test_replay_keeps_going_without_a_in_every_model(self):
+        for model, patch in (("improved", False), ("stock", False), ("stock", True)):
+            sim = A.ArmSim(model=model, patch=patch)
+            idle = {"LSX": 0, "LSY": 0, "RSX": 0, "RSY": 0, "A": False, "B": False, "X": False, "Y": False}
+            tap = dict(idle, A=True)
+            for _ in range(5):
+                sim.step(tap, 0.02)
+            for _ in range(20):
+                sim.step(idle, 0.02)
+            sim._t_pos = (sim._t_pos if model == "stock" else None) or (0, 0, 0, 0)
+            if model != "stock":
+                sim.saved.append((0.0, 240.0, 80.0, -90.0))
+            else:
+                sim.saved.append((0.0, 240.0, 80.0, -90.0))
+            self.assertTrue(sim.start_replay(), (model, patch))
+            for _ in range(int(6 / 0.02)):                      # six seconds with no button held
+                sim.step(idle, 0.02)
+            self.assertTrue(sim.replaying, (model, patch))
+            sim.stop_replay()
+            self.assertFalse(sim.replaying, (model, patch))
+            n = len(sim.saved)
+            sim.step(idle, 0.02)
+            self.assertEqual(len(sim.saved), n)
+
+    def test_nothing_saved_does_not_start(self):
+        sim = A.ArmSim()
+        self.assertFalse(sim.start_replay())
+        self.assertFalse(sim.replaying)

@@ -110,6 +110,23 @@ class Library:
             raise KeyError(name)
         return validate(json.loads(p.read_text(encoding="utf-8")))
 
+    def delete(self, name):
+        p = self._path(name)
+        if not p.exists():
+            raise KeyError(name)
+        p.unlink()
+
+    def rename(self, old, new):
+        src, dst = self._path(old), self._path(new)
+        if not src.exists():
+            raise KeyError(old)
+        if dst.exists():
+            raise ValueError("there is already a sequence called %s" % new)
+        seq = self.get(old)
+        seq["name"] = new
+        self.save(seq)
+        src.unlink()
+
     def list(self):
         out = []
         for p in sorted(self.folder.glob("*.json")) if self.folder.exists() else []:

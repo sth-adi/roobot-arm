@@ -63,6 +63,7 @@ export default function App() {
   };
   const go = (name) => setView((v) => ({ name, tick: v.tick + 1 }));
   const openTab = (t) => { setTab(t); setOpen(true); };
+  const onPickPose = useCallback((i) => { setPicked(i); setTab("teach"); setOpen(true); }, []);
 
   const items = useMemo(() => [
     { id: "home", label: "Go home", hint: "move the arm to its home pose", icon: "home", run: async () => { const r = await api("/api/sim", { home: true }); if (!r.ok) toast(r.error || "Failed", "bad"); } },
@@ -105,7 +106,7 @@ export default function App() {
       <main className="stage" hidden={area === "system"}>
         <section className="viewport" aria-label="3D view of the arm">
           <Suspense fallback={<div className="loading">Loading the 3D view…</div>}>
-            <Scene rich={rich} view={view} draft={draft} onPick={(i) => { setPicked(i); openTab("teach"); }} />
+            <Scene rich={rich} view={view} draft={draft} onPick={onPickPose} />
           </Suspense>
           <div className="hud tl">
             <Pill tone={pose?.replaying ? "warn" : "idle"}>{pose?.replaying ? "running" : pose?.mode || "idle"}</Pill>

@@ -92,7 +92,7 @@ export function connect() {
     const p = live.pose, s = state.pose;
     // React only needs to know about the slow-changing parts
     if (!s || s.mode !== p.mode || s.replaying !== p.replaying || s.saved !== p.saved || s.replay_idx !== p.replay_idx || s.emulated !== p.emulated
-        || (s.world && p.world && (s.world.magnet !== p.world.magnet || s.world.held !== p.world.held)) || Math.abs((s.xyz?.[0] ?? 0) - p.xyz[0]) > 0.5 || Math.abs((s.xyz?.[1] ?? 0) - p.xyz[1]) > 0.5 || Math.abs((s.xyz?.[2] ?? 0) - p.xyz[2]) > 0.5) {
+        || (s.world && p.world && (s.world.magnet !== p.world.magnet || s.world.held !== p.world.held))) {
       state.pose = p; emit();
     }
   });

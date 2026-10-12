@@ -1,0 +1,322 @@
+--- a/src/RobotCharacteristics.h
++++ b/src/RobotCharacteristics.h
+@@ -12,6 +12,11 @@
+ float AngleSense = 20;
+ float ChordSense = 20;
+ 
++// Electromagnet at the tool tip, switched through a relay module. PLACEHOLDER pin: set the real GPIO before wiring it up.
++// Many relay boards switch ON when their input is LOW; set MagnetRelayActiveLow for those.
++const int MagnetPin = 23;
++const bool MagnetRelayActiveLow = false;
++
+ int JointPins[4] = {
+     32,
+     27,
+--- a/src/SticksToXYZ.h
++++ b/src/SticksToXYZ.h
+@@ -14,6 +14,7 @@
+     int xButton;
+     int yButton;
+     float maxSpeed;   // optional "maxSpeed" from the packet, deg/s; 0 = not sent
++    int seqId;        // optional "seqId": changes when the server has a new sequence for the arm to run; 0 = none
+ };
+ 
+ struct RobotPosition {
+--- a/src/WifiFunctions.h
++++ b/src/WifiFunctions.h
+@@ -170,6 +170,9 @@
+ 
+ bool DecodeStickInput(const String& state, StickInput& input)
+ {
++    // "seqId" is optional too: a packet without it keeps the old behaviour.
++    float sequenceId = 0.0f;
++    input.seqId = ReadControllerValue(state, "seqId", sequenceId) ? static_cast<int>(sequenceId) : 0;
+     // "maxSpeed" is optional; anything missing, zero or negative leaves the current limit alone.
+     float requested = 0.0f;
+     input.maxSpeed = ReadControllerValue(state, "maxSpeed", requested) && requested > 0.0f
+@@ -283,3 +286,93 @@
+ 
+     http.end();
+ }
++
++
++// ---- sequences (added): the server holds one sequence at a time; "seqId" in the controller packet says there is a new one ----
++constexpr int MaxSequencePoses = 20;
++
++// GET /sequence -> {"id":N,"poses":[[x,y,z,angle,action],...]}, action 0 none, 1 grab (magnet on), 2 release (magnet off).
++// Returns the number of poses (0 = an empty sequence, which means "stop"), or -1 if the request or the body failed.
++int FetchSequence(int& id, RobotPosition* poses, int* actions, int maxPoses)
++{
++    if (WiFi.status() != WL_CONNECTED) {
++        return -1;
++    }
++    WiFiClientSecure client;
++    client.setInsecure();
++    HTTPClient http;
++    const String url = "https://" + String(HOST) + "/sequence";
++    if (!http.begin(client, url)) {
++        return -1;
++    }
++    const int statusCode = http.GET();
++    if (statusCode != HTTP_CODE_OK) {
++        Serial.printf("Sequence GET failed: %d\n", statusCode);
++        http.end();
++        return -1;
++    }
++    const String body = http.getString();
++    http.end();
++
++    float idValue = 0.0f;
++    if (!ReadControllerValue(body, "id", idValue)) {
++        return -1;
++    }
++    id = static_cast<int>(idValue);
++
++    const int listStart = body.indexOf("\"poses\"");
++    if (listStart < 0) {
++        return -1;
++    }
++    const char* p = body.c_str() + listStart;
++    p = strchr(p, '[');                 // the outer list
++    if (!p) {
++        return -1;
++    }
++    ++p;
++    int count = 0;
++    while (count < maxPoses) {
++        p = strchr(p, '[');
++        if (!p) {
++            break;
++        }
++        ++p;
++        float v[5];
++        for (int i = 0; i < 5; ++i) {
++            char* end = nullptr;
++            v[i] = strtof(p, &end);
++            if (end == p) {
++                return -1;
++            }
++            p = end;
++            while (*p == ',' || *p == ' ') {
++                ++p;
++            }
++        }
++        poses[count] = {v[0], v[1], v[2], v[3]};
++        actions[count] = static_cast<int>(v[4]);
++        ++count;
++    }
++    return count;
++}
++
++// POST /armstate: where the arm is, so whatever is giving the orders (the dashboard, an AI) can see it.
++void SendArmState(const String& json)
++{
++    if (WiFi.status() != WL_CONNECTED) {
++        return;
++    }
++    WiFiClientSecure client;
++    client.setInsecure();
++    HTTPClient http;
++    const String url = "https://" + String(HOST) + "/armstate";
++    if (!http.begin(client, url)) {
++        return;
++    }
++    http.addHeader("Content-Type", "application/json");
++    const int statusCode = http.POST(json);
++    if (statusCode != HTTP_CODE_NO_CONTENT) {
++        Serial.printf("State POST failed: %d\n", statusCode);
++    }
++    http.end();
++}
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -19,6 +19,16 @@
+ RobotPosition savedPositions[MaxSavedPositions];
+ int savedPositionCount = 0;
+ 
++// ---- electromagnet and sequence runs (added) ----
++int savedActions[MaxSavedPositions];   // per saved position: 0 nothing, 1 grab (magnet on), 2 release (magnet off); only used by sequence runs
++bool magnetOn = false;
++
++void SetMagnet(bool on)
++{
++    magnetOn = on;
++    digitalWrite(MagnetPin, (on != MagnetRelayActiveLow) ? HIGH : LOW);
++}
++
+ RobotPosition targetPosition = {
+     HomeChordsX,
+     HomeChordsY,
+@@ -133,6 +143,9 @@
+ 
+     Serial.begin(9600);
+ 
++    pinMode(MagnetPin, OUTPUT);
++    SetMagnet(false);   // the magnet is always off at power-up
++
+     for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
+         jointServos[jointIndex].setPeriodHertz(50);
+         jointServos[jointIndex].attach(JointPins[jointIndex], 500, 2400);
+@@ -330,19 +343,87 @@
+     static unsigned long homeArrivedTime = 0;
+     static bool homeArrived = false;
+     static int replayPositionIndex = 0;
++    static bool previousX = false;
++    // sequence run (added): fetched from the server, run once, no button held
++    static bool sequenceRun = false;
++    static int lastSeqId = -1;          // -1 until the first packet: a sequence queued before power-up is not run
++    static int runningSeqId = 0;
++    static int doneSeqId = 0;
++    static int seqIndex = 0;
++    static bool seqWaiting = false;
++    static unsigned long seqSentTime = 0;
++    static unsigned long seqHoldUntil = 0;
++    static unsigned long lastStateTime = 0;
++    static bool slewArrived = true;
++    static bool stateDue = false;       // send the state now (a sequence just started or ended)
+     constexpr unsigned long replayStartHoldMs = 750;
+     constexpr unsigned long replayPositionIntervalMs = 1500;
+ 
++    static bool baselineTried = false;   // once only: a server without /sequence must not be asked every loop
++    if (!baselineTried && lastSeqId < 0 && WiFi.status() == WL_CONNECTED) {
++        baselineTried = true;
++        // Learn which sequence id the server holds now, so one queued before power-up is not run. (If the server has no
++        // /sequence, or cannot be reached, the first packet sets the baseline instead.)
++        int baselineId = 0;
++        RobotPosition ignoredPoses[MaxSavedPositions];
++        int ignoredActions[MaxSavedPositions];
++        if (FetchSequence(baselineId, ignoredPoses, ignoredActions, MaxSavedPositions) >= 0) {
++            lastSeqId = baselineId;
++        }
++    }
++
+     if (GetControllerState(controllerInput)) {
+         bool currentB = controllerInput.bButton == 1;
+         bool currentA = controllerInput.aButton == 1;
++        const bool currentX = controllerInput.xButton == 1;
+         const unsigned long currentTime = millis();
++        if (sequenceRun) {
++            currentA = false;   // a sequence is running: A neither saves nor replays
++        }
++
++        if (lastSeqId < 0) {
++            lastSeqId = controllerInput.seqId;
++        } else if (controllerInput.seqId != lastSeqId) {
++            lastSeqId = controllerInput.seqId;
++            int fetchedId = 0;
++            RobotPosition fetched[MaxSavedPositions];
++            int fetchedActions[MaxSavedPositions];
++            const int fetchedCount = FetchSequence(fetchedId, fetched, fetchedActions, MaxSavedPositions);
++            if (fetchedCount == 0) {
++                sequenceRun = false;
++                stateDue = true;
++                SendArmStatus("Sequence stopped");
++            } else if (fetchedCount > 0) {
++                for (int i = 0; i < fetchedCount; ++i) {
++                    savedPositions[i] = fetched[i];
++                    savedActions[i] = fetchedActions[i];
++                }
++                savedPositionCount = fetchedCount;       // the saved list is replaced: this is the "wipe and load"
++                replayingPositions = false;
++                movingHome = false;
++                homeArrived = false;
++                runningSeqId = fetchedId;
++                seqIndex = 0;
++                seqWaiting = false;
++                seqHoldUntil = 0;
++                sequenceRun = true;
++                stateDue = true;
++                SendArmStatus("Running a sequence of " + String(fetchedCount) + " poses");
++            }
++        }
++
++        if (currentX && !previousX && !sequenceRun) {
++            SetMagnet(!magnetOn);   // X toggles the electromagnet
++            stateDue = true;
++        }
++        previousX = currentX;
+ 
+         if (controllerInput.maxSpeed > 0.0f) {
+             MaxJointDegPerSecond = controllerInput.maxSpeed;
+         }
+ 
+         if (currentB && !previousB) {
++            sequenceRun = false;   // B (go home) also aborts a running sequence
+             ServoCommandChanged(commandedAngles);
+             CommandJointAngles(commandedAngles);   // attach and hold; the slew below walks the arm home
+             homeArrived = false;
+@@ -396,7 +477,7 @@
+             lastReplayPositionTime = currentTime;
+         }
+ 
+-        if (lastPositionUpdateTime != 0 && !movingHome && !replayingPositions && !ArmIsLagging()) {
++        if (lastPositionUpdateTime != 0 && !movingHome && !replayingPositions && !sequenceRun && !ArmIsLagging()) {
+             const unsigned long elapsedMs = min(currentTime - lastPositionUpdateTime, 100UL);
+             const RobotPosition requestedPosition = SticksToXYZ(
+                 controllerInput,
+@@ -434,10 +515,65 @@
+     const float slewSeconds = lastSlewTime == 0 ? 0.0f : min(slewNow - lastSlewTime, 100UL) / 1000.0f;
+     lastSlewTime = slewNow;
+     const bool arrived = SlewCommandedAngles(movingHome ? HomeJointAngles() : targetAngles, slewSeconds);
++    slewArrived = arrived;
+     if (ServoCommandChanged(commandedAngles)) {
+         CommandJointAngles(commandedAngles);
+     }
+ 
++    // Sequence run (added): send each pose, wait until the arm has got there, then do its magnet action and pause a moment.
++    if (sequenceRun && slewNow >= seqHoldUntil) {
++        if (!seqWaiting) {
++            if (seqIndex >= savedPositionCount) {
++                sequenceRun = false;
++                doneSeqId = runningSeqId;
++                stateDue = true;
++                SendArmStatus("Sequence finished");
++            } else {
++                RobotAngles sequenceAngles;
++                if (InverseKinTransform(savedPositions[seqIndex], targetAngles, sequenceAngles)) {
++                    targetPosition = savedPositions[seqIndex];
++                    targetAngles = sequenceAngles;
++                    seqWaiting = true;
++                    seqSentTime = slewNow;
++                } else {
++                    sequenceRun = false;   // a pose the arm cannot reach: stop rather than skip it
++                    stateDue = true;
++                    SendArmStatus("Sequence stopped: pose " + String(seqIndex + 1) + " is out of reach");
++                }
++            }
++        } else if ((arrived && slewNow - seqSentTime >= 300) || slewNow - seqSentTime >= 12000) {
++            if (savedActions[seqIndex] == 1) {
++                SetMagnet(true);
++                seqHoldUntil = slewNow + 400;   // give the magnet time to take hold before the arm moves on
++            } else if (savedActions[seqIndex] == 2) {
++                SetMagnet(false);
++                seqHoldUntil = slewNow + 400;
++            }
++            ++seqIndex;
++            seqWaiting = false;
++        }
++    }
++
++    // State for whoever is giving the orders: often while a sequence runs, rarely otherwise (a POST takes a moment).
++    if (stateDue || slewNow - lastStateTime >= (sequenceRun ? 700UL : 2500UL)) {
++        stateDue = false;
++        lastStateTime = slewNow;
++        const bool atHome = !sequenceRun && !movingHome && slewArrived
++            && fabsf(commandedAngles.s1 - HomeJointAngles().s1) < radians(1.5f)
++            && fabsf(commandedAngles.s2 - HomeJointAngles().s2) < radians(1.5f)
++            && fabsf(commandedAngles.s3 - HomeJointAngles().s3) < radians(1.5f)
++            && fabsf(commandedAngles.s4 - HomeJointAngles().s4) < radians(1.5f);
++        const RobotPosition shown = ForwardKinTransform(commandedAngles);
++        SendArmState(
++            String("{\"x\":") + String(shown.x, 1) + ",\"y\":" + String(shown.y, 1) + ",\"z\":" + String(shown.z, 1)
++            + ",\"angle\":" + String(shown.angle, 1) + ",\"magnet\":" + (magnetOn ? "1" : "0")
++            + ",\"mode\":\"" + (sequenceRun ? "sequence" : replayingPositions ? "replay" : movingHome ? "home" : "idle")
++            + "\",\"step\":" + String(seqIndex) + ",\"saved\":" + String(savedPositionCount)
++            + ",\"seqId\":" + String(runningSeqId) + ",\"seqDone\":" + String(doneSeqId)
++            + ",\"atHome\":" + (atHome ? "1" : "0") + "}"
++        );
++    }
++
+     // Going home: once there, make the target match (so the next stick move starts from home, not from where the
+     // arm was before), keep the signal on for a second, then release the servos.
+     if (movingHome && arrived) {

@@ -19,12 +19,20 @@ Arm side channel (same endpoints as the UWE-RArm backend, so its firmware and th
   POST /calibration  {"jointLimits": [[min,max] x4], "jointHomes": [x4]}, whole degrees 0-180;  GET returns it (404 if unset)
   GET  /mode         "Mode" response header (env ARM_MODE, default Normal); the firmware enters training when it is Training
 
+Sequences and arm state (our firmware; the stock firmware never asks for them):
+  POST /sequence   {"poses": [{"x","y","z","angle","action": null|"grab"|"release"}, ...]} (<= 20 poses; an empty list stops a run)
+                   queues ONE sequence and returns {"id": n}. The next /controller packet carries "seqId": n; the firmware then GETs it.
+  GET  /sequence   {"id": n, "poses": [[x, y, z, angle, action], ...]} with action 0 none, 1 grab (magnet on), 2 release (magnet off)
+  POST /armstate   the firmware's own report: {"x","y","z","angle","magnet","mode","step","saved","seqId","seqDone","atHome"}
+  GET  /armstate   the latest report plus its age in seconds
+
 Optionally forwards every received state to another server (--forward-url or
 the FORWARD_URL env var); /state then also reports forwarding status.
 
 Run:  python server.py [--host 0.0.0.0] [--port 8000] [--forward-url http://host:port/path]
 """
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -33,6 +41,11 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+def server_stamp(path=None):
+    """A short id of this file (its size), so the launcher can tell a running server from the one on disk."""
+    return hashlib.sha1(("server:%d" % os.stat(path or __file__).st_size).encode()).hexdigest()[:7]
+
 
 MAX_BODY = 64 * 1024
 STALE_S = 1.5   # no input newer than this = the sender is gone
@@ -51,6 +64,10 @@ _arm = {"status": "", "calibration": None, "mode": os.environ.get("ARM_MODE", "N
 MIN_PRESS_S = 0.25          # a button press is kept this long: the arm polls slowly and would miss a quick tap
 BUTTONS = ("A", "B", "X", "Y")
 _pressed_at = {}            # button -> when it went down (only while it reads pressed)
+_seq = {"id": 0, "poses": []}       # the one queued sequence, in the compact form the firmware reads
+_armstate = {"data": None, "received_at": None}
+ACTION_CODES = {None: 0, "grab": 1, "release": 2}
+MAX_POSES = 20
 MAX_SPEED_RANGE = (1, 60)   # deg/s per joint; the real firmware clamps to the same range
 
 
@@ -116,6 +133,36 @@ def _release_stretched(count):
         _state.update(data=data, received_at=now, count=count + 1)
         _cond.notify_all()
     _fwd_wake.set()
+
+
+def _with_seq(data):
+    """Add "seqId" once a sequence has been queued, so the firmware knows to fetch it. A neutral packet is made if there is no
+    input yet (the firmware ignores a packet without sticks)."""
+    with _lock:
+        sid = _seq["id"]
+    if not sid:
+        return data
+    if not data:
+        data = {"LSX": 0.0, "LSY": 0.0, "RSX": 0.0, "RSY": 0.0, "A": False, "B": False, "X": False, "Y": False}
+    return {**data, "seqId": sid}
+
+
+def _valid_sequence(d):
+    """Compact poses [[x, y, z, angle, action]] from the JSON the dashboard sends, or None if anything is wrong."""
+    poses = d.get("poses") if isinstance(d, dict) else None
+    if not isinstance(poses, list) or len(poses) > MAX_POSES:
+        return None
+    out = []
+    for p in poses:
+        try:
+            v = [float(p[k]) for k in ("x", "y", "z", "angle")]
+            act = ACTION_CODES[p.get("action")]
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return None
+        if not all(abs(c) < 1000 and c == c for c in v):
+            return None
+        out.append(v + [act])
+    return out
 
 
 def _with_speed(data):
@@ -229,7 +276,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/stream":
             self._stream()
         elif self.path == "/health":
-            self._send(200, {"status": "ok"})
+            self._send(200, {"status": "ok", "build": server_stamp()})
         elif self.path == "/status":
             with _lock:
                 self._send_text(200, _arm["status"])
@@ -243,6 +290,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, {"error": "calibration not available"})
             else:
                 self._send(200, cal)
+        elif self.path == "/sequence":
+            with _lock:
+                self._send(200, {"id": _seq["id"], "poses": _seq["poses"]})
+        elif self.path == "/armstate":
+            with _lock:
+                age = None if _armstate["received_at"] is None else round(time.time() - _armstate["received_at"], 3)
+                self._send(200, {"state": _armstate["data"], "age_s": age})
         elif self.path == "/state":
             with _lock:
                 age = None if _state["received_at"] is None else round(time.time() - _state["received_at"], 3)
@@ -260,12 +314,17 @@ class Handler(BaseHTTPRequestHandler):
                 data = {}
             elif rec is None or time.time() - rec >= STALE_S:
                 data = _neutral_of(data)
-            self._send(200, _with_speed(data))
+            self._send(200, _with_seq(_with_speed(data)))
         else:
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path not in ("/input", "/control", "/status", "/calibration"):
+        if self.path == "/shutdown":              # lets launch.py replace an old server with the current code (this computer only)
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._send(403, {"error": "forbidden"})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return self._send(200, {"ok": True})
+        if self.path not in ("/input", "/control", "/status", "/calibration", "/sequence", "/armstate"):
             return self._send(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -273,6 +332,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "bad Content-Length"})
         if length <= 0 or length > MAX_BODY:
             return self._send(400, {"error": "body missing or too large"})
+        if self.path in ("/sequence", "/armstate"):
+            try:
+                body = json.loads(self.rfile.read(length))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return self._send(400, {"error": "invalid JSON"})
+            if self.path == "/armstate":
+                if not isinstance(body, dict):
+                    return self._send(400, {"error": "expected a JSON object"})
+                with _lock:
+                    _armstate.update(data=body, received_at=time.time())
+                self.send_response(204)
+                self.end_headers()
+                return
+            poses = _valid_sequence(body)
+            if poses is None:
+                return self._send(400, {"error": "poses: at most %d, each with numeric x, y, z, angle and action null, grab or release" % MAX_POSES})
+            with _lock:
+                _seq["id"] += 1
+                _seq["poses"] = poses
+                sid = _seq["id"]
+            return self._send(200, {"id": sid, "count": len(poses)})
         if self.path in ("/status", "/calibration"):          # arm side channel: small bodies only
             if length > 4096:
                 return self._send(400, {"error": "body too large"})

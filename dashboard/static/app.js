@@ -314,7 +314,7 @@ function mountControl(root) {
       </section>
       <section class="sec" id="emu-sec"><h2>Emulated ESP32 and network</h2>
         <p class="lead">Runs the real firmware code on this computer as an ESP32 that polls the local server over a simulated network. While it runs, the arm drawn above is the emulated servos, and the sticks on this page travel over the controller link (even while output is SAFE: nothing reaches the real arm). The link numbers are assumptions until calibrated against the board.</p>
-        <div class="inline"><label class="muted" for="e-fw">Firmware</label><select id="e-fw"><option value="patched">Our firmware (stock + patch)</option><option value="stock">Stock UWE-RArm, as shipped</option><option value="rarm">Rewrite (firmware/rarm)</option></select>
+        <div class="inline"><label class="muted" for="e-fw">Firmware</label><select id="e-fw"><option value="ours">Our firmware (stock + patches, magnet and sequences)</option><option value="patched">Stock + damper patch only</option><option value="stock">Stock UWE-RArm, as shipped</option><option value="rarm">Rewrite (firmware/rarm)</option></select>
           <label class="muted" for="e-preset">Network</label><select id="e-preset"></select>
           <button class="btn sm" id="e-go" type="button">Start emulator</button><span class="st idle" id="e-state">Off</span></div>
         <div class="note" id="e-err" style="color:var(--bad)"></div>
@@ -1118,7 +1118,7 @@ function mountArm(root) {
         <div class="note" style="margin-top:6px">Hold the tip within 2 cm of a key and switch the magnet on to pick it up. Switch it off to let go: it falls onto whatever is below. The X button does the same.</div>
         <div class="note mono" id="w-keys"></div></div>
       <div class="sidesec"><h2>Emulated ESP32</h2>
-        <div class="inline"><select id="m-fw" aria-label="Firmware"><option value="patched">Ours (stock + patch)</option><option value="stock">Stock, as shipped</option><option value="rarm">Rewrite</option></select>
+        <div class="inline"><select id="m-fw" aria-label="Firmware"><option value="ours">Ours (stock + patches)</option><option value="patched">Stock + damper patch only</option><option value="stock">Stock, as shipped</option><option value="rarm">Rewrite</option></select>
           <select id="m-net" aria-label="Network"></select><button class="btn sm" id="m-go" type="button">Start</button></div>
         <div class="inline" style="margin-top:8px"><span class="st idle" id="m-state">Off</span><button class="btn sm" id="m-drop" type="button" hidden>Drop link 3 s</button></div>
         <div class="note" id="m-net-s"></div><div class="note" id="m-err" style="color:var(--bad)"></div></div>

@@ -31,6 +31,20 @@ def up(url, timeout=0.6):
         return False
 
 
+def server_build(server_url):
+    """The build id of an input server that is already running: None if none, "unknown" if it is too old to say."""
+    try:
+        import json
+        return json.loads(urllib.request.urlopen(server_url + "/health", timeout=1.5).read()).get("build") or "unknown"
+    except Exception:
+        return None if not up(server_url + "/state") else "unknown"
+
+
+def current_server_build():
+    import hashlib
+    return hashlib.sha1(("server:%d" % os.stat(os.path.join(ROOT, "server.py")).st_size).encode()).hexdigest()[:7]
+
+
 def hub_build(hub_url):
     """The build id of a hub that is already running, None if there is none (or it is too old to say)."""
     try:
@@ -60,10 +74,28 @@ def main():
     server_url = "http://127.0.0.1:%d" % a.server_port
     hub_url = "http://127.0.0.1:%d" % a.port
     try:
+        running = server_build(server_url)
+        if running is not None and running != current_server_build():
+            print("an older input server is running (%s, files are %s): replacing it" % (running, current_server_build()))
+            try:
+                urllib.request.urlopen(urllib.request.Request(server_url + "/shutdown", data=b"{}", method="POST"), timeout=3).read()
+            except Exception:
+                pass
+            for _ in range(30):
+                if not up(server_url + "/health"):
+                    break
+                time.sleep(0.2)
+            else:
+                print("could not stop the old input server: close its window (or end its python process) and run this again")
+                return
         if up(server_url + "/health") or up(server_url + "/state"):
             print("input server already running on :%d" % a.server_port)
         else:
             kids.append(subprocess.Popen([py, os.path.join(ROOT, "server.py")], cwd=ROOT))
+            for _ in range(30):
+                if up(server_url + "/health"):
+                    break
+                time.sleep(0.2)
         old = hub_build(hub_url)
         if old is not None and old != code_stamp():
             print("an older hub is running (build %s, files are %s): replacing it" % (old, code_stamp()))

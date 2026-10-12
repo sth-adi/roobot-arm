@@ -34,3 +34,18 @@ Replay, save, training and the IK are unchanged. The patch only adds `"maxSpeed"
 `sim/test_stock.py` builds the real `main.cpp` (stock, and with the patch applied) on a PC with fake time and recording servos, and checks every servo command
 against `ArmSim(model="stock")`. The dashboard's Control page can run the simulation as the reference, the stock firmware or the patched one.
 Not covered: the ESP32 itself (WiFi, servo timing, real latency).
+
+## Our firmware: the second patch (`patches/sequences-and-magnet.patch`)
+
+Applied after the damper patch (`emu/emulator.py --firmware ours` builds exactly that). It is what lets an AI or the dashboard hand the arm a sequence instead of someone holding A.
+Everything it adds is optional: with a server that has no `/sequence` and a packet without `"seqId"`, the arm behaves exactly like the patched one.
+
+| Added | What it does |
+|---|---|
+| Magnet pin | `MagnetPin` (placeholder GPIO 23 in `RobotCharacteristics.h`, set the real one) drives a relay; `MagnetRelayActiveLow` flips the level for boards that switch on LOW. Off at power-up. **X** (press edge) toggles it. |
+| `"seqId"` in the packet | When it changes, the firmware GETs `/sequence` (`{"id", "poses": [[x, y, z, angle, action]]}`, action 0 none / 1 grab / 2 release), **replaces** the saved list with it and runs it once. An empty list stops a run. A sequence queued before power-up is not run. |
+| Running | Each pose is sent, then the arm waits until it has got there (at least 0.3 s, at most 12 s), does the pose's magnet action and pauses 0.4 s so the magnet takes hold. A and the sticks are ignored during a run; **B** aborts it. An unreachable pose stops the run. |
+| `POST /armstate` | `{"x","y","z","angle","magnet","mode","step","saved","seqId","seqDone","atHome"}`: every 0.7 s during a run, every 2.5 s otherwise, and at once when a run ends or X is pressed. The dashboard and the AI read it from the server's `GET /armstate`. Each POST blocks the loop for the time one HTTPS request takes. |
+
+Not covered: the real board. Pin choice, relay polarity, how long a real magnet needs to take hold, and the blocking state POST over real WiFi all need checking on hardware.
+The server this firmware talks to must have `/sequence` and `/armstate` (this repo's `server.py` does; the original UWE-RArm backend does not, so point `HOST` at this server for sequences).

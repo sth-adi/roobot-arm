@@ -51,6 +51,23 @@ class SequenceTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 lib.get("../x")
 
+    def test_delete_and_rename(self):
+        with tempfile.TemporaryDirectory() as d:
+            lib = S.Library(d)
+            lib.save(S.make_sequence(SAVED, STATES, "a1", "first"))
+            lib.save(S.make_sequence(SAVED, STATES, "b2", "second"))
+            lib.rename("a1", "c3")
+            self.assertEqual([s["name"] for s in lib.list()], ["b2", "c3"])
+            self.assertEqual(lib.get("c3")["name"], "c3")
+            with self.assertRaises(ValueError):
+                lib.rename("c3", "b2")
+            lib.delete("b2")
+            self.assertEqual([s["name"] for s in lib.list()], ["c3"])
+            with self.assertRaises(KeyError):
+                lib.delete("b2")
+            with self.assertRaises(ValueError):
+                lib.delete("../x")
+
 
 if __name__ == "__main__":
     unittest.main()

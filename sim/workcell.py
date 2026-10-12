@@ -28,6 +28,8 @@ class Workcell:
         self.reset()
 
     def reset(self):
+        self.saved_magnet = []         # per saved position: was the magnet on when it was saved (kept in step with ArmSim.saved)
+        self._pending = None           # replay: the saved position the arm is heading for, whose magnet state is not applied yet
         self.magnet = False
         self.held = None
         self.prev_x = False
@@ -93,9 +95,30 @@ class Workcell:
                 if k["pos"][2] <= rest:
                     k["pos"][2], k["vz"] = rest, 0.0
 
+    def track_saved(self, saved, replaying, replay_idx, tip):
+        """Keep the magnet state saved with each position, and apply it during a replay when the arm gets there.
+        saved: ArmSim.saved (x, y, z, angle). replay_idx: the next position the replay will aim at."""
+        n = len(saved)
+        while len(self.saved_magnet) < n:
+            self.saved_magnet.append(self.magnet)          # a position saved just now remembers the magnet as it is
+        del self.saved_magnet[n:]
+        if not (replaying and n):
+            self._pending, self._last_idx = None, None
+            return
+        idx = (replay_idx - 1) % n                           # the position the replay is moving to
+        if self._pending is not None and self._pending != idx and self._pending < n:
+            self.set_magnet(self.saved_magnet[self._pending])    # it moved on before arriving: do not skip the magnet change
+            self._pending = None
+        if self._pending is None and idx != getattr(self, "_last_idx", None):
+            self._pending = idx
+        self._last_idx = idx
+        if self._pending is not None and math.dist(tip, saved[self._pending][:3]) < 6.0:
+            self.set_magnet(self.saved_magnet[self._pending])
+            self._pending = None
+
     def snapshot(self):
         r1 = lambda v: round(v, 1)
-        return {"magnet": self.magnet, "held": self.held,
+        return {"magnet": self.magnet, "held": self.held, "saved_magnet": list(self.saved_magnet),
                 "keys": [{"id": k["id"], "pos": [r1(c) for c in k["pos"]], "yaw": k["yaw"], "where": self.where(k)} for k in self.keys],
                 "boxes": [list(c) for c in BOX_CENTERS], "box_inner": BOX_INNER, "box_wall": BOX_WALL, "box_height": BOX_HEIGHT, "box_floor": BOX_FLOOR,
                 "tray": list(TRAY_CENTER), "tray_half": list(TRAY_HALF), "tray_top": TRAY_TOP}

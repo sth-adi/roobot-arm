@@ -61,3 +61,36 @@ class WorkcellTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SavedMagnetTest(unittest.TestCase):
+    def test_magnet_state_is_saved_with_the_position_and_applied_in_replay(self):
+        w = Workcell()
+        saved = []
+        saved.append((0.0, 240.0, 8.0, -90.0)); w.track_saved(saved, False, 0, (0, 240, 8))        # saved with the magnet off
+        w.set_magnet(True)
+        saved.append((0.0, 240.0, 8.0, -90.0)); w.track_saved(saved, False, 0, (0, 240, 8))        # same spot, magnet on
+        saved.append((222.0, 60.0, 40.0, -90.0)); w.track_saved(saved, False, 0, (222, 60, 40))     # over the tray, still on
+        w.set_magnet(False)
+        saved.append((222.0, 60.0, 40.0, -90.0)); w.track_saved(saved, False, 0, (222, 60, 40))    # and released
+        self.assertEqual(w.saved_magnet, [False, True, True, False])
+        w.set_magnet(False)
+        # replay: the arm aims at position i (replay_idx is the next one), and the state applies on arrival
+        seen = []
+        for i, pos in enumerate(saved):
+            idx_next = (i + 1) % len(saved)
+            w.track_saved(saved, True, idx_next, (pos[0] + 50, pos[1], pos[2]))                   # still travelling
+            before = w.magnet
+            w.track_saved(saved, True, idx_next, pos[:3])                                         # arrived
+            seen.append((before, w.magnet))
+        self.assertEqual([m for _, m in seen], [False, True, True, False])
+
+    def test_undone_and_cleared_saves_drop_their_magnet_state(self):
+        w = Workcell()
+        saved = [(0, 0, 0, 0)]
+        w.track_saved(saved, False, 0, (0, 0, 0))
+        saved.pop()
+        w.track_saved(saved, False, 0, (0, 0, 0))
+        self.assertEqual(w.saved_magnet, [])
+
+

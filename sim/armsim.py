@@ -223,6 +223,10 @@ class ArmSim:
         return "improved" if self.model == "improved" else ("stock + patch" if self.patch else "stock")
 
     # ---- helpers --------------------------------------------------------------------------------------------
+    @property
+    def replaying(self):
+        return self._replaying if self.model == "stock" else self.mode == "replay"
+
     def say(self, msg):
         self.status = msg
         self.log.append((round(self._clock, 2), msg))

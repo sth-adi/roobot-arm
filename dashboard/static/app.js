@@ -1093,7 +1093,7 @@ function mountArm(root) {
           <dt>Left stick</dt><dd>Moves the tool sideways (x) and in or out (y), about 20 mm/s at full tilt.</dd>
           <dt>Right stick up / down</dt><dd>Moves the tool up and down (z).</dd>
           <dt>Right stick left / right</dt><dd>Tilts the tool angle, about 20 degrees/s.</dd>
-          <dt>A (tap)</dt><dd>Saves the current position. Up to 20 are kept; a 21st is ignored.</dd>
+          <dt>A (tap)</dt><dd>Saves the current position and whether the simulated magnet is on. Up to 20 are kept; a 21st is ignored. In a replay the magnet is set to the saved state when the arm gets there.</dd>
           <dt>A (hold 0.75 s)</dt><dd>Replays the saved positions in order, one every 1.5 s, looping. Let go of A to stop. The stock firmware also saves one extra position (where the arm was) every time you start a replay; the reference model and the patch undo that save.</dd>
           <dt>B</dt><dd>Go home: every joint returns to its home angle, then the servos are released.</dd>
           <dt>X</dt><dd>Switches the simulated electromagnet on or off (each press toggles it). The real firmware ignores X.</dd>
@@ -1171,7 +1171,7 @@ function mountArm(root) {
       m.textContent = p.emulated ? "Emulated ESP32" : p.attached ? MODE_TEXT[p.mode] || p.mode : "servos released";
       $r("#v-xyz").textContent = `x ${f1(p.xyz[0], 0)}  y ${f1(p.xyz[1], 0)}  z ${f1(p.xyz[2], 0)} mm`;
       $r("#v-status").textContent = p.ik_ok ? p.status : "out of reach: holding position";
-      $r("#v-saved").textContent = p.emulated ? "" : `saved positions: ${p.saved}/20${p.mode === "replay" ? ", replaying #" + (p.replay_idx + 1) : ""}`;
+      $r("#v-saved").textContent = p.emulated ? "" : `saved positions: ${p.saved}/20${p.mode === "replay" ? ", replaying #" + (p.replay_idx + 1) : ""}${p.world && p.world.saved_magnet.some(Boolean) ? "  (magnet on at " + p.world.saved_magnet.map((m, i) => (m ? "#" + (i + 1) : "")).filter(Boolean).join(", ") + ")" : ""}`;
       const w = p.world;
       if (w) {
         const mb = $r("#w-mag"); mb.textContent = w.magnet ? "Magnet ON" : "Magnet off"; mb.setAttribute("aria-pressed", String(w.magnet));

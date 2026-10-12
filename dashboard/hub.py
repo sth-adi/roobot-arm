@@ -1073,9 +1073,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/events":
             return self._events()
         if path == "/":
-            path = "/studio/index.html" if (STATIC / "studio" / "index.html").is_file() and "legacy" not in self.path else "/index.html"
+            path = "/studio/index.html" if (STATIC / "studio" / "index.html").is_file() and "studio" in self.path else "/index.html"
         elif path in ("/legacy", "/legacy.html"):
             path = "/index.html"
+        elif path in ("/studio", "/studio/"):
+            path = "/studio/index.html"
         f = (STATIC / path.lstrip("/")).resolve()
         if STATIC.resolve() not in f.parents or not f.is_file():
             return self._json(404, {"error": "not found"})

@@ -53,6 +53,7 @@ function readGamepad() {
   let p = null;
   for (const g of pads) if (g && g.connected) { p = g; break; }
   E.gpName = p ? p.id : null;
+  E.gpStd = !!(p && p.mapping === "standard");   // Xbox and PS5 pads report the standard layout in Chrome and Edge
   if (!p) return neutral();
   const dz = (v) => (Math.abs(v) < 0.12 ? 0 : (Math.sign(v) * (Math.abs(v) - 0.12)) / 0.88);
   const b = (i) => !!(p.buttons[i] && p.buttons[i].pressed);
@@ -385,7 +386,7 @@ function mountControl(root) {
       else if (!armed) { el.className = "st warn"; el.textContent = "Virtual arm only: output is SAFE"; }
       else if (E.sending) { el.className = "st bad"; el.textContent = "Sending to the arm"; }
       else { el.className = "st warn"; el.textContent = "ARMED, waiting to send"; }
-      $r("#c-info").textContent = E.source === "gamepad" ? (E.gpName ? `Controller found: ${E.gpName}` : "No controller reported yet. Press a button on it.")
+      $r("#c-info").textContent = E.source === "gamepad" ? (E.gpName ? `Controller found: ${E.gpName}${E.gpStd ? "" : ". Not the standard layout, so buttons may be mapped wrongly: use the pygame window instead."}` : "No controller reported yet. Press a button on it.")
         : E.source === "server" && E.idle ? "No live input at the local server right now." : "";
       slider.value = cfg.rate;
       $r("#c-rate-v").textContent = cfg.rate > 0 ? `${cfg.rate} deg/s` : "no limit";

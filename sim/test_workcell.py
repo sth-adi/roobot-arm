@@ -94,3 +94,19 @@ class SavedMagnetTest(unittest.TestCase):
         self.assertEqual(w.saved_magnet, [])
 
 
+
+
+class RepeatRunTest(unittest.TestCase):
+    def test_second_run_starts_with_keys_in_boxes_and_still_applies_magnet(self):
+        c = Workcell()
+        saved = [(0, 240, 40, 0), (0, 240, 20, 0), (222, 60, 60, 0)]
+        c.saved_magnet = [False, True, False]
+        for run in range(3):
+            c.track_saved(saved, True, 1, saved[0][:3])          # heading for #1, arrived
+            c.track_saved(saved, True, 2, saved[1][:3])          # #2: magnet on
+            self.assertTrue(c.magnet, "run %d" % run)
+            c.track_saved(saved, True, 3, saved[2][:3])          # #3: magnet off
+            self.assertFalse(c.magnet, "run %d" % run)
+            c.keys[1]["pos"] = [222, 60, 5]                      # the key ends up on the tray
+            c.track_saved(saved, True, 4, saved[0][:3])          # next lap starts
+            self.assertEqual(c.keys[1]["pos"][:2], [0, 240], "run %d" % run)

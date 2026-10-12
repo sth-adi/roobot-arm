@@ -257,6 +257,9 @@ class Hub:
                         # emulated firmware's (which the hub cannot see); arrival is judged from the arm that is drawn
                         before = self.cell.magnet
                         self.cell.track_saved(self.sim.saved, self.sim.replaying, self.sim.replay_idx, snap["points"][4])
+                        if getattr(self.cell, "restarted", False):
+                            self.cell.restarted = False
+                            self.log("hub", "replay: keys put back in the boxes for a fresh run")
                         if self.cell.magnet != before:
                             self.log("hub", "replay: magnet %s at saved position #%d" % ("ON" if self.cell.magnet else "off", self.cell.last_applied + 1))
                         snap["world"] = self.cell.snapshot()

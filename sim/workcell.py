@@ -37,6 +37,13 @@ class Workcell:
         for i, (cx, cy) in enumerate(BOX_CENTERS):
             self.keys.append({"id": i + 1, "pos": [cx, cy, BOX_FLOOR + KEY_HALF_THICK], "vz": 0.0, "yaw": (-20.0, 10.0, 25.0)[i]})
 
+    def reset_keys(self):
+        """Keys back in their boxes and the magnet off; the magnet states saved with the positions are kept."""
+        saved, last = list(self.saved_magnet), getattr(self, "last_applied", None)
+        self.reset()
+        self.saved_magnet = saved
+        self.last_applied = last
+
     # ---- geometry ---------------------------------------------------------------------------------------------
     @staticmethod
     def surface_at(x, y):
@@ -114,6 +121,10 @@ class Workcell:
             self._pending = None
         if self._pending is None and idx != getattr(self, "_last_idx", None):
             self._pending = idx
+            if idx == 0:                                      # a run (or the next lap) starts: keys back in the boxes, so every run can pick them up again
+                self.reset_keys()
+                self._pending = idx
+                self.restarted = True
         self._last_idx = idx
         if self._pending is not None and math.dist(tip, saved[self._pending][:3]) < 6.0:
             self.last_applied = self._pending

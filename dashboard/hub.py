@@ -279,6 +279,7 @@ class Hub:
                         snap["world"] = self.cell.snapshot()
                 if snap is not None:
                     pose_t = now
+                    snap["t"] = time.time()          # the page plays poses back on this clock, so network jitter does not show as stutter
                     self.publish("pose", snap)
             except Exception as e:                  # never let the simulation die
                 self.log("hub", f"simulation error: {e}")

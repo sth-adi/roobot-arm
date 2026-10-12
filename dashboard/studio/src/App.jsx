@@ -115,7 +115,7 @@ export default function App() {
           </div>
           <div className="hud tr">
             {VIEWS.map(([n, l]) => <button key={n} type="button" className={view.name === n ? "on" : ""} onClick={() => go(n)}>{l}</button>)}
-            <button type="button" className={rich ? "on" : ""} onClick={() => setRich((v) => !v)} title="Reflections, antialiasing and a grid. Needs a graphics card.">{rich ? "Rich" : "Fast"}</button>
+            <button type="button" className={rich ? "on" : ""} onClick={() => setRich((v) => !v)} title="Reflections, antialiasing and a grid. Needs a graphics card.">{rich ? "Rich" : "Lite"}</button>
           </div>
           <Timeline agent={agent} draft={draft} />
           {!online && <div className="offline">The hub is not reachable. Start it with Start Dashboard.</div>}

@@ -148,7 +148,7 @@ class Emulator:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--firmware", choices=["stock", "patched", "rarm"], default="stock")
+    ap.add_argument("--firmware", choices=["stock", "patched", "rarm"], default="patched")
     ap.add_argument("--host", default="127.0.0.1:8000", help="server or proxy the firmware polls, host:port")
     ap.add_argument("--seconds", type=float, help="stop after this long (default: until Ctrl+C)")
     ap.add_argument("--serial", action="store_true", help="show the firmware's Serial output")

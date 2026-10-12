@@ -113,7 +113,7 @@ class Hub:
         self.latest, self.latest_recv, self.latest_count = None, 0.0, 0
         self.latest_wire = None                 # the same packet in the UWE-RArm wire format, what the arm reads
         # virtual ESP32 + arm (sim/armsim.py): always running, so the preview works with no hardware and while SAFE
-        self.sim = ArmSim()
+        self.sim = ArmSim(model="stock", patch=True)   # our firmware: UWE-RArm stock + firmware/stock/patches (damper, failsafes, tap-to-save)
         self.sim_lock = threading.Lock()
         self._sim_status_sent = None
         self._cal_synced = False
@@ -710,7 +710,7 @@ class Hub:
         a = d.get("action")
         if a == "start":
             self.push_calibration()                 # the firmware reads /calibration at boot
-            self.emu.start(str(d.get("firmware", "stock")), str(d.get("preset", "home_wifi")))
+            self.emu.start(str(d.get("firmware", "patched")), str(d.get("preset", "home_wifi")))
         elif a == "stop":
             self.emu.stop()
         elif a == "link":

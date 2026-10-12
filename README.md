@@ -6,6 +6,9 @@ Xbox controller -> HTTP server, as the input path for the robot arm.
 - `controller_client.py` – reads a generic Xbox One controller (pygame) and POSTs its state as JSON.
 - `controller_gui.py` - live Tk window: draws the controller and logs each move as the raw HTTP packet. `python controller_gui.py [--no-send]`
 
+**Which firmware is "ours".** Everything defaults to the UWE-RArm firmware plus our patch (`firmware/stock/patches/damper-and-failsafes.patch`: joint speed limit, failsafes, tap-to-save): the virtual arm, the dashboard and the emulator.
+Unmodified stock and the reference model are still selectable for comparison.
+
 ## Boxes, keys, tray and electromagnet (simulation)
 
 The Robot page shows a small work cell: three boxes, each holding a key, and a tray (`sim/workcell.py` has the positions). The arm ends in a simulated electromagnet.

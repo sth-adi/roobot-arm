@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { api, connect, getJson, getState, refreshSeqs, set, toast, useStore } from "./store.js";
+import { api, connect, getJson, getState, live, refreshSeqs, set, toast, useStore } from "./store.js";
 import { startInput } from "./input.js";
 import { Btn, Icon, Num, Pill } from "./ui.jsx";
 import { AskPanel, PadPanel, SetupPanel, StatePanel, TeachPanel, useDraft } from "./Panels.jsx";
@@ -32,6 +32,8 @@ export default function App() {
   const toasts = useStore((s) => s.toasts);
   const [tab, setTab] = useState(() => { try { return localStorage.getItem("studio.tab") || "teach"; } catch (e) { return "teach"; } });
   const [open, setOpen] = useState(true);
+  const [rich, setRich] = useState(() => { try { return localStorage.getItem("studio.rich") === "1"; } catch (e) { return false; } });
+  useEffect(() => { try { localStorage.setItem("studio.rich", rich ? "1" : "0"); } catch (e) { /* private window */ } }, [rich]);
   const [area, setArea] = useState(() => { try { return localStorage.getItem("studio.area") === "system" ? "system" : "studio"; } catch (e) { return "studio"; } });
   const [page, setPage] = useState(() => { try { return localStorage.getItem("studio.page") || "overview"; } catch (e) { return "overview"; } });
   useEffect(() => { try { localStorage.setItem("studio.area", area); localStorage.setItem("studio.page", page); } catch (e) { /* private window */ } }, [area, page]);
@@ -103,15 +105,16 @@ export default function App() {
       <main className="stage" hidden={area === "system"}>
         <section className="viewport" aria-label="3D view of the arm">
           <Suspense fallback={<div className="loading">Loading the 3D view…</div>}>
-            <Scene view={view} draft={draft} onPick={(i) => { setPicked(i); openTab("teach"); }} />
+            <Scene rich={rich} view={view} draft={draft} onPick={(i) => { setPicked(i); openTab("teach"); }} />
           </Suspense>
           <div className="hud tl">
             <Pill tone={pose?.replaying ? "warn" : "idle"}>{pose?.replaying ? "running" : pose?.mode || "idle"}</Pill>
-            {pose && <div className="readout"><span>X <Num v={pose.xyz?.[0]} /></span><span>Y <Num v={pose.xyz?.[1]} /></span><span>Z <Num v={pose.xyz?.[2]} /></span><span>∠ <Num v={pose.tool_angle} d={0} />°</span></div>}
+            {pose && <Readout />}
             {pose?.world && <div className={`mag ${pose.world.magnet ? "on" : ""}`}><Icon n="magnet" size={14} /> magnet {pose.world.magnet ? "ON" : "off"}</div>}
           </div>
           <div className="hud tr">
             {VIEWS.map(([n, l]) => <button key={n} type="button" className={view.name === n ? "on" : ""} onClick={() => go(n)}>{l}</button>)}
+            <button type="button" className={rich ? "on" : ""} onClick={() => setRich((v) => !v)} title="Reflections, antialiasing and a grid. Needs a graphics card.">{rich ? "Rich" : "Fast"}</button>
           </div>
           <Timeline agent={agent} draft={draft} />
           {!online && <div className="offline">The hub is not reachable. Start it with Start Dashboard.</div>}
@@ -163,6 +166,19 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+// The x/y/z readout follows the live pose on its own, a few times a second, so the rest of the app is not re-rendered for every movement.
+function Readout() {
+  const [p, setP] = useState(live.pose);
+  useEffect(() => {
+    let t = null;
+    const f = () => { if (t == null) t = setTimeout(() => { t = null; setP(live.pose); }, 100); };
+    live.listeners.add(f);
+    return () => { live.listeners.delete(f); clearTimeout(t); };
+  }, []);
+  if (!p) return null;
+  return <div className="readout"><span>X <Num v={p.xyz?.[0]} /></span><span>Y <Num v={p.xyz?.[1]} /></span><span>Z <Num v={p.xyz?.[2]} /></span><span>∠ <Num v={p.tool_angle} d={0} />°</span></div>;
 }
 
 // Progress of whatever is running: one chip per pose of the sequence the arm is working through.

@@ -1111,7 +1111,7 @@ function mountArm(root) {
           <div class="inline" style="margin-top:6px"><input id="s-name" placeholder="name, e.g. box2_to_tray" maxlength="48" aria-label="Sequence name"><button class="btn sm" id="s-send" type="button">Save to host</button></div>
           <input id="s-desc" placeholder="what it does" maxlength="400" aria-label="Sequence description" style="width:100%;margin-top:4px">
           <div class="inline" style="margin-top:4px"><input id="s-req" placeholder="needs key in (box2)" maxlength="20" aria-label="Key must start in" size="14"><input id="s-end" placeholder="leaves key on (tray)" maxlength="20" aria-label="Key ends on" size="14"></div>
-          <div id="s-list" class="seqlist" role="list" aria-label="Saved sequences"></div>
+          <div class="inline" style="margin-top:6px"><select id="s-pick" aria-label="Saved sequences"></select><button class="btn sm" id="s-run" type="button">Run</button><button class="btn sm" id="s-rev" type="button">Run reversed</button></div>
           <div class="inline" style="margin-top:6px"><button class="btn sm" id="s-copy" type="button">Copy JSON</button><button class="btn sm" id="s-load" type="button">Load JSON</button></div>
           <div class="note">Saved positions become poses; the magnet is stored as grab / release so a sequence can be run backwards. Files go in sequences/ on the host.</div>
         </details>
@@ -1138,35 +1138,26 @@ function mountArm(root) {
   const model = $r("#a-model");
   model.addEventListener("change", async () => { const v = model.value; await api("/api/sim", { model: v === "improved" ? "improved" : "stock", patch: v === "stock-patch" }); });
   $r("#w-mag").addEventListener("click", async () => { const r = await api("/api/world", { magnet: "toggle" }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
-  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const refreshSeqs = async () => {
-    try {
-      const j = await (await fetch("/api/sequences")).json(); const list = $r("#s-list");
-      list.innerHTML = (j.sequences || []).map((q) => `<div class="seqrow" role="listitem" data-name="${esc(q.name)}">
-        <div class="seqname"><b>${esc(q.name)}</b> <span class="muted">${q.count} poses</span><div class="muted">${esc(q.description || "")}</div></div>
-        <div class="inline"><button class="btn sm" data-act="run" type="button">Run</button><button class="btn sm" data-act="rev" type="button">Reverse</button>
-        <button class="btn sm" data-act="ren" type="button" aria-label="Rename ${esc(q.name)}">Rename</button><button class="btn sm danger" data-act="del" type="button" aria-label="Delete ${esc(q.name)}">Delete</button></div></div>`).join("") || '<div class="muted">No sequences yet. Save the current positions above.</div>';
-    } catch (e) { /* hub not reachable */ }
-  };
+    try { const j = await (await fetch("/api/sequences")).json(); const sel = $r("#s-pick"); const cur = sel.value;
+      sel.innerHTML = (j.sequences || []).map((q) => `<option value="${q.name}">${q.name} (${q.count})</option>`).join("") || '<option value="">no sequences yet</option>'; sel.value = cur; } catch (e) { /* hub not reachable */ } };
   refreshSeqs();
-  $r("#s-list").addEventListener("click", async (e) => {
-    const btn = e.target.closest("button[data-act]"); if (!btn) return;
-    const name = btn.closest(".seqrow").dataset.name, act = btn.dataset.act;
-    if (act === "run" || act === "rev") {
-      const r = await api("/api/sequence", { name, use: true, run: true, reverse: act === "rev" });
-      toast(r.ok ? `Running ${r.name}${act === "rev" ? " reversed" : ""}` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad");
-    } else if (act === "del") {
-      if (!window.confirm(`Delete the sequence "${name}"?`)) return;
-      const r = await api("/api/sequence", { delete: name }); toast(r.ok ? `Deleted ${name}` : (r.error || "Could not delete"), r.ok ? "ok" : "bad"); refreshSeqs();
-    } else if (act === "ren") {
-      const to = (window.prompt(`New name for "${name}"`, name) || "").trim(); if (!to || to === name) return;
-      const r = await api("/api/sequence", { rename: { from: name, to } }); toast(r.ok ? `Renamed to ${to}` : (r.error || "Could not rename"), r.ok ? "ok" : "bad"); refreshSeqs();
-    }
-  });
   $r("#s-send").addEventListener("click", async () => {
     const r = await api("/api/sequence", { name: $r("#s-name").value.trim(), description: $r("#s-desc").value.trim(),
       requires: $r("#s-req").value.trim() ? { key_in: $r("#s-req").value.trim() } : {}, ends: $r("#s-end").value.trim() ? { key_on: $r("#s-end").value.trim() } : {} });
     toast(r.ok ? `Saved ${r.packet.name} (${r.packet.count} poses) on the host: ${r.path}` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); refreshSeqs(); });
+  const runSeq = async (reverse) => { const name = $r("#s-pick").value; if (!name) return toast("Pick a sequence first", "bad");
+    const r = await api("/api/sequence", { name, use: true, run: true, reverse });
+    toast(r.ok ? `Running ${r.name}${reverse ? " reversed" : ""}` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); };
+  const askIt = async () => { const t = $r("#q-ask").value.trim(); if (!t) return;
+    const r = await api("/api/ask", { request: t }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); };
+  $r("#q-go").addEventListener("click", askIt);
+  $r("#q-ask").addEventListener("keydown", (e) => { if (e.key === "Enter") askIt(); });
+  const showTask = async () => { try { const t = (await (await fetch("/api/state")).json()).task || {};
+    $r("#q-log").textContent = t.log && t.log.length ? `${t.state}: ${t.log[t.log.length - 1]}` : ""; } catch (e) { /* hub not reachable */ } };
+  const taskTimer = setInterval(() => { if (!document.body.contains($r("#q-log"))) return clearInterval(taskTimer); showTask(); }, 1500);
+  $r("#s-run").addEventListener("click", () => runSeq(false));
+  $r("#s-rev").addEventListener("click", () => runSeq(true));
   $r("#s-copy").addEventListener("click", async () => {
     try { const j = JSON.stringify(await (await fetch("/api/sequence")).json(), null, 2); await navigator.clipboard.writeText(j); toast("Sequence JSON copied", "ok"); }
     catch (e) { toast("Could not copy; use Send sequence to host", "bad"); } });

@@ -448,14 +448,14 @@ class ArmSim:
             if self._replaying and self.wait_arrival:      # sequence runs: move on once the arm has got there, not on a fixed clock
                 lag_deg = max(abs(math.degrees(self._t_ang[i] - self.angles[i])) for i in range(4))
                 step_due = now - self._replay_ms >= 300 and (lag_deg < 0.6 or now - self._replay_ms >= 12000)
-            if self._replaying and step_due:
+            if self._replaying and step_due and not (self.once and self.replay_idx >= len(self.saved)):
                 target = self.saved[self.replay_idx]
                 goal = inverse_kin(target, self._t_ang, self.limits, self.tool)
                 if goal is not None:
                     self._t_pos, self._t_ang = target, goal
                     if not self.patch:
                         self._stock_write()
-                self.replay_idx = (self.replay_idx + 1) % len(self.saved)
+                self.replay_idx = self.replay_idx + 1 if self.once else (self.replay_idx + 1) % len(self.saved)
                 self._replay_ms = now
             self._sticks_active = False
             if self._last_update_ms is not None and not self._moving_home and not self._replaying:
@@ -504,14 +504,16 @@ class ArmSim:
             "manual" if self._sticks_active else "idle"
 
     wait_arrival = False
+    once = False                       # a one-off run: after the last position is sent the arm stays there instead of starting another lap
 
-    def start_replay(self, wait_arrival=False):
+    def start_replay(self, wait_arrival=False, once=False):
         """Play the saved positions in a loop until stop_replay(): one press instead of holding A (the simulation only)."""
         if not self.saved:
             self.say("Nothing saved to replay")
             return False
         self.latched = True
         self.wait_arrival = bool(wait_arrival) and self.model == "stock"
+        self.once = bool(once) and self.model == "stock"
         if self.model == "stock":
             if not self._replaying:
                 self._replaying, self.replay_idx, self._replay_ms = True, 0, self._ms - 1500
@@ -523,6 +525,7 @@ class ArmSim:
     def stop_replay(self):
         self.latched = False
         self.wait_arrival = False
+        self.once = False
         if self.model == "stock":
             if self._replaying:
                 self._replaying = False

@@ -274,3 +274,20 @@ class LatchedReplayTest(unittest.TestCase):
         sim = A.ArmSim()
         self.assertFalse(sim.start_replay())
         self.assertFalse(sim.replaying)
+
+
+class OneOffRunTest(unittest.TestCase):
+    def test_once_sends_each_position_once_and_never_starts_a_second_lap(self):
+        sim = A.ArmSim(model="stock", patch=True)
+        idle = {"LSX": 0, "LSY": 0, "RSX": 0, "RSY": 0, "A": False, "B": False, "X": False, "Y": False}
+        sim.saved[:] = [(0.0, 240.0, 80.0, 0.0), (0.0, 240.0, 40.0, 0.0), (120.0, 180.0, 80.0, 0.0)]
+        sim.start_replay(wait_arrival=True, once=True)
+        sent = []
+        for _ in range(int(40 / 0.02)):
+            before = sim.replay_idx
+            sim.step(idle, 0.02)
+            if sim.replay_idx != before:
+                sent.append(sim.replay_idx)
+        self.assertEqual(sent, [1, 2, 3])                      # three targets, then it stays at the last one
+        x, y, z, _ = sim.pose()
+        self.assertLess(abs(x - 120) + abs(y - 180) + abs(z - 80), 3.0)

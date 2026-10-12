@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(ROOT, "emu"))
 import emulator as emu_mod          # noqa: E402
 import netproxy                     # noqa: E402
 
-FIRMWARE = ("stock", "patched", "rarm")
+FIRMWARE = ("stock", "patched", "ours", "rarm")
 
 
 class EmuRunner:

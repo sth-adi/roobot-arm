@@ -19,7 +19,15 @@
 #include <map>
 #include <vector>
 #include <cctype>
+#include <cstring>
 
+#define OUTPUT 1
+#define INPUT 0
+#define HIGH 1
+#define LOW 0
+inline int& pinLevel(int pin) { static int levels[64]; return levels[pin & 63]; }   // last level written to each pin (the magnet relay is one)
+inline void pinMode(int, int) {}
+inline void digitalWrite(int pin, int level) { pinLevel(pin) = level; }
 #define PI 3.1415926535897932384626433832795
 #define HALF_PI 1.5707963267948966192313216916398
 #define DEG_TO_RAD 0.017453292519943295769236907684886

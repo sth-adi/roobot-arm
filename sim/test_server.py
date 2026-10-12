@@ -1,10 +1,11 @@
 """Tests for the arm side channel on server.py (/status, /calibration, /mode). Run:  python -m unittest sim.test_server -v"""
 import json
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import server
 
@@ -62,6 +63,105 @@ class SideChannel(unittest.TestCase):
         self.assertEqual(self.req("/input", json.dumps(pkt).encode())[0], 200)
         state = json.loads(self.req("/state")[1])
         self.assertEqual(state["state"], pkt)
+
+
+class _EndServer:
+    """Stands in for the UWE-RArm backend: records every packet forwarded to it."""
+
+    def __init__(self):
+        got = self.got = []
+
+        class H(BaseHTTPRequestHandler):
+            def do_POST(self):
+                got.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}/controller"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+
+HELD = {"LSX": 0.9, "LSY": -0.4, "RSX": 0.0, "RSY": 0.0, "A": True, "B": False, "X": False, "Y": False}
+NEUTRAL = {"LSX": 0.0, "LSY": 0.0, "RSX": 0.0, "RSY": 0.0, "A": False, "B": False, "X": False, "Y": False}
+
+
+class DeadMan(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        server.STALE_S = 0.3
+        threading.Thread(target=server._forward_worker, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def setUp(self):
+        self.end = _EndServer()
+        with server._lock:
+            server._state.update(data=None, received_at=None, count=0)
+            server._fwd.update(url=self.end.url, ok=None, error=None, sent=0, failed=0, enabled=True,
+                               neutrals=0, flush_neutral=False)
+
+    def tearDown(self):
+        self.end.srv.shutdown()
+        self.end.srv.server_close()
+
+    def post(self, path, obj):
+        r = urllib.request.Request(self.base + path, data=json.dumps(obj).encode(), method="POST",
+                                   headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(r, timeout=3).read()
+
+    def wait_for(self, cond, timeout=3.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_neutral_is_all_zero_and_released(self):
+        self.assertEqual(server._neutral_of(HELD), NEUTRAL)
+        self.assertEqual(server._neutral_of({"lx": 0.5, "buttons": {"a": True}, "dpad": [1, -1], "name": "x"}),
+                         {"lx": 0.0, "buttons": {"a": False}, "dpad": [0, 0], "name": "x"})
+
+    def test_stale_input_sends_neutral_once(self):
+        self.post("/input", HELD)
+        self.assertTrue(self.wait_for(lambda: len(self.end.got) >= 2), self.end.got)
+        self.assertEqual(self.end.got[0], HELD)
+        self.assertEqual(self.end.got[1], NEUTRAL)
+        time.sleep(1.2)
+        self.assertEqual(len(self.end.got), 2)               # one neutral, not a stream of them
+
+    def test_live_input_is_not_neutralised(self):
+        for _ in range(8):
+            self.post("/input", HELD)
+            time.sleep(0.1)
+        self.assertNotIn(NEUTRAL, self.end.got)
+
+    def test_pausing_forwarding_stops_the_arm(self):
+        self.post("/input", HELD)
+        self.assertTrue(self.wait_for(lambda: len(self.end.got) >= 1))
+        self.post("/control", {"forward": False})
+        self.assertTrue(self.wait_for(lambda: NEUTRAL in self.end.got), self.end.got)
+        n = len(self.end.got)
+        self.post("/input", HELD)                             # paused: dropped, not forwarded
+        time.sleep(0.8)
+        self.assertEqual(len(self.end.got), n)
+
+    def test_controller_endpoint(self):
+        self.assertEqual(json.loads(urllib.request.urlopen(self.base + "/controller", timeout=3).read()), {})
+        self.post("/input", HELD)
+        self.assertEqual(json.loads(urllib.request.urlopen(self.base + "/controller", timeout=3).read()), HELD)
+        time.sleep(0.5)                                       # stale: the firmware must see neutral
+        self.assertEqual(json.loads(urllib.request.urlopen(self.base + "/controller", timeout=3).read()), NEUTRAL)
 
 
 if __name__ == "__main__":

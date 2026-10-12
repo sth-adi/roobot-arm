@@ -7,6 +7,11 @@ Endpoints
   GET  /stream  long-lived stream: one JSON line per new state (+ 0.5 s heartbeat), no polling
   POST /control {"forward": true|false} pause/resume forwarding to the next server (used by the dashboard SAFE switch)
   GET  /health  simple liveness check
+  GET  /controller  the latest packet on its own (what the firmware polls on the UWE-RArm backend); neutral once stale
+
+Dead-man: the next server (and the UWE-RArm backend in particular) keeps the last packet it received for ever, so this
+server sends it a neutral packet (sticks 0, buttons released) when input has been silent for 1.5 s and when forwarding is
+paused with POST /control. Nothing is queued for later.
 
 Arm side channel (same endpoints as the UWE-RArm backend, so its firmware and the virtual arm both work):
   POST /status       arm status text (<= 4 KB);  GET /status returns it
@@ -29,13 +34,15 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BODY = 64 * 1024
+STALE_S = 1.5   # no input newer than this = the sender is gone
 
 _lock = threading.Lock()
 _state = {"data": None, "received_at": None, "count": 0}
 _cond = threading.Condition(_lock)  # wakes /stream clients the moment a new state arrives
 
 # Forwarding: only the newest state matters, so a worker sends whatever is latest.
-_fwd = {"url": None, "ok": None, "error": None, "sent": 0, "failed": 0, "enabled": True}
+_fwd = {"url": None, "ok": None, "error": None, "sent": 0, "failed": 0, "enabled": True,
+        "neutrals": 0, "flush_neutral": False}
 _fwd_wake = threading.Event()
 
 # Arm side channel: status text, calibration and mode (see the docstring).
@@ -56,30 +63,63 @@ def _valid_calibration(p):
     return None
 
 
+def _neutral_of(data):
+    """The same packet with every stick at 0 and every button released. The UWE-RArm backend keeps the last packet it
+    was given forever, so the arm only stops if somebody sends it one of these."""
+    if isinstance(data, bool):
+        return False
+    if isinstance(data, (int, float)):
+        return 0 if isinstance(data, int) else 0.0
+    if isinstance(data, list):
+        return [_neutral_of(v) for v in data]
+    if isinstance(data, dict):
+        return {k: _neutral_of(v) for k, v in data.items()}
+    return data
+
+
+def _post_forward(data):
+    req = urllib.request.Request(
+        _fwd["url"], data=json.dumps(data).encode(),
+        headers={"Content-Type": "application/json", "User-Agent": "roobot-arm-server/0.1"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=2.0) as r:
+            r.read()
+        with _lock:
+            _fwd.update(ok=True, error=None, sent=_fwd["sent"] + 1)
+    except (urllib.error.URLError, OSError) as e:
+        with _lock:
+            _fwd.update(ok=False, error=str(e), failed=_fwd["failed"] + 1)
+
+
 def _forward_worker():
-    last_count = 0
+    """Forward the newest state, and make sure the next server never keeps a held stick:
+    a neutral packet goes out when input goes stale (client closed, network lost) and when forwarding is paused."""
+    last_count, neutral_sent = 0, True
     while True:
-        _fwd_wake.wait()
+        _fwd_wake.wait(timeout=0.5)
         _fwd_wake.clear()
         with _lock:
-            data, count = _state["data"], _state["count"]
-        if data is None or count == last_count:
+            data, count, rec = _state["data"], _state["count"], _state["received_at"]
+            flush = _fwd["flush_neutral"]
+            _fwd["flush_neutral"] = False
+        if data is None:
             continue
-        last_count = count
-        if not _fwd["enabled"]:          # paused via POST /control: drop it, never queue for later
-            continue
-        req = urllib.request.Request(
-            _fwd["url"], data=json.dumps(data).encode(),
-            headers={"Content-Type": "application/json", "User-Agent": "roobot-arm-server/0.1"},
-            method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=2.0) as r:
-                r.read()
+        if flush:                         # forwarding was just paused (SAFE): stop whatever the arm is doing
+            neutral_sent = True
             with _lock:
-                _fwd.update(ok=True, error=None, sent=_fwd["sent"] + 1)
-        except (urllib.error.URLError, OSError) as e:
-            with _lock:
-                _fwd.update(ok=False, error=str(e), failed=_fwd["failed"] + 1)
+                _fwd["neutrals"] += 1
+            _post_forward(_neutral_of(data))
+        if count != last_count:
+            last_count, neutral_sent = count, False
+            if _fwd["enabled"]:           # paused via POST /control: drop it, never queue for later
+                _post_forward(data)
+        elif not neutral_sent and rec is not None and time.time() - rec >= STALE_S:
+            neutral_sent = True
+            if _fwd["enabled"]:
+                with _lock:
+                    _fwd["neutrals"] += 1
+                _post_forward(_neutral_of(data))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -149,8 +189,18 @@ class Handler(BaseHTTPRequestHandler):
                 out = {"state": _state["data"], "age_s": age, "count": _state["count"],
                        "forward_enabled": _fwd["enabled"]}
                 if _fwd["url"]:
-                    out["forward"] = dict(_fwd)
+                    out["forward"] = {k: v for k, v in _fwd.items() if k != "flush_neutral"}
                 self._send(200, out)
+        elif self.path == "/controller":
+            # The same packet the firmware polls on the UWE-RArm backend ({} until there is input). Input older than
+            # STALE_S comes back neutral, so a firmware reading this server directly stops when the sender is gone.
+            with _lock:
+                data, rec = _state["data"], _state["received_at"]
+            if data is None:
+                data = {}
+            elif rec is None or time.time() - rec >= STALE_S:
+                data = _neutral_of(data)
+            self._send(200, data)
         else:
             self._send(404, {"error": "not found"})
 
@@ -192,7 +242,10 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data.get("forward"), bool):
                 return self._send(400, {"error": "expected {\"forward\": true|false}"})
             with _lock:
+                if _fwd["enabled"] and not data["forward"]:
+                    _fwd["flush_neutral"] = True      # pausing must also stop the arm: the next server holds the last packet
                 _fwd["enabled"] = data["forward"]
+            _fwd_wake.set()
             return self._send(200, {"ok": True, "forward_enabled": data["forward"]})
         with _lock:
             _state.update(data=data, received_at=time.time(), count=_state["count"] + 1)

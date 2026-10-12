@@ -1105,7 +1105,13 @@ function mountArm(root) {
         <p class="note">Sticks have a 20% dead zone. Saved positions live in the ESP32's memory only: they are lost when it restarts.</p></details>
       <div class="sidesec"><h2>Electromagnet and keys</h2>
         <div class="inline"><button class="btn sm" id="w-mag" type="button" aria-pressed="false">Magnet off</button><button class="btn sm" id="w-reset" type="button">Reset keys</button></div>
-        <div class="inline" style="margin-top:6px"><button class="btn sm" id="s-send" type="button">Send sequence to host</button><button class="btn sm" id="s-copy" type="button">Copy JSON</button><button class="btn sm" id="s-load" type="button">Load JSON</button></div>
+        <details class="sidesec" id="s-lib"><summary>Sequences</summary>
+          <div class="inline" style="margin-top:6px"><input id="s-name" placeholder="name, e.g. box2_to_tray" maxlength="48" aria-label="Sequence name"><button class="btn sm" id="s-send" type="button">Save to host</button></div>
+          <input id="s-desc" placeholder="what it does" maxlength="400" aria-label="Sequence description" style="width:100%;margin-top:4px">
+          <div class="inline" style="margin-top:6px"><select id="s-pick" aria-label="Saved sequences"></select><button class="btn sm" id="s-run" type="button">Run</button><button class="btn sm" id="s-rev" type="button">Run reversed</button></div>
+          <div class="inline" style="margin-top:6px"><button class="btn sm" id="s-copy" type="button">Copy JSON</button><button class="btn sm" id="s-load" type="button">Load JSON</button></div>
+          <div class="note">Saved positions become poses; the magnet is stored as grab / release so a sequence can be run backwards. Files go in sequences/ on the host.</div>
+        </details>
         <div class="note" style="margin-top:6px">Hold the tip within 2 cm of a key and switch the magnet on to pick it up. Switch it off to let go: it falls onto whatever is below. The X button does the same.</div>
         <div class="note mono" id="w-keys"></div></div>
       <div class="sidesec"><h2>Emulated ESP32</h2>
@@ -1129,7 +1135,18 @@ function mountArm(root) {
   const model = $r("#a-model");
   model.addEventListener("change", async () => { const v = model.value; await api("/api/sim", { model: v === "improved" ? "improved" : "stock", patch: v === "stock-patch" }); });
   $r("#w-mag").addEventListener("click", async () => { const r = await api("/api/world", { magnet: "toggle" }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
-  $r("#s-send").addEventListener("click", async () => { const r = await api("/api/sequence", {}); toast(r.ok ? `Sent ${r.packet.count} positions to the host: ${r.path}` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); });
+  const refreshSeqs = async () => {
+    try { const j = await (await fetch("/api/sequences")).json(); const sel = $r("#s-pick"); const cur = sel.value;
+      sel.innerHTML = (j.sequences || []).map((q) => `<option value="${q.name}">${q.name} (${q.count})</option>`).join("") || '<option value="">no sequences yet</option>'; sel.value = cur; } catch (e) { /* hub not reachable */ } };
+  refreshSeqs();
+  $r("#s-send").addEventListener("click", async () => {
+    const r = await api("/api/sequence", { name: $r("#s-name").value.trim(), description: $r("#s-desc").value.trim() });
+    toast(r.ok ? `Saved ${r.packet.name} (${r.packet.count} poses) on the host: ${r.path}` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); refreshSeqs(); });
+  const runSeq = async (reverse) => { const name = $r("#s-pick").value; if (!name) return toast("Pick a sequence first", "bad");
+    const r = await api("/api/sequence", { name, use: true, run: true, reverse });
+    toast(r.ok ? `Running ${r.name}${reverse ? " reversed" : ""}` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); };
+  $r("#s-run").addEventListener("click", () => runSeq(false));
+  $r("#s-rev").addEventListener("click", () => runSeq(true));
   $r("#s-copy").addEventListener("click", async () => {
     try { const j = JSON.stringify(await (await fetch("/api/sequence")).json(), null, 2); await navigator.clipboard.writeText(j); toast("Sequence JSON copied", "ok"); }
     catch (e) { toast("Could not copy; use Send sequence to host", "bad"); } });

@@ -6,6 +6,19 @@ Xbox controller -> HTTP server, as the input path for the robot arm.
 - `controller_client.py` – reads a generic Xbox One controller (pygame) and POSTs its state as JSON.
 - `controller_gui.py` - live Tk window: draws the controller and logs each move as the raw HTTP packet. `python controller_gui.py [--no-send]`
 
+## How the ESP32 connection works
+
+The ESP32 never talks to the controller. It is a client that polls a web server, and the controller (or this dashboard) feeds the same server.
+
+1. **Power on.** The firmware sets all four servos to 90 degrees, then joins the WiFi network from `Secrets.h` (SSID, password, `HOST`).
+2. **Checks the link.** It pings `HOST`, reports the latency to the server (`POST /status`), then asks `GET /mode` (the reply header `mode` says normal or Training).
+3. **Loads calibration.** `GET /calibration` returns the joint limits and homes. With none (or Training mode, or A held at power on) it runs the calibration routine and `POST`s the result back. The dashboard pushes its calibration here before starting.
+4. **Polls for input.** About every 20 ms it does `GET /controller` over HTTPS and reads `{"LSX","LSY","RSX","RSY","A","B","X","Y"}`. This is the packet the controller client or the dashboard sent to `POST /input` on the server.
+5. **Moves the arm.** Each packet adds to a target position (sticks times elapsed time), inverse kinematics turns it into four joint angles, and those go straight to the servos. Reports go back with `POST /status`.
+6. **If the link drops** the stock firmware has no timeout: it keeps the last target and, when packets resume, integrates the whole gap in one go. The patch, the dead-man in `server.py` and the SAFE switch exist for this.
+
+On this PC the same steps run in the emulator, with a proxy standing in for the network (see below).
+
 ## One tap
 
 Double-click `Start Dashboard.bat` (Windows) or run `./start.sh` / `python launch.py`: it starts the input server and the hub and opens the **Robot** page, a large 3D view of the arm

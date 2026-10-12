@@ -1037,7 +1037,7 @@ function mountArm(root) {
   root.innerHTML = `<div class="armstage">
     <section class="viewer" aria-label="Robot viewer">
       <canvas id="v3d" role="img" aria-label="3D view of the robot arm. Drag to turn, pinch or scroll to zoom, double tap to reset."></canvas>
-      <div class="vhud tl"><div class="st idle" id="v-mode">-</div><div class="mono" id="v-xyz"></div><div class="note" id="v-status"></div></div>
+      <div class="vhud tl"><div class="st idle" id="v-mode">-</div><div class="mono" id="v-xyz"></div><div class="note" id="v-status"></div><div class="note mono" id="v-saved"></div></div>
       <div class="vhud tr"><button class="btn sm" type="button" data-view="iso">3D</button><button class="btn sm" type="button" data-view="top">Top</button><button class="btn sm" type="button" data-view="side">Side</button><button class="btn sm" type="button" id="v-clr">Clear path</button></div>
       <div class="vhud bl" id="v-joints"></div>
     </section>
@@ -1048,6 +1048,18 @@ function mountArm(root) {
       <div class="note" id="c-desc" style="margin:6px 0 10px"></div>
       <div class="inline"><button class="btn sm" id="a-home" type="button">${icon("arrows-clockwise", "sm")}Go home</button>
         <select id="a-model" aria-label="Firmware to simulate"><option value="improved">Reference</option><option value="stock">Stock firmware</option><option value="stock-patch">Stock + patch</option></select></div>
+      <details class="sidesec legend" open><summary>What the controls do</summary>
+        <dl>
+          <dt>Left stick</dt><dd>Moves the tool sideways (x) and in or out (y), about 20 mm/s at full tilt.</dd>
+          <dt>Right stick up / down</dt><dd>Moves the tool up and down (z).</dd>
+          <dt>Right stick left / right</dt><dd>Tilts the tool angle, about 20 degrees/s.</dd>
+          <dt>A (tap)</dt><dd>Saves the current position. Up to 20 are kept; a 21st is ignored.</dd>
+          <dt>A (hold 0.75 s)</dt><dd>Replays the saved positions in order, one every 1.5 s, looping. Let go of A to stop.</dd>
+          <dt>B</dt><dd>Go home: every joint returns to its home angle, then the servos are released.</dd>
+          <dt>X, Y, triggers, bumpers, d-pad</dt><dd>Not used by the arm.</dd>
+          <dt>Hold A while the ESP32 starts</dt><dd>Calibration mode: the right stick moves one joint, A records its minimum, maximum and home in turn, for all four joints.</dd>
+        </dl>
+        <p class="note">Sticks have a 20% dead zone. Saved positions live in the ESP32's memory only: they are lost when it restarts.</p></details>
       <div class="sidesec"><h2>Emulated ESP32</h2>
         <div class="inline"><select id="m-fw" aria-label="Firmware"><option value="stock">Stock</option><option value="patched">Stock + patch</option><option value="rarm">Rewrite</option></select>
           <select id="m-net" aria-label="Network"></select><button class="btn sm" id="m-go" type="button">Start</button></div>
@@ -1112,6 +1124,7 @@ function mountArm(root) {
       m.textContent = p.emulated ? "Emulated ESP32" : p.attached ? MODE_TEXT[p.mode] || p.mode : "servos released";
       $r("#v-xyz").textContent = `x ${f1(p.xyz[0], 0)}  y ${f1(p.xyz[1], 0)}  z ${f1(p.xyz[2], 0)} mm`;
       $r("#v-status").textContent = p.ik_ok ? p.status : "out of reach: holding position";
+      $r("#v-saved").textContent = p.emulated ? "" : `saved positions: ${p.saved}/20${p.mode === "replay" ? ", replaying #" + (p.replay_idx + 1) : ""}`;
       for (let i = 0; i < 4; i++) {
         const [lo, hi] = p.limits[i], a = Math.min(lo, hi), b = Math.max(lo, hi);
         $r("#vj-a" + i).textContent = f1(p.angles[i], 0) + "°";

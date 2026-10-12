@@ -137,8 +137,12 @@ Calibration *training* (the A-button flow) is not simulated: enter limits and ho
 
 **PS5 controller.** Yes. `controller_client.py` and `controller_gui.py` pick the DualSense layout automatically from the pad's name (`--profile ps5` forces it, `--profile xbox` the old one): Cross/Circle/Square/Triangle are A/B/X/Y, so **Circle = go home** and **Cross = save / hold to replay**. The browser sticks on the Control page use the standard Gamepad API mapping, which DualSense matches. Wire it by USB or Bluetooth; if a button or stick is off, run with `--debug` to see the raw indices and edit the `ps5` profile at the top of `controller_client.py`.
 
+**Which firmware is simulated.** The Control page has a selector: the reference model, the **stock UWE-RArm firmware** (quirks included: it swings back to the
+pre-home pose 3 s after Go home, has no speed limit, and integrates packet gaps in one go), or **stock + patch**. The stock and patched models are checked against the real
+`main.cpp` compiled on a PC (`sim/test_stock.py`). See `firmware/stock/README.md`; the patch (`firmware/stock/patches/`) is the small, reviewable way to add the damper and failsafes to his firmware.
+
 ## Real firmware (firmware/rarm)
 
-`firmware/rarm/` is the UWE-RArm ESP32 firmware (copied from Samwally1/UWE-RArm at 3b9b8aa) with the damper and a stale-input stop added, plus a PC test that runs its movement code against the Python arm. It is optional: the stock firmware works with everything else here unchanged. See `firmware/rarm/README.md` before flashing it.
+`firmware/rarm/` is the UWE-RArm ESP32 firmware (copied from Samwally1/UWE-RArm at 3b9b8aa) with the damper and a stale-input stop added, plus a PC test that runs its movement code against the Python arm. This is a larger rewrite and optional; the smaller route is the patch in `firmware/stock/`. The stock firmware works with everything else here unchanged. See `firmware/rarm/README.md` before flashing it.
 
 The "Arm and board" and "Firmware" pages still target the older USB jog sketch in `arduino/arm_receiver/`.

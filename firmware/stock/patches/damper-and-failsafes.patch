@@ -1,0 +1,236 @@
+diff -ruN a/src/RobotCharacteristics.h b/src/RobotCharacteristics.h
+--- a/src/RobotCharacteristics.h
++++ b/src/RobotCharacteristics.h
+@@ -3,6 +3,12 @@
+ float HomeChordsZ = 0;
+ float HeadAngle = 90;
+ 
++// Joint speed limit (deg/s per joint). The dashboard can change it live with "maxSpeed" in the packet (clamped 1..60).
++float MaxJointDegPerSecond = 30;
++const float MaxJointDegPerSecondCap = 60;
++// Stick input pauses while any joint is this many degrees behind its target (the arm is lagging the speed limit).
++const float LagHoldDegrees = 25;
++
+ float AngleSense = 20;
+ float ChordSense = 20;
+ 
+diff -ruN a/src/SticksToXYZ.h b/src/SticksToXYZ.h
+--- a/src/SticksToXYZ.h
++++ b/src/SticksToXYZ.h
+@@ -13,6 +13,7 @@
+     int bButton;
+     int xButton;
+     int yButton;
++    float maxSpeed;   // optional "maxSpeed" from the packet, deg/s; 0 = not sent
+ };
+ 
+ struct RobotPosition {
+diff -ruN a/src/WifiFunctions.h b/src/WifiFunctions.h
+--- a/src/WifiFunctions.h
++++ b/src/WifiFunctions.h
+@@ -170,6 +170,12 @@
+ 
+ bool DecodeStickInput(const String& state, StickInput& input)
+ {
++    // "maxSpeed" is optional; anything missing, zero or negative leaves the current limit alone.
++    float requested = 0.0f;
++    input.maxSpeed = ReadControllerValue(state, "maxSpeed", requested) && requested > 0.0f
++        ? (requested > MaxJointDegPerSecondCap ? MaxJointDegPerSecondCap : requested)
++        : 0.0f;
++
+     return ReadControllerValue(state, "LSX", input.leftX)
+         && ReadControllerValue(state, "LSY", input.leftY)
+         && ReadControllerValue(state, "RSX", input.rightX)
+diff -ruN a/src/main.cpp b/src/main.cpp
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -12,7 +12,7 @@
+ static unsigned long lastPositionPrintTime = 0;
+ static unsigned long lastTrainingAnglePrintTime = 0;
+ 
+-StickInput controllerInput = {0, 0, 0, 0, 0, 0, 0, 0};
++StickInput controllerInput = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+ Servo jointServos[4];
+ 
+ constexpr int MaxSavedPositions = 20;
+@@ -28,6 +28,9 @@
+ 
+ RobotAngles targetAngles = {HALF_PI, HALF_PI, 0.0f, 0.0f};
+ 
++// What the servos are actually told.  It follows targetAngles no faster than MaxJointDegPerSecond.
++RobotAngles commandedAngles = {HALF_PI, HALF_PI, 0.0f, 0.0f};
++
+ float JointAngleAt(const RobotAngles& angles, int jointIndex)
+ {
+     switch (jointIndex) {
+@@ -57,6 +60,53 @@
+     return inverted ? 180 - clampedAngle : clampedAngle;
+ }
+ 
++// Move commandedAngles toward goal, no joint faster than the limit and all four scaled together. True on arrival.
++bool SlewCommandedAngles(const RobotAngles& goal, float seconds)
++{
++    const float step = radians(MaxJointDegPerSecond) * seconds;
++    const float d[4] = {goal.s1 - commandedAngles.s1, goal.s2 - commandedAngles.s2,
++                        goal.s3 - commandedAngles.s3, goal.s4 - commandedAngles.s4};
++    float biggest = 0.0f;
++    for (int i = 0; i < 4; ++i) {
++        if (fabsf(d[i]) > biggest) biggest = fabsf(d[i]);
++    }
++    if (biggest <= step || biggest < 1e-9f) {
++        commandedAngles = goal;
++        return true;
++    }
++    const float k = step / biggest;
++    commandedAngles = {commandedAngles.s1 + d[0] * k, commandedAngles.s2 + d[1] * k,
++                       commandedAngles.s3 + d[2] * k, commandedAngles.s4 + d[3] * k};
++    return false;
++}
++
++// True when the whole-degree servo command differs from the last one sent.  Re-sending an unchanged command (or one
++// that only differs by floating-point noise) would power a released servo up again for nothing.
++bool ServoCommandChanged(const RobotAngles& angles)
++{
++    static int lastDegrees[4] = {-1, -1, -1, -1};
++    bool changed = false;
++    for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
++        const int degreesNow = static_cast<int>(lroundf(degrees(JointAngleAt(angles, jointIndex))));
++        if (degreesNow != lastDegrees[jointIndex]) {
++            lastDegrees[jointIndex] = degreesNow;
++            changed = true;
++        }
++    }
++    return changed;
++}
++
++// True while any joint is further than LagHoldDegrees behind its target.
++bool ArmIsLagging()
++{
++    const float a[4] = {targetAngles.s1 - commandedAngles.s1, targetAngles.s2 - commandedAngles.s2,
++                        targetAngles.s3 - commandedAngles.s3, targetAngles.s4 - commandedAngles.s4};
++    for (int i = 0; i < 4; ++i) {
++        if (fabsf(degrees(a[i])) > LagHoldDegrees) return true;
++    }
++    return false;
++}
++
+ void CommandJointAngles(const RobotAngles& angles)
+ {
+     for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
+@@ -230,6 +280,7 @@
+     // Start Cartesian control at the trained home pose, rather than at an
+     // arbitrary coordinate which may not be reachable.
+     targetAngles = HomeJointAngles();
++    commandedAngles = targetAngles;
+     targetPosition = ForwardKinTransform(targetAngles);
+     for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
+         if (!jointServos[jointIndex].attached()) {
+@@ -272,9 +323,11 @@
+     static bool previousA = false;
+     static bool movingHome = false;
+     static bool replayingPositions = false;
+-    static unsigned long homeStartTime = 0;
+     static unsigned long aPressStartTime = 0;
+     static unsigned long lastReplayPositionTime = 0;
++    static unsigned long lastSlewTime = 0;
++    static unsigned long homeArrivedTime = 0;
++    static bool homeArrived = false;
+     static int replayPositionIndex = 0;
+     constexpr unsigned long replayStartHoldMs = 750;
+     constexpr unsigned long replayPositionIntervalMs = 1500;
+@@ -284,21 +337,15 @@
+         bool currentA = controllerInput.aButton == 1;
+         const unsigned long currentTime = millis();
+ 
+-        if (currentB && !previousB) {
+-            for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
+-                if (!jointServos[jointIndex].attached()) {
+-                    jointServos[jointIndex].setPeriodHertz(50);
+-                    jointServos[jointIndex].attach(
+-                        JointPins[jointIndex], 500, 2400
+-                    );
+-                }
++        if (controllerInput.maxSpeed > 0.0f) {
++            MaxJointDegPerSecond = controllerInput.maxSpeed;
++        }
+ 
+-                jointServos[jointIndex].write(
+-                    ServoCommandAngle(jointIndex, JointHomes[jointIndex])
+-                );
+-            }
++        if (currentB && !previousB) {
++            ServoCommandChanged(commandedAngles);
++            CommandJointAngles(commandedAngles);   // attach and hold; the slew below walks the arm home
++            homeArrived = false;
+ 
+-            homeStartTime = millis();
+             movingHome = true;
+ 
+             SendArmStatus("Moving all joints home");
+@@ -337,16 +384,16 @@
+             if (InverseKinTransform(replayTarget, targetAngles, replayAngles)) {
+                 targetPosition = replayTarget;
+                 targetAngles = replayAngles;
+-                CommandJointAngles(targetAngles);
+             }
+             replayPositionIndex = (replayPositionIndex + 1) % savedPositionCount;
+             lastReplayPositionTime = currentTime;
+         }
+ 
+-        if (lastPositionUpdateTime != 0 && !movingHome && !replayingPositions) {
++        if (lastPositionUpdateTime != 0 && !movingHome && !replayingPositions && !ArmIsLagging()) {
++            const unsigned long elapsedMs = min(currentTime - lastPositionUpdateTime, 100UL);
+             const RobotPosition requestedPosition = SticksToXYZ(
+                 controllerInput,
+-                currentTime - lastPositionUpdateTime,
++                elapsedMs,
+                 targetPosition
+             );
+             RobotAngles requestedAngles;
+@@ -354,7 +401,6 @@
+                                     requestedAngles)) {
+                 targetPosition = requestedPosition;
+                 targetAngles = requestedAngles;
+-                CommandJointAngles(targetAngles);
+             }
+         }
+         lastPositionUpdateTime = currentTime;
+@@ -376,13 +422,32 @@
+         }
+     }
+ 
+-    if (movingHome && millis() - homeStartTime >= 3000) {
+-        for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
+-            jointServos[jointIndex].detach();
+-        }
++    // Speed limit: walk the servo angles toward the target (or home) no faster than MaxJointDegPerSecond.
++    const unsigned long slewNow = millis();
++    const float slewSeconds = lastSlewTime == 0 ? 0.0f : min(slewNow - lastSlewTime, 100UL) / 1000.0f;
++    lastSlewTime = slewNow;
++    const bool arrived = SlewCommandedAngles(movingHome ? HomeJointAngles() : targetAngles, slewSeconds);
++    if (ServoCommandChanged(commandedAngles)) {
++        CommandJointAngles(commandedAngles);
++    }
+ 
+-        movingHome = false;
+-        SendArmStatus("Servo signals disabled");
++    // Going home: once there, make the target match (so the next stick move starts from home, not from where the
++    // arm was before), keep the signal on for a second, then release the servos.
++    if (movingHome && arrived) {
++        if (!homeArrived) {
++            homeArrived = true;
++            homeArrivedTime = slewNow;
++            targetAngles = HomeJointAngles();
++            targetPosition = ForwardKinTransform(targetAngles);
++        } else if (slewNow - homeArrivedTime >= 1000) {
++            for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
++                jointServos[jointIndex].detach();
++            }
++
++            movingHome = false;
++            homeArrived = false;
++            SendArmStatus("Servo signals disabled");
++        }
+     }
+ 
+     delay(20);

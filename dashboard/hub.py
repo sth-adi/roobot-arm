@@ -46,6 +46,7 @@ sys.path.insert(0, str(HERE))
 from serial_link import SerialLink, BUTTON_ORDER  # noqa: E402
 from sim.armsim import ArmSim, STALE_S, internal_from_wire, wire_from_internal  # noqa: E402
 from emu_runner import EmuRunner  # noqa: E402
+from stamp import code_stamp  # noqa: E402
 from sim.workcell import Workcell  # noqa: E402
 
 IS_WIN = sys.platform == "win32"
@@ -695,6 +696,7 @@ class Hub:
             "sim": self._sim_snapshot(),
             "emu": self.emu.snapshot(),
             "phone_url": self.phone_url,
+            "build": BUILD,
             "emu_input": self.emu.running and self.forward_control is True and not self.armed,
         }
 
@@ -758,6 +760,8 @@ def _find_port_cached(self):
 
 SerialLink.find_port_cached = _find_port_cached
 HUB = None
+HTTPD = None
+BUILD = code_stamp()                # which code this running hub loaded
 LAN_TOKEN = None                    # set with --lan: other devices on the network need this key
 
 
@@ -939,6 +943,11 @@ class Handler(BaseHTTPRequestHandler):
                 if push_rate:
                     HUB.push_speed()
                 return self._json(200, {"ok": True, "sim": HUB._sim_snapshot()})
+            if path == "/api/shutdown":         # lets launch.py replace an old hub with the current code (this computer only)
+                if not self._is_local():
+                    return self._json(403, {"error": "forbidden"})
+                threading.Thread(target=HTTPD.shutdown, daemon=True).start()
+                return self._json(200, {"ok": True})
             if path == "/api/world":            # the electromagnet and the keys (simulation only: nothing is sent to the arm)
                 with HUB.sim_lock:
                     if d.get("reset"):
@@ -984,7 +993,7 @@ def lan_ip():
 
 
 def main():
-    global HUB
+    global HUB, HTTPD
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--server", default="http://127.0.0.1:8000", help="the local input server")
@@ -1016,6 +1025,7 @@ def main():
     except OSError as e:
         raise SystemExit(f"Cannot listen on {bind}:{args.port} ({e}). Is the hub already running?")
     httpd.daemon_threads = True
+    HTTPD = httpd
     HUB.start()
     url = f"http://127.0.0.1:{args.port}"
     print(f"Robot arm hub on {url}  (output starts SAFE; Ctrl+C to stop)")

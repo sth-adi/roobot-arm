@@ -1087,6 +1087,7 @@ function mountArm(root) {
       <div id="c-pad">${padSVG()}</div>
       <div class="note" id="c-desc" style="margin:6px 0 10px"></div>
       <div class="inline"><button class="btn sm" id="a-home" type="button">${icon("arrows-clockwise", "sm")}Go home</button>
+        <button class="btn sm" id="a-play" type="button" aria-pressed="false">Play saved</button>
         <select id="a-model" aria-label="Firmware to simulate"><option value="stock-patch">Ours (stock + patch)</option><option value="stock">Stock, as shipped</option><option value="improved">Reference</option></select></div>
       <details class="sidesec legend" open><summary>What the controls do</summary>
         <dl>
@@ -1094,10 +1095,11 @@ function mountArm(root) {
           <dt>Right stick up / down</dt><dd>Moves the tool up and down (z).</dd>
           <dt>Right stick left / right</dt><dd>Tilts the tool angle, about 20 degrees/s.</dd>
           <dt>A (tap)</dt><dd>Saves the current position and whether the simulated magnet is on. Up to 20 are kept; a 21st is ignored. In a replay the magnet is set to the saved state when the arm gets there.</dd>
+          <dt>Y, or the Play saved button</dt><dd>Starts the replay and keeps it going with nothing held; press again to stop. Simulation only: the real firmware only replays while A is held.</dd>
           <dt>A (hold 0.75 s)</dt><dd>Replays the saved positions in order, one every 1.5 s, looping. Let go of A to stop. The stock firmware also saves one extra position (where the arm was) every time you start a replay; the reference model and the patch undo that save.</dd>
           <dt>B</dt><dd>Go home: every joint returns to its home angle, then the servos are released.</dd>
           <dt>X</dt><dd>Switches the simulated electromagnet on or off (each press toggles it). The real firmware ignores X.</dd>
-          <dt>Y, triggers, bumpers, d-pad</dt><dd>Not used.</dd>
+          <dt>Triggers, bumpers, d-pad</dt><dd>Not used.</dd>
           <dt>Hold A while the ESP32 starts</dt><dd>Calibration mode: the right stick moves one joint, A records its minimum, maximum and home in turn, for all four joints.</dd>
         </dl>
         <p class="note">Sticks have a 20% dead zone. Saved positions live in the ESP32's memory only: they are lost when it restarts.</p></details>
@@ -1122,6 +1124,7 @@ function mountArm(root) {
   root.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", () => viewer.view(b.dataset.view)));
   $r("#v-clr").addEventListener("click", () => viewer.clearTrail());
   $r("#a-home").addEventListener("click", async () => { const r = await api("/api/sim", { home: true }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
+  $r("#a-play").addEventListener("click", async () => { const r = await api("/api/sim", { replay: "toggle" }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
   const model = $r("#a-model");
   model.addEventListener("change", async () => { const v = model.value; await api("/api/sim", { model: v === "improved" ? "improved" : "stock", patch: v === "stock-patch" }); });
   $r("#w-mag").addEventListener("click", async () => { const r = await api("/api/world", { magnet: "toggle" }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
@@ -1172,6 +1175,7 @@ function mountArm(root) {
       $r("#v-xyz").textContent = `x ${f1(p.xyz[0], 0)}  y ${f1(p.xyz[1], 0)}  z ${f1(p.xyz[2], 0)} mm`;
       $r("#v-status").textContent = p.ik_ok ? p.status : "out of reach: holding position";
       $r("#v-saved").textContent = p.emulated ? "" : `saved positions: ${p.saved}/20${p.mode === "replay" ? ", replaying #" + (p.replay_idx + 1) : ""}${p.world && p.world.saved_magnet.some(Boolean) ? "  (magnet on at " + p.world.saved_magnet.map((m, i) => (m ? "#" + (i + 1) : "")).filter(Boolean).join(", ") + ")" : ""}`;
+      const pb = $r("#a-play"); pb.textContent = p.replaying ? "Stop replay" : "Play saved"; pb.setAttribute("aria-pressed", String(!!p.replaying));
       const w = p.world;
       if (w) {
         const mb = $r("#w-mag"); mb.textContent = w.magnet ? "Magnet ON" : "Magnet off"; mb.setAttribute("aria-pressed", String(w.magnet));

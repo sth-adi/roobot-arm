@@ -55,6 +55,8 @@ class Workcell:
         return name if k["pos"][2] <= h + KEY_HALF_THICK + 0.5 else "falling"
 
     # ---- control ----------------------------------------------------------------------------------------------
+    last_applied = 0
+
     def set_magnet(self, on):
         on = bool(on)
         if on == self.magnet:
@@ -107,12 +109,14 @@ class Workcell:
             return
         idx = (replay_idx - 1) % n                           # the position the replay is moving to
         if self._pending is not None and self._pending != idx and self._pending < n:
+            self.last_applied = self._pending
             self.set_magnet(self.saved_magnet[self._pending])    # it moved on before arriving: do not skip the magnet change
             self._pending = None
         if self._pending is None and idx != getattr(self, "_last_idx", None):
             self._pending = idx
         self._last_idx = idx
         if self._pending is not None and math.dist(tip, saved[self._pending][:3]) < 6.0:
+            self.last_applied = self._pending
             self.set_magnet(self.saved_magnet[self._pending])
             self._pending = None
 

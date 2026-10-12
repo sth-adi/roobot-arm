@@ -62,6 +62,7 @@ AXES = ("lx", "ly", "rx", "ry")
 TRIGGERS = ("lt", "rt")
 BOARD_CMD_RE = re.compile(r"^(!(rate|live|range) \d{1,4}(\.\d{1,2})?|!show)$")
 DEADMAN_S = 15.0          # ARMED drops back to SAFE if no dashboard has been connected this long
+IDLE_WIRE = {"LSX": 0.0, "LSY": 0.0, "RSX": 0.0, "RSY": 0.0, "A": False, "B": False, "X": False, "Y": False}
 NEUTRAL = {"lx": 0.0, "ly": 0.0, "rx": 0.0, "ry": 0.0, "lt": 0.0, "rt": 0.0,
            "buttons": {k: False for k in BUTTON_ORDER}, "dpad": [0, 0]}
 
@@ -118,6 +119,7 @@ class Hub:
         self._sim_status_sent = None
         self._cal_synced = False
         self.emu = EmuRunner(self.server, self.log)   # emulated ESP32 + network (Control page)
+        self._prev_y = False
         self.phone_url = None                   # set by main() with --lan
         self.cell = Workcell()                  # boxes, keys, tray and the electromagnet (sim/workcell.py)
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
@@ -240,14 +242,23 @@ class Hub:
             now = time.monotonic()
             dt, last = now - last, now
             wire = self.latest_wire if (self.latest_wire is not None and time.time() - self.latest_recv < STALE_S) else None
+            if wire is None and self.sim.latched:
+                wire = dict(IDLE_WIRE)                  # a started replay runs on without any controller input
             try:
                 with self.sim_lock:
+                    if wire is not None and wire.get("Y") and not self._prev_y:
+                        self.sim.toggle_replay()        # Y: start or stop the replay (simulation only)
+                    self._prev_y = bool(wire and wire.get("Y"))
                     self.sim.step(wire, dt)
                     snap = self._pose_snapshot() if now - pose_t >= 0.04 else None
                     if snap is not None:
                         self.cell.step(snap["points"][4], wire.get("X") if wire else False, now - pose_t if pose_t else 0.04)
-                        if not self.emu.running:           # with the emulated firmware its own saved list is not visible here
-                            self.cell.track_saved(self.sim.saved, self.sim.replaying, self.sim.replay_idx, snap["points"][4])
+                        # the virtual arm runs the same logic on the same input, so its saved list and replay schedule stand in for the
+                        # emulated firmware's (which the hub cannot see); arrival is judged from the arm that is drawn
+                        before = self.cell.magnet
+                        self.cell.track_saved(self.sim.saved, self.sim.replaying, self.sim.replay_idx, snap["points"][4])
+                        if self.cell.magnet != before:
+                            self.log("hub", "replay: magnet %s at saved position #%d" % ("ON" if self.cell.magnet else "off", self.cell.last_applied + 1))
                         snap["world"] = self.cell.snapshot()
                 if snap is not None:
                     pose_t = now
@@ -928,6 +939,9 @@ class Handler(BaseHTTPRequestHandler):
                         HUB.sim.set_rate(d["rate"])
                     if "tool" in d:
                         HUB.sim.set_tool(d["tool"])
+                    if "replay" in d:
+                        r = d["replay"]
+                        HUB.sim.toggle_replay() if r == "toggle" else (HUB.sim.start_replay() if r else HUB.sim.stop_replay())
                     if "model" in d:
                         HUB.sim.set_model(d["model"], bool(d.get("patch")))
                     if d.get("home"):

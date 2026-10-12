@@ -203,3 +203,41 @@ class Calibration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TapAndHoldTest(unittest.TestCase):
+    """A tap saves a position; holding A to replay does not leave an extra save behind."""
+
+    def _run(self, sim, a, seconds, dt=0.02):
+        pkt = {"LSX": 0, "LSY": 0, "RSX": 0, "RSY": 0, "A": a, "B": False, "X": False, "Y": False}
+        for _ in range(int(seconds / dt)):
+            sim.step(pkt, dt)
+
+    def test_tap_saves_once(self):
+        for model, patch in (("improved", False), ("stock", False), ("stock", True)):
+            sim = A.ArmSim(model=model, patch=patch)
+            self._run(sim, True, 0.2)
+            self._run(sim, False, 0.2)
+            self.assertEqual(len(sim.saved), 1, (model, patch))
+
+    def test_hold_to_replay_does_not_add_a_save(self):
+        for model, patch in (("improved", False), ("stock", True)):
+            sim = A.ArmSim(model=model, patch=patch)
+            self._run(sim, True, 0.1)
+            self._run(sim, False, 0.1)
+            self._run(sim, True, 1.2)                         # hold: replay starts after 0.75 s
+            self.assertEqual(len(sim.saved), 1, (model, patch))
+            self.assertEqual(sim.mode if model == "improved" else ("replay" if sim._replaying else "x"), "replay", (model, patch))
+
+    def test_stock_hold_still_saves_the_start_position(self):
+        sim = A.ArmSim(model="stock", patch=False)               # the unpatched firmware's behaviour, kept as it is
+        self._run(sim, True, 0.1)
+        self._run(sim, False, 0.1)
+        self._run(sim, True, 1.2)
+        self.assertEqual(len(sim.saved), 2)
+
+    def test_hold_with_nothing_saved_before_does_not_replay(self):
+        sim = A.ArmSim()
+        self._run(sim, True, 1.2)
+        self.assertEqual(len(sim.saved), 1)
+        self.assertNotEqual(sim.mode, "replay")

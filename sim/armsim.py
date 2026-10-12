@@ -283,6 +283,14 @@ class ArmSim:
         else:
             self._start_home()
 
+    def save_here(self):
+        """Add the arm's current position to the saved list (what A does). False when the list is full."""
+        if len(self.saved) >= MAX_SAVED:
+            return False
+        self.saved.append(self._t_pos if self.model == "stock" else self.pose())
+        self.say("Position %d saved" % len(self.saved))
+        return True
+
     def clear_saved(self):
         self.saved.clear()
         self.say("Saved positions cleared")

@@ -16,7 +16,11 @@ controller_client.py --url http://127.0.0.1:8101/input        (or straight to th
 
 ## Run it
 
-Needs g++ (and `patch` for `--firmware patched`), Linux, macOS or WSL (it uses POSIX sockets).
+Needs g++ (and `patch` for `--firmware patched`). Works on Linux, macOS and Windows.
+
+**Windows:** install [MSYS2](https://www.msys2.org), open the *UCRT64* shell and run `pacman -S mingw-w64-ucrt-x86_64-gcc patch git`, then run the commands below from that shell
+(or from a normal terminal with `C:\msys64\ucrt64\bin` on PATH). WSL also works and needs nothing special. The Windows build uses Winsock; I could only verify it by cross-compiling
+and running under Wine, not on a real Windows machine, so tell me if it misbehaves.
 
 ```
 python server.py                                                     # terminal 1

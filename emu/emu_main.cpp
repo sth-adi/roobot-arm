@@ -48,7 +48,9 @@ int main()
 {
     signal(SIGINT, onSignal);
     signal(SIGTERM, onSignal);
+#ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
+#endif
     const char* secs = getenv("EMU_SECONDS");
     const unsigned long endAt = secs ? millis() + (unsigned long)(atof(secs) * 1000) : 0;
 

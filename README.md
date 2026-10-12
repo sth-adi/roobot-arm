@@ -144,7 +144,7 @@ pre-home pose 3 s after Go home, has no speed limit, and integrates packet gaps 
 ## Emulated ESP32 on a network (emu/)
 
 `emu/` runs the firmware's real `main.cpp` on your PC against the real server over real sockets, with a proxy (`emu/netproxy.py`) that makes the link behave like the network you pick
-(latency, jitter, loss, outages, TLS handshake cost). See `emu/README.md`. The preset numbers are assumptions until calibrated against the board.
+(latency, jitter, loss, outages, TLS handshake cost). See `emu/README.md` (includes Windows setup via MSYS2 or WSL). The preset numbers are assumptions until calibrated against the board.
 
 ## Real firmware (firmware/rarm)
 

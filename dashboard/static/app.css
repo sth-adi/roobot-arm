@@ -305,5 +305,3 @@ body.fill #main { max-width: none; padding: 0; }
 #w-keys { white-space: pre-line; margin-top: 4px; }
 #w-mag[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 #a-play[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-.seqlist { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; max-height: 240px; overflow: auto; }
-.seqrow { display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--line, #2a2f37); border-radius: 8px; }

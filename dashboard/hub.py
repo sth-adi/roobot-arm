@@ -1165,13 +1165,6 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/sequence":         # save the move sequence on the host as JSON, load one back, or run one from the library
                 try:
                     rev, run = bool(d.get("reverse")), bool(d.get("run"))
-                    if isinstance(d.get("delete"), str):
-                        LIBRARY.delete(d["delete"])
-                        HUB.log("hub", "sequence %s deleted" % d["delete"])
-                        return self._json(200, {"ok": True})
-                    if isinstance(d.get("rename"), dict):
-                        LIBRARY.rename(str(d["rename"].get("from", "")), str(d["rename"].get("to", "")))
-                        return self._json(200, {"ok": True})
                     if "load" in d:
                         seq = HUB.load_sequence(d["load"], rev, run)
                         return self._json(200, {"ok": True, "loaded": seq["count"], "name": seq["name"]})

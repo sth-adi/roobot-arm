@@ -825,10 +825,14 @@ class Hub:
             library = LIBRARY.list()
             plan = AGENT.choose(request, library, st)
             if not plan["sequence"]:
+                if plan.get("ai_error"):
+                    self._tlog("Groq was not used: " + plan["ai_error"])
                 return self._tlog("No sequence fits: " + plan["reason"], "failed")
             seq = LIBRARY.get(plan["sequence"])
             self.task["plan"] = plan
             self._tlog("Chose %s%s (%s, %s)" % (plan["sequence"], " reversed" if plan["reverse"] else "", plan["by"], plan["reason"]))
+            if plan.get("ai_error"):
+                self._tlog("Groq was not used: " + plan["ai_error"])
             if plan["reverse"]:
                 seq = SEQ.reverse(seq)
             need = seq.get("requires", {}).get("key_in")

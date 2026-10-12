@@ -828,7 +828,249 @@ function mountProject(root) {
 }
 
 /* ===================================================================== shell */
+/* ===================================================================== the robot viewer (main view) + side panel */
+function padFrame(root, st) {
+  const k = (id) => root.querySelector("#p-" + id);
+  const kn = (id, vx, vy) => { const n = k(id); n.setAttribute("cx", r3(vx * 28)); n.setAttribute("cy", r3(vy * 28)); };
+  kn("lk", st.lx, st.ly); kn("rk", st.rx, st.ry);
+  for (const b of BUTTONS) { const n = k(b); if (n) n.classList.toggle("on", !!st.buttons[b]); }
+  k("ltf").setAttribute("width", r3(84 * st.lt)); k("rtf").setAttribute("width", r3(84 * st.rt));
+  k("du").classList.toggle("on", st.dpad[1] === 1); k("dd").classList.toggle("on", st.dpad[1] === -1);
+  k("dl").classList.toggle("on", st.dpad[0] === -1); k("dr").classList.toggle("on", st.dpad[0] === 1);
+}
+function wirePad(pad) {
+  const setStick = (which, ev, g) => {
+    const m = g.getScreenCTM(); if (!m) return;
+    const p = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(m.inverse());
+    let vx = p.x / 50, vy = p.y / 50; const mag = Math.hypot(vx, vy); if (mag > 1) { vx /= mag; vy /= mag; }
+    E.virt[which + "x"] = r3(vx); E.virt[which + "y"] = r3(vy);
+  };
+  pad.addEventListener("pointerdown", (ev) => {
+    if (E.source !== "virtual") return;
+    const st = ev.target.closest(".stick"), bt = ev.target.closest(".btnp");
+    if (st) { try { st.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic pointer */ } st._drag = true; setStick(st.dataset.s, ev, st); }
+    else if (bt) {
+      try { bt.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic pointer */ }
+      if (bt.dataset.b) E.virt.buttons[bt.dataset.b] = true; else E.virt[bt.dataset.t] = 1;
+    }
+  });
+  pad.addEventListener("pointermove", (ev) => { const st = ev.target.closest(".stick"); if (E.source === "virtual" && st && st._drag) setStick(st.dataset.s, ev, st); });
+  const release = (ev) => {
+    if (E.source !== "virtual") return;
+    const st = ev.target.closest(".stick"), bt = ev.target.closest(".btnp");
+    if (st) { st._drag = false; E.virt[st.dataset.s + "x"] = 0; E.virt[st.dataset.s + "y"] = 0; }
+    if (bt) { if (bt.dataset.b) E.virt.buttons[bt.dataset.b] = false; else E.virt[bt.dataset.t] = 0; }
+  };
+  pad.addEventListener("pointerup", release); pad.addEventListener("pointercancel", release);
+}
+
+/* A small 3D viewer on a canvas: orbit with one finger or the mouse, zoom with a pinch or the wheel, double tap to reset.
+   It draws the pose the hub streams (arm links, joints, tool, the path the tool has taken, the reach circle). */
+function makeViewer(canvas) {
+  const ctx = canvas.getContext("2d");
+  const V0 = { yaw: 0.75, pitch: 0.5, dist: 1150 };
+  const v = Object.assign({}, V0), T = [150, 150, 140];
+  let W = 0, H = 0, dpr = 1, pose = null, dirty = true, col = null, colT = 0, trail = [], reach = 330;
+  const pointers = new Map();
+  const colors = () => {
+    const now = performance.now();
+    if (!col || now - colT > 1000) {
+      const cs = getComputedStyle(document.documentElement), g = (n) => cs.getPropertyValue(n).trim();
+      col = { bg: g("--bg"), line: g("--line"), strong: g("--line-strong"), text: g("--text"), accent: g("--accent"), warn: g("--warn"), surf: g("--surface-2"), muted: g("--muted") };
+      colT = now;
+    }
+    return col;
+  };
+  const resize = () => {
+    const r = canvas.getBoundingClientRect();
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.round(r.width)); H = Math.max(1, Math.round(r.height));
+    canvas.width = W * dpr; canvas.height = H * dpr; dirty = true;
+  };
+  const ro = new ResizeObserver(resize); ro.observe(canvas);
+  const proj = (p) => {
+    const cy = Math.cos(v.yaw), sy = Math.sin(v.yaw), cp = Math.cos(v.pitch), sp = Math.sin(v.pitch);
+    const x = p[0] - T[0], y = p[1] - T[1], z = p[2] - T[2];
+    const x1 = x * cy - y * sy, y1 = x * sy + y * cy;
+    const depth = y1 * cp - z * sp + v.dist, up = y1 * sp + z * cp;
+    const k = (Math.min(W, H * 1.25) * 1.15) / depth;
+    return [W / 2 + x1 * k, H / 2 - up * k, depth, k];
+  };
+  const poly = (pts, close) => { ctx.beginPath(); pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); if (close) ctx.closePath(); };
+  function draw() {
+    dirty = false;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const c = colors();
+    ctx.clearRect(0, 0, W, H);
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    // ground grid
+    ctx.strokeStyle = c.line; ctx.lineWidth = 1;
+    for (let g = -500; g <= 500; g += 100) {
+      poly([proj([g, -500, 0]), proj([g, 500, 0])]); ctx.stroke();
+      poly([proj([-500, g, 0]), proj([500, g, 0])]); ctx.stroke();
+    }
+    ctx.strokeStyle = c.strong; ctx.setLineDash([6, 6]);
+    const ring = []; for (let a = 0; a < 64; a++) ring.push(proj([reach * Math.cos((a / 64) * 6.2832), reach * Math.sin((a / 64) * 6.2832), 0]));
+    poly(ring, true); ctx.stroke(); ctx.setLineDash([]);
+    // base
+    const disc = (r, z) => { const a = []; for (let i = 0; i < 28; i++) a.push(proj([r * Math.cos((i / 28) * 6.2832), r * Math.sin((i / 28) * 6.2832), z])); return a; };
+    ctx.fillStyle = c.surf; ctx.strokeStyle = c.strong; ctx.lineWidth = 1.5;
+    poly(disc(60, 0), true); ctx.fill(); ctx.stroke();
+    if (!pose) return;
+    const P = pose.points;
+    // shadow of the arm on the ground
+    ctx.strokeStyle = c.strong; ctx.globalAlpha = 0.5; ctx.lineWidth = 5;
+    poly(P.map((q) => proj([q[0], q[1], 0]))); ctx.stroke(); ctx.globalAlpha = 1;
+    // path of the tool
+    if (trail.length > 1) {
+      for (let i = 1; i < trail.length; i++) {
+        ctx.globalAlpha = (i / trail.length) * 0.8; ctx.strokeStyle = c.warn; ctx.lineWidth = 2;
+        poly([proj(trail[i - 1]), proj(trail[i])]); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    // column from the ground to the first joint, then links and joints, far to near
+    const pts = P.map(proj), items = [];
+    const z0 = proj([P[0][0], P[0][1], 0]);
+    items.push({ d: z0[2], f: () => { ctx.strokeStyle = c.strong; ctx.lineWidth = 22 * pts[0][3]; poly([z0, pts[0]]); ctx.stroke(); } });
+    for (let i = 0; i < 4; i++) {
+      const a = pts[i], b = pts[i + 1], w = (i === 3 ? 9 : 15) * (a[3] + b[3]) / 2;
+      items.push({ d: (a[2] + b[2]) / 2, f: () => {
+        ctx.strokeStyle = c.bg; ctx.lineWidth = w + 4; poly([a, b]); ctx.stroke();
+        ctx.strokeStyle = pose.emulated ? c.warn : c.accent; ctx.lineWidth = w; poly([a, b]); ctx.stroke();
+      } });
+    }
+    for (let i = 0; i < 5; i++) {
+      const q = pts[i], r = (i === 4 ? 7 : 11) * q[3];
+      items.push({ d: q[2] - 1, f: () => { ctx.beginPath(); ctx.arc(q[0], q[1], r, 0, 6.2832); ctx.fillStyle = i === 4 ? c.warn : c.bg; ctx.fill(); ctx.strokeStyle = c.text; ctx.lineWidth = 2; ctx.stroke(); } });
+    }
+    items.sort((p, q) => q.d - p.d).forEach((it) => it.f());
+  }
+  const loop = () => { if (dirty) draw(); requestAnimationFrame(loop); };
+  requestAnimationFrame(loop);
+  const centroid = () => { let x = 0, y = 0; pointers.forEach((p) => { x += p.x; y += p.y; }); return [x / pointers.size, y / pointers.size]; };
+  const spread = () => { const a = [...pointers.values()]; return a.length < 2 ? 0 : Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y); };
+  let lastC = null, lastS = 0;
+  canvas.addEventListener("pointerdown", (e) => { try { canvas.setPointerCapture(e.pointerId); } catch (x) { /* synthetic */ } pointers.set(e.pointerId, { x: e.clientX, y: e.clientY }); lastC = centroid(); lastS = spread(); });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const c = centroid(), s = spread();
+    if (lastC) { v.yaw -= (c[0] - lastC[0]) * 0.008; v.pitch = Math.max(-0.05, Math.min(1.5, v.pitch + (c[1] - lastC[1]) * 0.008)); }
+    if (pointers.size > 1 && lastS > 0 && s > 0) v.dist = Math.max(450, Math.min(2600, v.dist * (lastS / s)));
+    lastC = c; lastS = s; dirty = true;
+  });
+  const up = (e) => { pointers.delete(e.pointerId); lastC = pointers.size ? centroid() : null; lastS = spread(); };
+  canvas.addEventListener("pointerup", up); canvas.addEventListener("pointercancel", up);
+  canvas.addEventListener("wheel", (e) => { e.preventDefault(); v.dist = Math.max(450, Math.min(2600, v.dist * Math.exp(e.deltaY * 0.001))); dirty = true; }, { passive: false });
+  canvas.addEventListener("dblclick", () => { Object.assign(v, V0); dirty = true; });
+  return {
+    set(p) {
+      pose = p; reach = 145.95 + 183.7 + (p.tool || 0);
+      const tip = p.points[4], last = trail[trail.length - 1];
+      if (!last || Math.hypot(tip[0] - last[0], tip[1] - last[1], tip[2] - last[2]) > 3) { trail.push(tip.slice()); if (trail.length > 160) trail.shift(); }
+      dirty = true;
+    },
+    view(name) { Object.assign(v, name === "top" ? { yaw: 0, pitch: 1.5, dist: 1250 } : name === "side" ? { yaw: 0.0, pitch: 0.02, dist: 1150 } : V0); dirty = true; },
+    clearTrail() { trail = []; dirty = true; },
+    destroy() { ro.disconnect(); },
+  };
+}
+function mountArm(root) {
+  document.body.classList.add("fill");
+  root.innerHTML = `<div class="armstage">
+    <section class="viewer" aria-label="Robot viewer">
+      <canvas id="v3d" role="img" aria-label="3D view of the robot arm. Drag to turn, pinch or scroll to zoom, double tap to reset."></canvas>
+      <div class="vhud tl"><div class="st idle" id="v-mode">-</div><div class="mono" id="v-xyz"></div><div class="note" id="v-status"></div></div>
+      <div class="vhud tr"><button class="btn sm" type="button" data-view="iso">3D</button><button class="btn sm" type="button" data-view="top">Top</button><button class="btn sm" type="button" data-view="side">Side</button><button class="btn sm" type="button" id="v-clr">Clear path</button></div>
+      <div class="vhud bl" id="v-joints"></div>
+    </section>
+    <aside class="side" aria-label="Controls and status">
+      <div class="tabs" role="tablist" id="c-tabs">${SOURCES.map((s) => `<button type="button" role="tab" data-src="${s[0]}" aria-selected="${E.source === s[0]}">${s[1].replace("Browser ", "").replace(" stream", "")}</button>`).join("")}</div>
+      <div class="inline" style="margin:8px 0"><span class="st idle" id="c-send" role="status"></span></div>
+      <div id="c-pad">${padSVG()}</div>
+      <div class="note" id="c-desc" style="margin:6px 0 10px"></div>
+      <div class="inline"><button class="btn sm" id="a-home" type="button">${icon("arrows-clockwise", "sm")}Go home</button>
+        <select id="a-model" aria-label="Firmware to simulate"><option value="improved">Reference</option><option value="stock">Stock firmware</option><option value="stock-patch">Stock + patch</option></select></div>
+      <div class="sidesec"><h2>Emulated ESP32</h2>
+        <div class="inline"><select id="m-fw" aria-label="Firmware"><option value="stock">Stock</option><option value="patched">Stock + patch</option><option value="rarm">Rewrite</option></select>
+          <select id="m-net" aria-label="Network"></select><button class="btn sm" id="m-go" type="button">Start</button></div>
+        <div class="inline" style="margin-top:8px"><span class="st idle" id="m-state">Off</span><button class="btn sm" id="m-drop" type="button" hidden>Drop link 3 s</button></div>
+        <div class="note" id="m-net-s"></div><div class="note" id="m-err" style="color:var(--bad)"></div></div>
+      <div class="sidesec"><h2>Input</h2><div class="note mono" id="s-in"></div></div>
+      <div class="sidesec" id="s-phone" hidden><h2>On your phone</h2><div class="note">Same WiFi. Open this once, then Add to Home Screen.</div>
+        <div class="inline"><input id="s-url" readonly aria-label="Phone link" style="flex:1;min-width:0"><button class="btn sm" id="s-copy" type="button">Copy</button></div></div>
+      <a class="note" href="#/control">More: calibration, damper, network details</a>
+    </aside></div>`;
+  const $r = (q) => root.querySelector(q);
+  const viewer = makeViewer($r("#v3d"));
+  const pad = $r("#pad"); wirePad(pad);
+  $r("#c-tabs").addEventListener("click", (e) => { const b = e.target.closest("[data-src]"); if (b) setSource(b.dataset.src); });
+  root.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", () => viewer.view(b.dataset.view)));
+  $r("#v-clr").addEventListener("click", () => viewer.clearTrail());
+  $r("#a-home").addEventListener("click", async () => { const r = await api("/api/sim", { home: true }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
+  const model = $r("#a-model");
+  model.addEventListener("change", async () => { const v = model.value; await api("/api/sim", { model: v === "improved" ? "improved" : "stock", patch: v === "stock-patch" }); });
+  $r("#s-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($r("#s-url").value); toast("Link copied", "ok"); } catch (e) { $r("#s-url").select(); } });
+  const emu = async (b) => { const r = await api("/api/emu", b); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); };
+  const fw = $r("#m-fw"), net = $r("#m-net"), go = $r("#m-go");
+  go.addEventListener("click", () => { const e = S.st && S.st.emu; (e && (e.state === "running" || e.state === "building")) ? emu({ action: "stop" }) : emu({ action: "start", firmware: fw.value, preset: net.value }); });
+  $r("#m-drop").addEventListener("click", () => emu({ action: "outage", path: "esp", seconds: 3 }));
+  const joints = $r("#v-joints");
+  joints.innerHTML = JOINT_NAMES.map((n, i) => `<div class="jr"><span>${n}</span><span class="jb"><i id="vj-b${i}"></i></span><span class="mono" id="vj-a${i}">-</span></div>`).join("");
+  const upd = {
+    sourceChanged() {
+      root.querySelectorAll("#c-tabs button").forEach((b) => b.setAttribute("aria-selected", b.dataset.src === E.source));
+      pad.classList.toggle("virtual", E.source === "virtual");
+      $r("#c-desc").textContent = SOURCES.find((s) => s[0] === E.source)[2];
+    },
+    update() {
+      const st = S.st; if (!st) return;
+      const el = $r("#c-send");
+      if (E.source === "server") { el.className = "st idle"; el.textContent = "Not sending from this page"; }
+      else if (!st.armed && st.emu_input) { el.className = "st ok"; el.textContent = E.sending ? "Sending to the emulated ESP32" : "Emulator ready"; }
+      else if (!st.armed) { el.className = "st warn"; el.textContent = "Virtual arm only: SAFE"; }
+      else if (E.sending) { el.className = "st bad"; el.textContent = "Sending to the arm"; }
+      else { el.className = "st warn"; el.textContent = "ARMED, waiting"; }
+      const sm = st.sim;
+      if (sm && document.activeElement !== model) model.value = sm.model === "stock" ? (sm.patch ? "stock-patch" : "stock") : "improved";
+      const e = st.emu, busy = e && (e.state === "running" || e.state === "building");
+      if (e && !net.options.length) { net.innerHTML = Object.keys(e.presets).map((n) => `<option>${n}</option>`).join(""); net.value = "home_wifi"; }
+      go.textContent = busy ? "Stop" : "Start"; fw.disabled = net.disabled = !!busy;
+      const ms = $r("#m-state"); ms.className = "st " + (!e || e.state === "off" ? "idle" : e.state === "error" ? "bad" : e.state === "building" ? "warn" : "ok");
+      ms.textContent = !e ? "Off" : { off: "Off", building: "Compiling...", running: "Running " + e.firmware, error: "Stopped" }[e.state];
+      $r("#m-drop").hidden = !(e && e.state === "running");
+      $r("#m-err").textContent = e ? e.error : "";
+      $r("#m-net-s").textContent = e && e.state === "running" && e.net ? `poll ${f1(e.net.poll_ms_mean, 0)} ms avg, worst stall ${f1(e.net.loop_gap_ms_max, 0)} ms, ${e.net.poll_fails} failed` : "";
+      const age = st.last_packet_age;
+      $r("#s-in").textContent = `${f1(st.pps, 0)} packets/s, ${age == null ? "none yet" : "last " + f1(age, 1) + " s ago"}`;
+      $r("#s-phone").hidden = !st.phone_url;
+      if (st.phone_url && $r("#s-url").value !== st.phone_url) $r("#s-url").value = st.phone_url;
+    },
+    frame(st) { padFrame(root, st); },
+    pose(p) {
+      if (!p || !p.points) return;
+      viewer.set(p);
+      const m = $r("#v-mode");
+      m.className = "st " + (p.emulated ? "warn" : p.attached ? "run" : "idle");
+      m.textContent = p.emulated ? "Emulated ESP32" : p.attached ? MODE_TEXT[p.mode] || p.mode : "servos released";
+      $r("#v-xyz").textContent = `x ${f1(p.xyz[0], 0)}  y ${f1(p.xyz[1], 0)}  z ${f1(p.xyz[2], 0)} mm`;
+      $r("#v-status").textContent = p.ik_ok ? p.status : "out of reach: holding position";
+      for (let i = 0; i < 4; i++) {
+        const [lo, hi] = p.limits[i], a = Math.min(lo, hi), b = Math.max(lo, hi);
+        $r("#vj-a" + i).textContent = f1(p.angles[i], 0) + "°";
+        $r("#vj-b" + i).style.width = Math.max(0, Math.min(100, ((p.angles[i] - a) / Math.max(1, b - a)) * 100)) + "%";
+      }
+    },
+    destroy() { viewer.destroy(); },
+  };
+  upd.sourceChanged();
+  upd.pose(S.pose || (S.st && S.st.sim));
+  return upd;
+}
+
 const PAGES = [
+  { id: "arm", group: "", title: "Robot", sub: "The arm, live", icon: "robot", mount: mountArm },
   { id: "overview", group: "Monitor", title: "Overview", sub: "Everything at a glance", icon: "squares-four", mount: mountOverview },
   { id: "control", group: "", title: "Control", sub: "Drive from the browser and watch the virtual arm", icon: "game-controller", mount: mountControl },
   { id: "packets", group: "", title: "Packets", sub: "Every controller packet, exactly as sent", icon: "pulse", mount: mountPackets },
@@ -848,13 +1090,15 @@ function buildNav() {
   $("#nav").innerHTML = html;
 }
 function route() {
-  const id = (location.hash.replace(/^#\//, "") || "overview");
+  const id = (location.hash.replace(/^#\//, "") || "arm");
   const p = PAGES.find((x) => x.id === id) || PAGES[0];
   curId = p.id;
   document.querySelectorAll("#nav a").forEach((a) => (a.dataset.id === p.id ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
   $("#title").textContent = p.title; $("#subtitle").textContent = p.sub;
   document.title = `${p.title} - Arm Hub`;
   const root = $("#main");
+  if (cur && cur.destroy) cur.destroy();
+  document.body.classList.remove("fill");
   root.innerHTML = "";
   if (!S.st) { root.innerHTML = '<div class="skel" style="height:110px;margin-bottom:12px"></div><div class="skel" style="height:260px"></div>'; cur = null; return; }
   cur = p.mount(root) || {};

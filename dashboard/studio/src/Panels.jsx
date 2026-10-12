@@ -272,7 +272,7 @@ export function SetupPanel({ status, agent }) {
       <section className="card">
         <header className="cardhead"><h3>Phone</h3></header>
         {status?.phone_url ? <p className="hint mono wrap">{status.phone_url}</p> : <p className="hint">Start with the launcher (not --local-only) to get a phone link.</p>}
-        <a className="btn" href="/?legacy=1"><Icon n="ext" size={16} /> Open the classic dashboard</a>
+        <a className="btn" href="/"><Icon n="ext" size={16} /> Open the classic dashboard</a>
       </section>
     </div>
   );

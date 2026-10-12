@@ -76,7 +76,7 @@ export default function App() {
     { id: "astudio", label: "Go to Studio", hint: "3D view and teaching", icon: "cube", run: () => setArea("studio") },
     ...SYS_PAGES.map(([p, l, ic]) => ({ id: "p" + p, label: "System: " + l, hint: "page", icon: ic, run: () => openPage(p) })),
     ...TABS.map(([t, l, ic]) => ({ id: "t" + t, label: "Open " + l, hint: "panel", icon: ic, run: () => openTab(t) })),
-    { id: "legacy", label: "Open the classic dashboard", hint: "the original pages", icon: "ext", run: () => { location.href = "/?legacy=1"; } },
+    { id: "legacy", label: "Open the classic dashboard", hint: "the original pages", icon: "ext", run: () => { location.href = "/"; } },
     ...seqs.flatMap((q) => [
       { id: "run-" + q.name, label: "Run " + q.name, hint: q.description, icon: "play", run: async () => { const r = await api("/api/sequence", { name: q.name, use: true, run: true }); toast(r.ok ? `Running ${q.name}` : (r.error || "Failed"), r.ok ? "ok" : "bad"); } },
       { id: "rev-" + q.name, label: "Run " + q.name + " reversed", hint: "the opposite move", icon: "rev", run: async () => { const r = await api("/api/sequence", { name: q.name, use: true, run: true, reverse: true }); toast(r.ok ? `Running ${q.name} reversed` : (r.error || "Failed"), r.ok ? "ok" : "bad"); } },

@@ -49,6 +49,7 @@ from emu_runner import EmuRunner  # noqa: E402
 from stamp import code_stamp  # noqa: E402
 from sim.workcell import Workcell  # noqa: E402
 import sim.sequences as SEQ  # noqa: E402
+import agent as AGENT  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
 
 IS_WIN = sys.platform == "win32"
@@ -723,6 +724,85 @@ class Hub:
             "emu_input": self.emu.running and self.forward_control is True and not self.armed,
         }
 
+    # ---- state packet and the task runner ------------------------------------------------------------------------
+    def state_packet(self):
+        """What an AI needs to see before it decides: pose, home grip, magnet, what is running, where the keys are."""
+        from sim.armsim import forward_kin
+        with self.sim_lock:
+            x, y, z, th = self.sim.pose()
+            hx, hy, hz, _ = forward_kin(self.sim._home_angles(), self.sim.tool)
+            at_home = math.dist((x, y, z), (hx, hy, hz)) < 8.0 and not self.sim.replaying
+            held = self.cell.held
+            return {"format": "roobot-arm-state", "version": 1, "time": time.time(), "build": BUILD,
+                    "pose": {"x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "angle": round(th, 1)},
+                    "at_home": at_home, "magnet": self.cell.magnet, "holding": held is not None, "home_grip": at_home and not self.cell.magnet and held is None,
+                    "mode": "running" if self.sim.replaying else self.sim.mode, "saved": len(self.sim.saved), "running_step": self.sim.replay_idx if self.sim.replaying else None,
+                    "keys": {str(k["id"]): self.cell.where(k) for k in self.cell.keys}, "last_run": self.last_run, "task": dict(self.task)}
+
+    task = {"state": "idle"}
+    last_run = None
+
+    def ask(self, request):
+        """Start a task from plain language: make sure the arm is at home grip, pick a sequence, run it once."""
+        request = str(request).strip()[:500]
+        if not request:
+            raise ValueError("say what you want done")
+        if self.task.get("state") in ("working", "running"):
+            raise RuntimeError("a task is already running")
+        self.task = {"state": "working", "request": request, "log": []}
+        threading.Thread(target=self._do_task, args=(request,), daemon=True).start()
+
+    def _tlog(self, msg, state=None):
+        self.task["log"].append(msg)
+        if state:
+            self.task["state"] = state
+        self.log("agent", msg)
+
+    def _wait(self, cond, timeout):
+        end = time.time() + timeout
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.2)
+        return False
+
+    def _do_task(self, request):
+        try:
+            st = self.state_packet()
+            library = LIBRARY.list()
+            plan = AGENT.choose(request, library, st)
+            if not plan["sequence"]:
+                return self._tlog("No sequence fits: " + plan["reason"], "failed")
+            seq = LIBRARY.get(plan["sequence"])
+            self.task["plan"] = plan
+            self._tlog("Chose %s%s (%s, %s)" % (plan["sequence"], " reversed" if plan["reverse"] else "", plan["by"], plan["reason"]))
+            if plan["reverse"]:
+                seq = SEQ.reverse(seq)
+            need = seq.get("requires", {}).get("key_in")
+            if need:
+                want = str(need).replace("box", "box ").replace("  ", " ").strip()
+                if want not in st["keys"].values():
+                    return self._tlog("Cannot start: this move needs a key in %s, and the keys are at %s" % (need, ", ".join(st["keys"].values())), "failed")
+            need = seq.get("requires", {}).get("key_on")
+            if need and str(need) not in st["keys"].values():
+                return self._tlog("Cannot start: this move needs a key on the %s, and the keys are at %s" % (need, ", ".join(st["keys"].values())), "failed")
+            if not st["home_grip"]:
+                self._tlog("Not at home grip: going home first")
+                with self.sim_lock:
+                    self.sim.stop_replay()
+                    self.cell.set_magnet(False)
+                    self.sim.go_home()
+                if not self._wait(lambda: self.state_packet()["at_home"], 30):
+                    return self._tlog("Could not get to home grip", "failed")
+            self._tlog("At home grip: running", "running")
+            self.load_sequence(seq, False, True)
+            if not self._wait(lambda: self._run_once is None, 120):
+                return self._tlog("The sequence did not finish", "failed")
+            self.last_run = {"name": plan["sequence"], "reverse": plan["reverse"]}
+            self._tlog("Done", "done")
+        except Exception as e:                       # a task must never kill the hub
+            self._tlog("Failed: %s" % e, "failed")
+
     def current_sequence(self, name="", description="", requires=None, ends=None):
         """The virtual arm's saved positions (with the magnet state of each) as a sequence packet."""
         with self.sim_lock:
@@ -742,7 +822,7 @@ class Hub:
             self.cell.last_applied = None
             self._run_once = len(saved) if run else None
             if run:
-                self.sim.start_replay()
+                self.sim.start_replay(wait_arrival=True)
         if run:
             self.log("hub", "running sequence %s%s once" % (seq["name"] or "(unnamed)", " (reversed)" if reverse else ""))
         return seq
@@ -909,6 +989,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, HUB.snapshot())
         if path == "/api/sequence":
             return self._json(200, HUB.current_sequence())
+        if path == "/api/state":
+            return self._json(200, HUB.state_packet())
         if path == "/api/sequences":
             return self._json(200, {"sequences": LIBRARY.list()})
         if path.startswith("/api/sequences/"):
@@ -1034,6 +1116,14 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     return self._json(400, {"error": str(e)})
                 return self._json(200, {"ok": True, "path": str(pth), "packet": pkt})
+            if path == "/api/ask":              # plain-language task: home grip first, then the best-matching sequence
+                try:
+                    HUB.ask(d.get("request", ""))
+                except ValueError as e:
+                    return self._json(400, {"error": str(e)})
+                except RuntimeError as e:
+                    return self._json(409, {"error": str(e)})
+                return self._json(200, {"ok": True})
             if path == "/api/world":            # the electromagnet and the keys (simulation only: nothing is sent to the arm)
                 with HUB.sim_lock:
                     if d.get("reset"):

@@ -57,7 +57,7 @@ function Rig({ view }) {
 function Arm() {
   const refs = useRef({});
   const r = (n) => (el) => { refs.current[n] = el; };
-  const disp = useRef(null);
+  const disp = useRef(null), ang = useRef(null);
   const magFace = useRef(), magLight = useRef(), trail = useRef(), trailPts = useRef([]);
   const trailGeo = useMemo(() => { const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(160 * 3), 3)); g.setDrawRange(0, 0); return g; }, []);
 
@@ -65,8 +65,18 @@ function Arm() {
     const p = samplePose(performance.now());
     if (!p || !p.points) return;
     const target = p.points.map(V);
-    const P = target, ref = refs.current;
-    const base = ((p.angles[0] - 90) * Math.PI) / 180;
+    // Servos take whole degrees, so an emulated or real board's pose moves in steps of a few mm. Blur those steps with a short low-pass
+    // (about 130 ms) when the pose comes from a board; the virtual arm is already smooth and is drawn exactly.
+    let P = target;
+    if (p.emulated || p.mode === "emulated" || p.esp) {
+      if (!disp.current) disp.current = target.map((v) => v.clone());
+      const k = 1 - Math.exp(-dt / 0.13);
+      disp.current.forEach((v, i) => v.lerp(target[i], k));
+      P = disp.current;
+      ang.current = ang.current == null ? p.angles[0] : ang.current + (p.angles[0] - ang.current) * k;
+    } else { disp.current = null; ang.current = null; }
+    const ref = refs.current;
+    const base = (((ang.current ?? p.angles[0]) - 90) * Math.PI) / 180;
     const d = _x.set(Math.sin(base), Math.cos(base), 0).clone(), l = new THREE.Vector3(Math.cos(base), -Math.sin(base), 0), up = new THREE.Vector3(0, 0, 1);
     const S = (v, s) => v.clone().multiplyScalar(s);
     place(ref.plate, new THREE.Vector3(0, 0, 3), new THREE.Vector3(140, 0, 0), new THREE.Vector3(0, 104, 0), new THREE.Vector3(0, 0, 6));
@@ -97,7 +107,7 @@ function Arm() {
     if (magLight.current) { magLight.current.intensity += ((on ? 40000 : 0) - magLight.current.intensity) * 0.3; magLight.current.position.copy(P[4]); }
 
     // path the tip has taken
-    const tip = target[4], pts = trailPts.current, last = pts[pts.length - 1];
+    const tip = P[4], pts = trailPts.current, last = pts[pts.length - 1];
     if (!last || last.distanceTo(tip) > 3) { pts.push(tip.clone()); if (pts.length > 160) pts.shift(); }
     const attr = trailGeo.getAttribute("position");
     pts.forEach((q, i) => attr.setXYZ(i, q.x, q.y, q.z));

@@ -1,6 +1,8 @@
+diff --git a/src/RobotCharacteristics.h b/src/RobotCharacteristics.h
+index 68e6c9c..ae39317 100644
 --- a/src/RobotCharacteristics.h
 +++ b/src/RobotCharacteristics.h
-@@ -12,6 +12,11 @@
+@@ -12,6 +12,11 @@ const float LagHoldDegrees = 25;
  float AngleSense = 20;
  float ChordSense = 20;
  
@@ -12,9 +14,11 @@
  int JointPins[4] = {
      32,
      27,
+diff --git a/src/SticksToXYZ.h b/src/SticksToXYZ.h
+index cd53ca0..f229344 100644
 --- a/src/SticksToXYZ.h
 +++ b/src/SticksToXYZ.h
-@@ -14,6 +14,7 @@
+@@ -14,6 +14,7 @@ struct StickInput {
      int xButton;
      int yButton;
      float maxSpeed;   // optional "maxSpeed" from the packet, deg/s; 0 = not sent
@@ -22,9 +26,11 @@
  };
  
  struct RobotPosition {
+diff --git a/src/WifiFunctions.h b/src/WifiFunctions.h
+index cb49f6d..7112175 100644
 --- a/src/WifiFunctions.h
 +++ b/src/WifiFunctions.h
-@@ -170,6 +170,9 @@
+@@ -170,6 +170,9 @@ bool ReadControllerButton(const String& state, const char* name, int& value)
  
  bool DecodeStickInput(const String& state, StickInput& input)
  {
@@ -34,7 +40,7 @@
      // "maxSpeed" is optional; anything missing, zero or negative leaves the current limit alone.
      float requested = 0.0f;
      input.maxSpeed = ReadControllerValue(state, "maxSpeed", requested) && requested > 0.0f
-@@ -283,3 +286,93 @@
+@@ -283,3 +286,105 @@ void SendArmStatus(const String& armStatus)
  
      http.end();
  }
@@ -111,26 +117,40 @@
 +// POST /armstate: where the arm is, so whatever is giving the orders (the dashboard, an AI) can see it.
 +void SendArmState(const String& json)
 +{
++    // One connection kept open and reused, like the controller poll: a fresh TLS handshake for every report would stall the
++    // loop (and so the servos) for a few hundred milliseconds each time.
++    static WiFiClientSecure client;
++    static HTTPClient http;
++    static bool requestInitialised = false;
 +    if (WiFi.status() != WL_CONNECTED) {
++        if (requestInitialised) {
++            http.end();
++            requestInitialised = false;
++        }
 +        return;
 +    }
-+    WiFiClientSecure client;
-+    client.setInsecure();
-+    HTTPClient http;
-+    const String url = "https://" + String(HOST) + "/armstate";
-+    if (!http.begin(client, url)) {
-+        return;
++    if (!requestInitialised) {
++        client.setInsecure();
++        http.setReuse(true);
++        const String url = "https://" + String(HOST) + "/armstate";
++        if (!http.begin(client, url)) {
++            return;
++        }
++        requestInitialised = true;
 +    }
 +    http.addHeader("Content-Type", "application/json");
 +    const int statusCode = http.POST(json);
 +    if (statusCode != HTTP_CODE_NO_CONTENT) {
 +        Serial.printf("State POST failed: %d\n", statusCode);
++        http.end();                       // start a fresh connection next time
++        requestInitialised = false;
 +    }
-+    http.end();
 +}
+diff --git a/src/main.cpp b/src/main.cpp
+index be1af95..9b0a6e1 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
-@@ -19,6 +19,16 @@
+@@ -19,6 +19,16 @@ constexpr int MaxSavedPositions = 20;
  RobotPosition savedPositions[MaxSavedPositions];
  int savedPositionCount = 0;
  
@@ -147,7 +167,7 @@
  RobotPosition targetPosition = {
      HomeChordsX,
      HomeChordsY,
-@@ -133,6 +143,9 @@
+@@ -133,6 +143,9 @@ void setup(){
  
      Serial.begin(9600);
  
@@ -157,7 +177,7 @@
      for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
          jointServos[jointIndex].setPeriodHertz(50);
          jointServos[jointIndex].attach(JointPins[jointIndex], 500, 2400);
-@@ -330,19 +343,87 @@
+@@ -330,19 +343,92 @@ void loop()
      static unsigned long homeArrivedTime = 0;
      static bool homeArrived = false;
      static int replayPositionIndex = 0;
@@ -173,7 +193,8 @@
 +    static unsigned long seqHoldUntil = 0;
 +    static unsigned long lastStateTime = 0;
 +    static bool slewArrived = true;
-+    static bool stateDue = false;       // send the state now (a sequence just started or ended)
++    static bool stateDue = false;       // send the state soon (a sequence started, reached a pose or ended)
++    static unsigned long lastStickTime = 0;   // last time a stick was off centre
      constexpr unsigned long replayStartHoldMs = 750;
      constexpr unsigned long replayPositionIntervalMs = 1500;
  
@@ -192,6 +213,10 @@
 +
      if (GetControllerState(controllerInput)) {
          bool currentB = controllerInput.bButton == 1;
++        if (fabsf(controllerInput.leftX) > 0.05f || fabsf(controllerInput.leftY) > 0.05f
++            || fabsf(controllerInput.rightX) > 0.05f || fabsf(controllerInput.rightY) > 0.05f) {
++            lastStickTime = millis();
++        }
          bool currentA = controllerInput.aButton == 1;
 +        const bool currentX = controllerInput.xButton == 1;
          const unsigned long currentTime = millis();
@@ -245,7 +270,7 @@
              ServoCommandChanged(commandedAngles);
              CommandJointAngles(commandedAngles);   // attach and hold; the slew below walks the arm home
              homeArrived = false;
-@@ -396,7 +477,7 @@
+@@ -396,7 +482,7 @@ void loop()
              lastReplayPositionTime = currentTime;
          }
  
@@ -254,7 +279,7 @@
              const unsigned long elapsedMs = min(currentTime - lastPositionUpdateTime, 100UL);
              const RobotPosition requestedPosition = SticksToXYZ(
                  controllerInput,
-@@ -434,10 +515,65 @@
+@@ -434,10 +520,68 @@ void loop()
      const float slewSeconds = lastSlewTime == 0 ? 0.0f : min(slewNow - lastSlewTime, 100UL) / 1000.0f;
      lastSlewTime = slewNow;
      const bool arrived = SlewCommandedAngles(movingHome ? HomeJointAngles() : targetAngles, slewSeconds);
@@ -294,11 +319,14 @@
 +            }
 +            ++seqIndex;
 +            seqWaiting = false;
++            stateDue = true;                    // the arm is still here: a good moment to report
 +        }
 +    }
 +
-+    // State for whoever is giving the orders: often while a sequence runs, rarely otherwise (a POST takes a moment).
-+    if (stateDue || slewNow - lastStateTime >= (sequenceRun ? 700UL : 2500UL)) {
++    // State for whoever is giving the orders. The POST blocks the loop (and so the servos) while it runs, so it is only sent
++    // while the arm is standing still and nobody is driving it: never in the middle of a move.
++    const bool armStill = slewArrived && slewNow - lastStickTime >= 1000UL;
++    if (armStill && (stateDue || slewNow - lastStateTime >= 2500UL)) {
 +        stateDue = false;
 +        lastStateTime = slewNow;
 +        const bool atHome = !sequenceRun && !movingHome && slewArrived

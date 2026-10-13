@@ -569,9 +569,9 @@ class Hub:
     # ---- firmware ----------------------------------------------------------------------------------
     # firmware profiles: what can be flashed onto the board from the dashboard
     FW_PROFILES = {
-        "sam": {"label": "Sam's firmware", "kind": "stock", "fqbn": "esp32:esp32:upesy_wroom", "libs": ["ESP32Servo", "ESP32Ping"],
+        "sam": {"label": "Sam's firmware", "kind": "stock", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo", "ESP32Ping"],
                 "desc": "The UWE-RArm firmware exactly as shipped (firmware/stock/src, untouched). Polls the end server itself."},
-        "ours": {"label": "Our firmware", "kind": "ours", "fqbn": "esp32:esp32:upesy_wroom", "libs": ["ESP32Servo", "ESP32Ping"],
+        "ours": {"label": "Our firmware", "kind": "ours", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo", "ESP32Ping"],
                  "desc": "Sam's firmware plus our two patches: damper and failsafes, sequences and magnet."},
         "usb": {"label": "USB jog sketch", "kind": None, "fqbn": FQBN, "libs": ["ArduinoJson"],
                 "desc": "Our older sketch (arduino/arm_receiver): jog control over USB or WiFi."},

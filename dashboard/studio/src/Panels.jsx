@@ -163,6 +163,7 @@ export function AskPanel({ agent }) {
       <section className="card">
         <header className="cardhead"><h3>Task</h3><Pill tone={task.state === "done" ? "ok" : task.state === "failed" ? "bad" : busy ? "warn" : "idle"}>{task.state}</Pill></header>
         {task.request ? <p className="quote">“{task.request}”</p> : <p className="hint">Nothing running.</p>}
+        {task.error && <div className="taskerr" role="alert"><b>{task.error.title}</b>{task.error.detail && <p>{task.error.detail}</p>}{task.error.hint && <p className="hint">{task.error.hint}</p>}<code>{task.error.code}</code></div>}
         <ol className="timeline">
           {(task.log || []).map((l, i) => <motion.li key={i} initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} className={/^(Cannot|Could not|Failed|No sequence)/.test(l) ? "bad" : i === task.log.length - 1 && busy ? "now" : "done"}>{l}</motion.li>)}
         </ol>

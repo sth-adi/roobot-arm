@@ -1146,12 +1146,13 @@ function mountArm(root) {
     const s = await (await fetch("/api/state")).json(), t = s.task || {}, ai = $r("#q-ai");
     if (s.ai === "groq") { ai.className = "st ok"; ai.textContent = "AI: Groq"; }
     else { ai.className = "st bad"; ai.textContent = "AI: keywords only (no GROQ_API_KEY in .env)"; }
-    $r("#q-log").textContent = t.log && t.log.length ? `${t.state}: ${t.log[t.log.length - 1]}` : "";
+    const lg = $r("#q-log"), e = t.error;
+    if (e) { lg.innerHTML = `<div class="taskerr" role="alert" style="border-left:3px solid var(--bad);padding:6px 8px;margin-top:4px"><b style="color:var(--bad)">${esc(e.title)}</b>${e.detail ? `<div>${esc(e.detail)}</div>` : ""}${e.hint ? `<div class="muted">${esc(e.hint)}</div>` : ""}<div class="muted mono">${esc(e.code)}</div></div>`; }
+    else lg.textContent = t.log && t.log.length ? `${t.state}: ${t.log[t.log.length - 1]}` : "";
   } catch (e) { /* hub not reachable */ } };
   showTask();
   const taskTimer = setInterval(() => { if (!document.body.contains($r("#q-log"))) return clearInterval(taskTimer); showTask(); }, 1500);
   $r("#w-mag").addEventListener("click", async () => { const r = await api("/api/world", { magnet: "toggle" }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
-  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const refreshSeqs = async () => {
     try {
       const j = await (await fetch("/api/sequences")).json(); const list = $r("#s-list");

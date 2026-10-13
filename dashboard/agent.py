@@ -12,6 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+FALLBACK_MODELS = ["llama-3.1-8b-instant", "openai/gpt-oss-20b", "openai/gpt-oss-120b"]   # tried in turn when Groq says model_not_found (a project can have models switched off)
+_good_model = [None]                                                                      # the model that last worked, tried first next time
 REVERSE_WORDS = {"back", "reverse", "undo", "return", "restore", "opposite", "revert"}
 STOP = {"the", "a", "an", "to", "from", "into", "in", "on", "of", "put", "move", "please", "key", "and", "it", "me"}
 
@@ -51,20 +53,20 @@ def keyword_choice(request, library, last=None):
     return {"sequence": best["name"], "reverse": rev, "reason": "keyword match", "by": "keywords"}
 
 
-def groq_choice(request, library, state, key, timeout=15):
+def groq_choice(request, library, state, key, timeout=15, model=None):
     catalog = [{"name": s["name"], "description": s["description"], "requires": s["requires"], "ends": s["ends"]} for s in library]
     system = ("You pick which taught robot-arm sequence to run. Answer ONLY with JSON: "
               '{"sequence": <name from the list or null>, "reverse": <true to run it backwards for the opposite task>, "reason": <short>}. '
               "Each sequence moves a key between places; running it reversed does the opposite move. Use null if nothing fits. "
               "Sequences: " + json.dumps(catalog) + " Arm state: " + json.dumps({k: state.get(k) for k in ("at_home", "holding", "keys", "last_run")}) + " last_run is the sequence that ran most recently; undoing it means running it with the opposite reverse flag.")
-    body = json.dumps({"model": GROQ_MODEL, "temperature": 0, "response_format": {"type": "json_object"},
+    body = json.dumps({"model": model or GROQ_MODEL, "temperature": 0, "response_format": {"type": "json_object"},
                        "messages": [{"role": "system", "content": system}, {"role": "user", "content": request[:500]}]}).encode()
     req = urllib.request.Request(GROQ_URL, body, {"Content-Type": "application/json", "Authorization": "Bearer " + key,
                                                  "User-Agent": "roobot-arm/1.0", "Accept": "application/json"})   # Groq sits behind Cloudflare, which rejects the default Python-urllib agent
     with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.loads(r.read())
     ans = json.loads(out["choices"][0]["message"]["content"])
-    return {"sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "reason": str(ans.get("reason", ""))[:200], "by": "groq"}
+    return {"sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "reason": str(ans.get("reason", ""))[:200], "by": "groq", "model": model or GROQ_MODEL}
 
 
 def _why(e):
@@ -85,9 +87,22 @@ def choose(request, library, state):
     names = {s["name"] for s in library}
     if key:
         try:
-            c = groq_choice(request, library, state, key)
-            if c["sequence"] is None or c["sequence"] in names:
-                return c
+            import urllib.error
+            order = [m for m in [_good_model[0], GROQ_MODEL] + FALLBACK_MODELS if m]
+            order = list(dict.fromkeys(order))
+            for m in order:
+                try:
+                    c = groq_choice(request, library, state, key, model=m)
+                except urllib.error.HTTPError as e:
+                    err = _why(e)
+                    if e.code in (400, 403, 404):       # this model is unavailable to the key: try the next one
+                        continue
+                    break
+                _good_model[0] = m
+                if c["sequence"] is None or c["sequence"] in names:
+                    return c
+                err = "Groq named a sequence that is not in the library"
+                break
         except Exception as e:                         # no network, bad key, bad JSON: fall back, but say why
             err = _why(e)
     else:

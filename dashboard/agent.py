@@ -15,8 +15,8 @@ try:
 except ImportError:                                    # imported as dashboard.agent
     from dashboard.preflight import SCOPE
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-FALLBACK_MODELS = ["llama-3.1-8b-instant", "openai/gpt-oss-20b", "openai/gpt-oss-120b"]   # tried in turn when Groq says model_not_found (a project can have models switched off)
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+FALLBACK_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]   # cheapest first (Groq list prices); tried in turn when Groq says model_not_found (a project can have models switched off)
 _good_model = [None]                                                                      # the model that last worked, tried first next time
 REVERSE_WORDS = {"back", "reverse", "undo", "return", "restore", "opposite", "revert"}
 STOP = {"the", "a", "an", "to", "from", "into", "in", "on", "of", "put", "move", "please", "key", "and", "it", "me"}
@@ -63,7 +63,8 @@ def groq_choice(request, library, state, key, timeout=15, model=None):
               '{"sequence": <name from the list or null>, "reverse": <true to run it backwards for the opposite task>, "key": <key number the person named, else null>, "reason": <short>}. '
               "Each sequence moves a key between places; running it reversed does the opposite move. Use null if nothing fits. "
               "Sequences: " + json.dumps(catalog) + " Arm state: " + json.dumps({k: state.get(k) for k in ("at_home", "holding", "keys", "last_run")}) + " last_run is the sequence that ran most recently; undoing it means running it with the opposite reverse flag.")
-    body = json.dumps({"model": model or GROQ_MODEL, "temperature": 0, "response_format": {"type": "json_object"},
+    extra = {"reasoning_effort": "low", "max_completion_tokens": 600} if "gpt-oss" in (model or GROQ_MODEL) else {"max_tokens": 200}   # a one-line JSON answer needs little thinking
+    body = json.dumps({**extra, "model": model or GROQ_MODEL, "temperature": 0, "response_format": {"type": "json_object"},
                        "messages": [{"role": "system", "content": system}, {"role": "user", "content": request[:500]}]}).encode()
     req = urllib.request.Request(GROQ_URL, body, {"Content-Type": "application/json", "Authorization": "Bearer " + key,
                                                  "User-Agent": "roobot-arm/1.0", "Accept": "application/json"})   # Groq sits behind Cloudflare, which rejects the default Python-urllib agent

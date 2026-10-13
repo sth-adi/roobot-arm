@@ -16,3 +16,6 @@ phone_link.txt
 sequences/
 
 dashboard/studio/node_modules/
+
+# firmware swap cache (built binaries, generated secrets)
+.fwbuild/

@@ -212,3 +212,8 @@ textarea.code { width: 100%; min-height: 160px; resize: vertical; border-radius:
   .system { flex-direction: column; padding: 8px; gap: 8px; } .sysnav { width: auto; flex-direction: row; overflow-x: auto; align-self: stretch; border-radius: 14px; } .sysnav button { flex: none; } .sysnav button span { display: none; } .sysnav button.on span { display: inline; }
   .system .grid2, .grid2.split { grid-template-columns: 1fr; } .areas button span { display: none; } .areas button.on span { display: inline; } .rowsl > div { grid-template-columns: 1fr; } .scroll { max-height: 50vh; }
 }
+
+.taskerr{border-left:3px solid var(--bad,#e5484d);padding:8px 10px;margin:8px 0;background:color-mix(in srgb,var(--bad,#e5484d) 10%,transparent);border-radius:6px}
+.taskerr b{color:var(--bad,#e5484d)}
+.taskerr p{margin:4px 0 0}
+.taskerr code{opacity:.6;font-size:11px}

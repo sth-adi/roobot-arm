@@ -567,54 +567,160 @@ class Hub:
                 self.busy.pop(name, None)
 
     # ---- firmware ----------------------------------------------------------------------------------
-    def firmware_job(self, action):
-        if action not in ("compile", "upload"):
-            return False, "unknown action"
+    # firmware profiles: what can be flashed onto the board from the dashboard
+    FW_PROFILES = {
+        "sam": {"label": "Sam's firmware", "kind": "stock", "fqbn": "esp32:esp32:upesy_wroom", "libs": ["ESP32Servo", "ESP32Ping"],
+                "desc": "The UWE-RArm firmware exactly as shipped (firmware/stock/src, untouched). Polls the end server itself."},
+        "ours": {"label": "Our firmware", "kind": "ours", "fqbn": "esp32:esp32:upesy_wroom", "libs": ["ESP32Servo", "ESP32Ping"],
+                 "desc": "Sam's firmware plus our two patches: damper and failsafes, sequences and magnet."},
+        "usb": {"label": "USB jog sketch", "kind": None, "fqbn": FQBN, "libs": ["ArduinoJson"],
+                "desc": "Our older sketch (arduino/arm_receiver): jog control over USB or WiFi."},
+    }
+    FWB = ROOT / ".fwbuild"
+
+    def _fw_state(self):
+        try:
+            return json.loads((self.FWB / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"flashed": None, "profiles": {}}
+
+    def _fw_save(self, st):
+        self.FWB.mkdir(exist_ok=True)
+        (self.FWB / "state.json").write_text(json.dumps(st), encoding="utf-8")
+
+    def _fw_secrets(self):
+        """(ssid, password, host) for the stock-based firmwares, taken from secrets.h and .env. Never sent to the browser."""
+        txt = (SKETCH / "secrets.h").read_text(encoding="utf-8", errors="replace") if (SKETCH / "secrets.h").exists() else ""
+
+        def g(k):
+            m = re.search(r'#define\s+%s\s+"([^"]*)"' % k, txt)
+            return m.group(1) if m else ""
+        from urllib.parse import urlparse
+        ssid, pw, host = g("WIFI_SSID"), g("WIFI_PASS"), urlparse(self.env_forward()).hostname or ""
+        if not (ssid and host):
+            raise ValueError("needs WIFI_SSID in arduino/arm_receiver/secrets.h and FORWARD_URL in .env (its host is the end server the firmware polls)")
+        return ssid, pw, host
+
+    def _fw_hash(self, pid):
+        import hashlib
+        h = hashlib.sha1()
+        prof = self.FW_PROFILES[pid]
+        roots = [SKETCH] if prof["kind"] is None else [ROOT / "firmware" / "stock" / "src", ROOT / "firmware" / "stock" / "patches"]
+        for r in roots:
+            for f in sorted(r.rglob("*")):
+                if f.is_file():
+                    h.update(f.relative_to(r).as_posix().encode() + f.read_bytes())
+        if prof["kind"] is not None:
+            h.update(("|".join(self._fw_secrets()) + prof["kind"]).encode())
+        return h.hexdigest()[:12]
+
+    def fw_profiles(self):
+        st = self._fw_state()
+        out = []
+        for pid, pr in self.FW_PROFILES.items():
+            rec = st["profiles"].get(pid) or {}
+            try:
+                stale = bool(rec) and rec.get("hash") != self._fw_hash(pid)
+            except (ValueError, OSError):
+                stale = False
+            out.append({"id": pid, "label": pr["label"], "desc": pr["desc"], "built": bool(rec), "stale": stale,
+                        "built_t": rec.get("built_t"), "flash_pct": rec.get("flash_pct"), "ram_pct": rec.get("ram_pct"),
+                        "on_board": (st.get("flashed") or {}).get("id") == pid})
+        return out
+
+    def _fw_prepare(self, pid):
+        """Write the sketch folder for a profile. Returns (sketch_dir, out_dir)."""
+        prof = self.FW_PROFILES[pid]
+        out_dir = self.FWB / pid / "out"
+        if prof["kind"] is None:
+            return SKETCH, out_dir
+        import tempfile
+        import emu_runner
+        ssid, pw, host = self._fw_secrets()
+        sk = self.FWB / pid / pid
+        shutil.rmtree(sk, ignore_errors=True)
+        sk.mkdir(parents=True)
+        with tempfile.TemporaryDirectory() as td:                    # patched trees are built outside the repo
+            src = emu_runner.emu_mod.firmware_src(prof["kind"], td)
+            for f in os.listdir(src):
+                if f != "SecretsExample.h":
+                    shutil.copy2(os.path.join(src, f), sk / f)
+        (sk / (pid + ".ino")).write_text("// Entry point only: the firmware is main.cpp in this folder.\n", encoding="utf-8")
+        (sk / "Secrets.h").write_text('const char* WIFI_SSID = "%s";\nconst char* WIFI_PASSWORD = "%s";\nconst char* HOST = "%s";\n' % (ssid, pw, host), encoding="utf-8")
+        return sk, out_dir
+
+    def firmware_job(self, action, profile="usb"):
+        if action not in ("compile", "upload", "swap") or profile not in self.FW_PROFILES:
+            return False, "unknown action or firmware"
         with self.lock:
             if self.fw["state"] == "running":
                 return False, "a firmware job is already running"
-            if not (SKETCH / "secrets.h").exists():
-                return False, "arduino/arm_receiver/secrets.h is missing: copy secrets.example.h and fill it in"
             if not os.path.exists(ARDUINO) and not shutil.which("arduino-cli"):
                 return False, "arduino-cli not found"
-            if action == "upload":
+            try:
+                if self.FW_PROFILES[profile]["kind"] is None:
+                    if not (SKETCH / "secrets.h").exists():
+                        return False, "arduino/arm_receiver/secrets.h is missing: copy secrets.example.h and fill it in"
+                else:
+                    self._fw_secrets()
+            except ValueError as e:
+                return False, str(e)
+            if action in ("upload", "swap"):
                 if self.armed:
-                    return False, "switch the output to SAFE before uploading (the board resets)"
+                    return False, "switch the output to SAFE before flashing (the board resets)"
                 if not self.link.find_port() and not self.link.device:
                     return False, "no ESP32 found on USB"
-            self.fw.update(state="running", action=action, detail="", finished_t=None)
+            self.fw.update(state="running", action=action, profile=profile, detail="", finished_t=None)
         self.publish("status", self.snapshot())
-        threading.Thread(target=self._fw_run, args=(action,), daemon=True).start()
-        return True, f"{action} started"
+        threading.Thread(target=self._fw_run, args=(action, profile), daemon=True).start()
+        return True, f"{action} {self.FW_PROFILES[profile]['label']} started"
 
-    def _fw_run(self, action):
+    def _fw_run(self, action, pid):
         ok, detail = False, ""
+        prof = self.FW_PROFILES[pid]
         try:
-            if action == "compile":
-                rc, out = self.run("firmware", [ARDUINO, "compile", "--fqbn", FQBN, str(SKETCH)])
+            st = self._fw_state()
+            rec = st["profiles"].get(pid) or {}
+            need_build = action == "compile" or not rec or rec.get("hash") != self._fw_hash(pid)
+            rc = 0
+            if need_build:
+                sketch, out_dir = self._fw_prepare(pid)
+                if prof["libs"]:
+                    self.run("firmware", [ARDUINO, "lib", "install", *prof["libs"]])
+                rc, out = self.run("firmware", [ARDUINO, "compile", "--fqbn", prof["fqbn"], "--output-dir", str(out_dir), str(sketch)])
+                if rc == 0:
+                    rec = {"hash": self._fw_hash(pid), "built_t": time.time()}
+                    m = re.search(r"Sketch uses (\d+) bytes \((\d+)%\)", out or "")
+                    rec["flash_pct"] = int(m.group(2)) if m else None
+                    m = re.search(r"Global variables use (\d+) bytes \((\d+)%\)", out or "")
+                    rec["ram_pct"] = int(m.group(2)) if m else None
+                    st["profiles"][pid] = rec
+                    self._fw_save(st)
+                    self.fw.update(flash_pct=rec["flash_pct"], ram_pct=rec["ram_pct"])
             else:
+                self.log("firmware", f"{prof['label']}: nothing changed since the last build, flashing the saved binary (no recompile)")
+                sketch, out_dir = (SKETCH if prof["kind"] is None else self.FWB / pid / pid), self.FWB / pid / "out"
+            if rc == 0 and action in ("upload", "swap"):
                 port = self.link.device or self.link.find_port()
                 self.link.suspend()                       # release the COM port for esptool
                 time.sleep(0.6)
-                rc, out = self.run("firmware", [ARDUINO, "upload", "-p", port, "--fqbn", FQBN, str(SKETCH)])
-                if rc != 0:                               # the final-step serial glitch seen before: retry once
-                    if "No more data to read" in out or "Hash of data verified" in out:
-                        self.log("firmware", "retrying once (intermittent final-step serial error)")
-                        rc, out = self.run("firmware", [ARDUINO, "upload", "-p", port, "--fqbn", FQBN, str(SKETCH)])
+                cmd = [ARDUINO, "upload", "-p", port, "--fqbn", prof["fqbn"], "--input-dir", str(out_dir), str(sketch)]
+                rc, out = self.run("firmware", cmd)
+                if rc != 0 and ("No more data to read" in out or "Hash of data verified" in out):
+                    self.log("firmware", "retrying once (intermittent final-step serial error)")
+                    rc, out = self.run("firmware", cmd)
                 self.link.resume()
-            m = re.search(r"Sketch uses (\d+) bytes \((\d+)%\)", out or "")
-            if m:
-                self.fw["flash_pct"] = int(m.group(2))
-            m = re.search(r"Global variables use (\d+) bytes \((\d+)%\)", out or "")
-            if m:
-                self.fw["ram_pct"] = int(m.group(2))
+                if rc == 0:
+                    st = self._fw_state()
+                    st["flashed"] = {"id": pid, "t": time.time()}
+                    self._fw_save(st)
             ok = rc == 0
             detail = "ok" if ok else f"failed (exit {rc}); see the log"
         except Exception as e:
             detail = f"error: {e}"
             self.link.resume()
         self.fw.update(state="ok" if ok else "fail", detail=detail, finished_t=time.time())
-        self.log("firmware", f"{action}: {detail}")
+        self.log("firmware", f"{action} {prof['label']}: {detail}")
         self.publish("status", self.snapshot())
 
     # ---- info ---------------------------------------------------------------------------------------
@@ -720,7 +826,7 @@ class Hub:
             "usb": {"enabled": link.enabled, "phase": link.phase, "port": link.device or link.find_port_cached(),
                     "status": link.status, "rate": link.board_rate, "range": link.board_range},
             "board": dict(self.board, age=None if not self.board["last_line_t"] else round(time.time() - self.board["last_line_t"], 1)),
-            "firmware": dict(self.fw, secrets_present=(SKETCH / "secrets.h").exists(),
+            "firmware": dict(self.fw, profiles=self.fw_profiles(), secrets_present=(SKETCH / "secrets.h").exists(),
                              age=None if not self.fw["finished_t"] else round(time.time() - self.fw["finished_t"], 1)),
             "config": {"env_present": (ROOT / ".env").exists(), "forward_url_set": bool(self.env_forward())},
             "project": self.cache["git"],
@@ -1236,7 +1342,7 @@ class Handler(BaseHTTPRequestHandler):
                 ok, msg = HUB.service_action(str(d.get("name", "")), str(d.get("action", "")))
                 return self._json(200 if ok else 409, {"ok": ok, "message": msg})
             if path == "/api/firmware":
-                ok, msg = HUB.firmware_job(str(d.get("action", "")))
+                ok, msg = HUB.firmware_job(str(d.get("action", "")), str(d.get("profile", "usb")))
                 return self._json(200 if ok else 409, {"ok": ok, "message": msg})
             return self._json(404, {"error": "not found"})
         except (ValueError, TypeError) as e:

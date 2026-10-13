@@ -667,7 +667,11 @@ function mountFirmware(root) {
   root.innerHTML = `
   <div class="cols">
     <div>
-      <section class="sec" style="border-top:0;padding-top:0"><h2>ESP32 sketch</h2>
+      <section class="sec" style="border-top:0;padding-top:0"><h2>Swap the firmware on the board</h2>
+        <p class="lead">Flash Sam's firmware, ours, or the USB jog sketch onto the ESP32. Each one is built once and kept, so swapping back is just an upload. Sam's and ours poll the end server over WiFi themselves; the USB sketch does not.</p>
+        <div class="rows" id="f-profiles"></div>
+        <p class="note" id="f-pnote" style="margin-top:8px"></p></section>
+      <section class="sec"><h2>ESP32 sketch (USB jog)</h2>
         <p class="lead">arduino/arm_receiver, built for the ESP32 Dev Module with arduino-cli.</p>
         <div class="rows">
           <div style="grid-template-columns:150px 1fr"><span class="muted">Port</span><span class="mono" id="f-port">-</span></div>
@@ -691,6 +695,9 @@ function mountFirmware(root) {
   (S.logs.firmware || []).forEach((l) => termAppend(term, l.t, l.line, /error|fail/i.test(l.line) ? "w" : ""));
   if (!term.childElementCount) term.innerHTML = '<span class="m">No build output yet. Press Compile to see it here.</span>';
   const run = async (a) => { const r = await api("/api/firmware", { action: a }); if (!r.ok) toast(r.message || r.error, "bad"); };
+  const runP = async (a, profile) => { const r = await api("/api/firmware", { action: a, profile }); if (!r.ok) toast(r.message || r.error, "bad"); };
+  $r("#f-profiles").addEventListener("click", (e) => { const b = e.target.closest("button[data-fa]"); if (b && !b.disabled) runP(b.dataset.fa, b.dataset.fp); });
+  let pSig = "";
   $r("#f-compile").addEventListener("click", () => run("compile"));
   $r("#f-upload").addEventListener("click", () => run("upload"));
   return {
@@ -701,6 +708,21 @@ function mountFirmware(root) {
       $r("#f-sec").innerHTML = fw.secrets_present ? `<span class="st ok">secrets.h found</span>` : `<span class="st bad">secrets.h missing: copy secrets.example.h and fill it in</span>`;
       $r("#f-last").innerHTML = running ? `<span class="st run">${esc(fw.action)} running</span>` : fw.finished_t ? `<span class="st ${fw.state === "ok" ? "ok" : "bad"}">${esc(fw.action)} ${fw.state === "ok" ? "succeeded" : "failed"}, ${ageStr(fw.age)} ago</span>` : `<span class="st idle">nothing run yet</span>`;
       $r("#f-prog").hidden = !running;
+      const profs = fw.profiles || [], busyP = running ? fw.profile : null;
+      const canFlash = !running && !st.armed && !!u.port;
+      const sig = JSON.stringify([profs, running, busyP, canFlash]);
+      if (sig !== pSig) {
+        pSig = sig;
+        $r("#f-profiles").innerHTML = profs.map((p) => {
+          const badge = p.on_board ? `<span class="st ok">on the board</span> ` : "";
+          const built = !p.built ? `<span class="st idle">not built</span>` : p.stale ? `<span class="st bad">changed, needs rebuild</span>` : `<span class="st ok">built${p.flash_pct != null ? `, ${p.flash_pct}% flash` : ""}</span>`;
+          const sp = busyP === p.id ? ` <span class="st run">${esc(fw.action)} running</span>` : "";
+          return `<div style="grid-template-columns:1fr auto"><div><div>${esc(p.label)} ${badge}${built}${sp}</div><div class="note">${esc(p.desc)}</div></div>
+            <div class="inline"><button class="btn" type="button" data-fa="compile" data-fp="${esc(p.id)}"${running ? " disabled" : ""}>${icon("hammer", "sm")}Build</button>
+            <button class="btn primary" type="button" data-fa="swap" data-fp="${esc(p.id)}"${canFlash ? "" : " disabled"}>${icon("upload-simple", "sm")}${p.on_board ? "Reflash" : "Flash"}</button></div></div>`;
+        }).join("") || '<span class="muted">No firmware profiles reported. Restart the hub.</span>';
+      }
+      $r("#f-pnote").textContent = running ? "A firmware job is running." : st.armed ? "Switch the output to SAFE to flash." : !u.port ? "Plug the board in to flash." : "Flashing resets the board: the servos go to their start pose.";
       const canUp = !running && fw.secrets_present && !st.armed && !!u.port;
       $r("#f-compile").disabled = running || !fw.secrets_present;
       $r("#f-upload").disabled = !canUp;

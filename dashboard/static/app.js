@@ -1106,6 +1106,7 @@ function mountArm(root) {
       <div class="sidesec"><h2>Electromagnet and keys</h2>
         <div class="inline"><button class="btn sm" id="w-mag" type="button" aria-pressed="false">Magnet off</button><button class="btn sm" id="w-reset" type="button">Reset keys</button></div>
         <div class="inline" style="margin-top:8px"><input id="q-ask" placeholder="Ask the arm: put the key on the tray" maxlength="300" aria-label="Ask the arm" style="flex:1"><button class="btn sm" id="q-go" type="button">Do it</button></div>
+        <div class="note"><span class="st idle" id="q-ai" role="status">AI: checking</span></div>
         <div class="note" id="q-log" role="status"></div>
         <details class="sidesec" id="s-lib"><summary>Sequences</summary>
           <div class="inline" style="margin-top:6px"><input id="s-name" placeholder="name, e.g. box2_to_tray" maxlength="48" aria-label="Sequence name"><button class="btn sm" id="s-send" type="button">Save to host</button></div>
@@ -1137,6 +1138,18 @@ function mountArm(root) {
   $r("#a-play").addEventListener("click", async () => { const r = await api("/api/sim", { replay: "toggle" }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
   const model = $r("#a-model");
   model.addEventListener("change", async () => { const v = model.value; await api("/api/sim", { model: v === "improved" ? "improved" : "stock", patch: v === "stock-patch" }); });
+  const askIt = async () => { const t = $r("#q-ask").value.trim(); if (!t) return;
+    const r = await api("/api/ask", { request: t }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); };
+  $r("#q-go").addEventListener("click", askIt);
+  $r("#q-ask").addEventListener("keydown", (e) => { if (e.key === "Enter") askIt(); });
+  const showTask = async () => { try {
+    const s = await (await fetch("/api/state")).json(), t = s.task || {}, ai = $r("#q-ai");
+    if (s.ai === "groq") { ai.className = "st ok"; ai.textContent = "AI: Groq"; }
+    else { ai.className = "st bad"; ai.textContent = "AI: keywords only (no GROQ_API_KEY in .env)"; }
+    $r("#q-log").textContent = t.log && t.log.length ? `${t.state}: ${t.log[t.log.length - 1]}` : "";
+  } catch (e) { /* hub not reachable */ } };
+  showTask();
+  const taskTimer = setInterval(() => { if (!document.body.contains($r("#q-log"))) return clearInterval(taskTimer); showTask(); }, 1500);
   $r("#w-mag").addEventListener("click", async () => { const r = await api("/api/world", { magnet: "toggle" }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
   const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const refreshSeqs = async () => {

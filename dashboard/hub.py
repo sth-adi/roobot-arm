@@ -569,9 +569,9 @@ class Hub:
     # ---- firmware ----------------------------------------------------------------------------------
     # firmware profiles: what can be flashed onto the board from the dashboard
     FW_PROFILES = {
-        "sam": {"label": "Sam's firmware", "kind": "stock", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo", "ESP32Ping"],
+        "sam": {"label": "Sam's firmware", "kind": "stock", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
                 "desc": "The UWE-RArm firmware exactly as shipped (firmware/stock/src, untouched). Polls the end server itself."},
-        "ours": {"label": "Our firmware", "kind": "ours", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo", "ESP32Ping"],
+        "ours": {"label": "Our firmware", "kind": "ours", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
                  "desc": "Sam's firmware plus our two patches: damper and failsafes, sequences and magnet."},
         "usb": {"label": "USB jog sketch", "kind": None, "fqbn": FQBN, "libs": ["ArduinoJson"],
                 "desc": "Our older sketch (arduino/arm_receiver): jog control over USB or WiFi."},
@@ -687,6 +687,11 @@ class Hub:
                 sketch, out_dir = self._fw_prepare(pid)
                 if prof["libs"]:
                     self.run("firmware", [ARDUINO, "lib", "install", *prof["libs"]])
+                for lib, url in prof.get("git_libs", {}).items():     # not in the Arduino index: the URL platformio.ini names
+                    _, have = self.run("firmware", [ARDUINO, "lib", "list"])
+                    if lib not in (have or ""):
+                        self.run("firmware", [ARDUINO, "config", "set", "library.enable_unsafe_install", "true"])
+                        self.run("firmware", [ARDUINO, "lib", "install", "--git-url", url])
                 rc, out = self.run("firmware", [ARDUINO, "compile", "--fqbn", prof["fqbn"], "--output-dir", str(out_dir), str(sketch)])
                 if rc == 0:
                     rec = {"hash": self._fw_hash(pid), "built_t": time.time()}

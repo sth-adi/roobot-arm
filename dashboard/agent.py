@@ -10,6 +10,10 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+try:
+    from preflight import SCOPE
+except ImportError:                                    # imported as dashboard.agent
+    from dashboard.preflight import SCOPE
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 FALLBACK_MODELS = ["llama-3.1-8b-instant", "openai/gpt-oss-20b", "openai/gpt-oss-120b"]   # tried in turn when Groq says model_not_found (a project can have models switched off)
@@ -55,8 +59,8 @@ def keyword_choice(request, library, last=None):
 
 def groq_choice(request, library, state, key, timeout=15, model=None):
     catalog = [{"name": s["name"], "description": s["description"], "requires": s["requires"], "ends": s["ends"]} for s in library]
-    system = ("You pick which taught robot-arm sequence to run. Answer ONLY with JSON: "
-              '{"sequence": <name from the list or null>, "reverse": <true to run it backwards for the opposite task>, "reason": <short>}. '
+    system = ("You pick which taught robot-arm sequence to run. " + SCOPE + " Never invent a sequence. Answer ONLY with JSON: "
+              '{"sequence": <name from the list or null>, "reverse": <true to run it backwards for the opposite task>, "key": <key number the person named, else null>, "reason": <short>}. '
               "Each sequence moves a key between places; running it reversed does the opposite move. Use null if nothing fits. "
               "Sequences: " + json.dumps(catalog) + " Arm state: " + json.dumps({k: state.get(k) for k in ("at_home", "holding", "keys", "last_run")}) + " last_run is the sequence that ran most recently; undoing it means running it with the opposite reverse flag.")
     body = json.dumps({"model": model or GROQ_MODEL, "temperature": 0, "response_format": {"type": "json_object"},
@@ -66,7 +70,7 @@ def groq_choice(request, library, state, key, timeout=15, model=None):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.loads(r.read())
     ans = json.loads(out["choices"][0]["message"]["content"])
-    return {"sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "reason": str(ans.get("reason", ""))[:200], "by": "groq", "model": model or GROQ_MODEL}
+    return {"sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "key": ans.get("key"), "reason": str(ans.get("reason", ""))[:200], "by": "groq", "model": model or GROQ_MODEL}
 
 
 def _why(e):

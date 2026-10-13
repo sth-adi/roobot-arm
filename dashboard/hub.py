@@ -50,6 +50,7 @@ from stamp import code_stamp  # noqa: E402
 from sim.workcell import Workcell  # noqa: E402
 import sim.sequences as SEQ  # noqa: E402
 import agent as AGENT  # noqa: E402
+import preflight as PRE  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
 
 IS_WIN = sys.platform == "win32"
@@ -803,7 +804,7 @@ class Hub:
             raise ValueError("say what you want done")
         if self.task.get("state") in ("working", "running"):
             raise RuntimeError("a task is already running")
-        self.task = {"state": "working", "request": request, "log": []}
+        self.task = {"state": "working", "request": request, "log": [], "error": None, "warning": None}
         threading.Thread(target=self._do_task, args=(request,), daemon=True).start()
 
     def _tlog(self, msg, state=None):
@@ -820,30 +821,29 @@ class Hub:
             time.sleep(0.2)
         return False
 
+    def _fail(self, e):
+        """Stop the task with a structured error the dashboards can show: {code, title, detail, hint}."""
+        self.task["error"] = e
+        self._tlog("%s%s" % (e["title"], (". " + e["hint"]) if e.get("hint") else ""), "failed")
+
     def _do_task(self, request):
         try:
             st = self.state_packet()
             library = LIBRARY.list()
             plan = AGENT.choose(request, library, st)
+            if plan.get("ai_error"):
+                self.task["warning"] = "Groq was not used: " + plan["ai_error"]
+                self._tlog("Groq was not used: " + plan["ai_error"])
             if not plan["sequence"]:
-                if plan.get("ai_error"):
-                    self._tlog("Groq was not used: " + plan["ai_error"])
-                return self._tlog("No sequence fits: " + plan["reason"], "failed")
+                return self._fail(PRE.no_sequence(request, plan))
             seq = LIBRARY.get(plan["sequence"])
             self.task["plan"] = plan
             self._tlog("Chose %s%s (%s, %s)" % (plan["sequence"], " reversed" if plan["reverse"] else "", plan["by"], plan["reason"]))
-            if plan.get("ai_error"):
-                self._tlog("Groq was not used: " + plan["ai_error"])
             if plan["reverse"]:
                 seq = SEQ.reverse(seq)
-            need = seq.get("requires", {}).get("key_in")
-            if need:
-                want = str(need).replace("box", "box ").replace("  ", " ").strip()
-                if want not in st["keys"].values():
-                    return self._tlog("Cannot start: this move needs a key in %s, and the keys are at %s" % (need, ", ".join(st["keys"].values())), "failed")
-            need = seq.get("requires", {}).get("key_on")
-            if need and str(need) not in st["keys"].values():
-                return self._tlog("Cannot start: this move needs a key on the %s, and the keys are at %s" % (need, ", ".join(st["keys"].values())), "failed")
+            problems = PRE.check(request, plan, seq, st)
+            if problems:
+                return self._fail(problems[0])
             if not st["home_grip"]:
                 self._tlog("Not at home grip: going home first")
                 if st.get("source") == "esp32":
@@ -856,15 +856,20 @@ class Hub:
                         self.cell.set_magnet(False)
                         self.sim.go_home()
                 if not self._wait(lambda: self.state_packet()["at_home"] and not self.state_packet()["magnet"], 30):
-                    return self._tlog("Could not get to home grip", "failed")
+                    return self._fail(PRE.err("HOME_FAILED", "The arm could not get to its home position", "It did not reach home grip within 30 s.",
+                                              "Check the arm is powered and armed, then try again."))
             self._tlog("At home grip: running", "running")
             self.load_sequence(seq, False, True)
             if not self._wait(lambda: self._run_once is None, 120):
-                return self._tlog("The sequence did not finish", "failed")
+                return self._fail(PRE.err("RUN_TIMEOUT", "The sequence did not finish", "It was still running after 120 s.", "Press B to send the arm home."))
+            time.sleep(1.5)                                  # let a released key finish falling before it is looked at
+            bad = PRE.verify(seq, st, self.state_packet(), request, plan)
+            if bad:
+                return self._fail(bad)
             self.last_run = {"name": plan["sequence"], "reverse": plan["reverse"]}
             self._tlog("Done", "done")
         except Exception as e:                       # a task must never kill the hub
-            self._tlog("Failed: %s" % e, "failed")
+            self._fail(PRE.err("INTERNAL", "Something went wrong inside the hub", str(e)[:200], "Check the hub console."))
 
     def current_sequence(self, name="", description="", requires=None, ends=None):
         """The virtual arm's saved positions (with the magnet state of each) as a sequence packet."""

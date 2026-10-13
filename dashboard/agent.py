@@ -15,8 +15,8 @@ try:
 except ImportError:                                    # imported as dashboard.agent
     from dashboard.preflight import SCOPE
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
-FALLBACK_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]   # cheapest first (Groq list prices); tried in turn when Groq says model_not_found (a project can have models switched off)
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+FALLBACK_MODELS = ["openai/gpt-oss-120b", "llama-3.1-8b-instant"]   # cheapest first (Groq list prices); tried in turn when Groq says model_not_found (a project can have models switched off)
 _good_model = [None]                                                                      # the model that last worked, tried first next time
 REVERSE_WORDS = {"back", "reverse", "undo", "return", "restore", "opposite", "revert"}
 STOP = {"the", "a", "an", "to", "from", "into", "in", "on", "of", "put", "move", "please", "key", "and", "it", "me"}

@@ -7,7 +7,6 @@
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const icon = (n, c = "") => `<svg class="ic ${c}"><use href="#i-${n}"/></svg>`;
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const r3 = (v) => Math.round(v * 1000) / 1000;
 const f1 = (v, d = 1) => (v == null || Number.isNaN(v) ? "-" : Number(v).toFixed(d));
 const timeStr = (t) => {

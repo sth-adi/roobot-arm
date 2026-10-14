@@ -30,7 +30,6 @@ Wire format (what the controller client posts, and what the firmware reads):
 Sticks are raw pygame axes (stick up = negative); the firmware applies its own 0.2 deadzone.
 """
 import math
-import time
 from collections import deque
 
 HALF_PI = math.pi / 2

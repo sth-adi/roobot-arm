@@ -615,15 +615,24 @@ class Hub:
             h.update(("|".join(self._fw_secrets()) + prof["kind"]).encode())
         return h.hexdigest()[:12]
 
+    _fw_stale_cache, _fw_stale_t = {}, 0.0         # "changed since the last build" needs every firmware file hashed: do it every 5 s, not every status update
+
+    def _fw_is_stale(self, pid, rec):
+        if time.time() - self._fw_stale_t > 5.0:
+            self._fw_stale_cache, self._fw_stale_t = {}, time.time()
+        if (pid, rec.get("hash")) not in self._fw_stale_cache:
+            try:
+                self._fw_stale_cache[(pid, rec.get("hash"))] = bool(rec) and rec.get("hash") != self._fw_hash(pid)
+            except (ValueError, OSError):
+                self._fw_stale_cache[(pid, rec.get("hash"))] = False
+        return self._fw_stale_cache[(pid, rec.get("hash"))]
+
     def fw_profiles(self):
         st = self._fw_state()
         out = []
         for pid, pr in self.FW_PROFILES.items():
             rec = st["profiles"].get(pid) or {}
-            try:
-                stale = bool(rec) and rec.get("hash") != self._fw_hash(pid)
-            except (ValueError, OSError):
-                stale = False
+            stale = self._fw_is_stale(pid, rec)
             out.append({"id": pid, "label": pr["label"], "desc": pr["desc"], "built": bool(rec), "stale": stale,
                         "built_t": rec.get("built_t"), "flash_pct": rec.get("flash_pct"), "ram_pct": rec.get("ram_pct"),
                         "on_board": (st.get("flashed") or {}).get("id") == pid})

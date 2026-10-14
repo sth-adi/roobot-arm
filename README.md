@@ -146,7 +146,7 @@ python dashboard/hub.py        # opens http://127.0.0.1:8765
 | Control | Drive from the browser (browser gamepad, virtual sticks, demo wave) or just watch the server stream. A **preview arm** mirrors the firmware's jog logic, so the whole front end can be tested with no hardware. Speed and servo-travel settings. |
 | Packets | Every controller packet, exactly as sent (raw HTTP and JSON), with filter, pause and a packets-per-second graph. |
 | Arm and board | The ESP32 over USB: live board log, settings, last output positions, USB link on/off. |
-| Firmware | Compile and upload the ESP32 sketch with arduino-cli (flash and memory use shown, port released and retaken automatically). |
+| Firmware | Swap what is on the ESP32: Sam's firmware, ours (Sam's plus both patches) or the USB jog sketch. Each is built once with arduino-cli and cached, so swapping back is just an upload; the page shows which one is on the board. WiFi name comes from `arduino/arm_receiver/secrets.h`, the host from `FORWARD_URL` in `.env`. Port released and retaken automatically. |
 | Services | Start/stop Docker Desktop, the local server (Docker or Python) and the controller window; config checks; logs. |
 | AI and jobs | Placeholder for the AI assistant and JSON instruction packets (draft packet composer, dry run only; nothing is sent). |
 | Project | Git branch, uncommitted/unpushed counts, recent commits. |
@@ -203,7 +203,7 @@ longest stall. Run `python server.py` first, then `python dashboard/hub.py`.
 
 `firmware/rarm/` is the UWE-RArm ESP32 firmware (copied from Samwally1/UWE-RArm at 3b9b8aa) with the damper and a stale-input stop added, plus a PC test that runs its movement code against the Python arm. This is a larger rewrite and optional; the smaller route is the patch in `firmware/stock/`. The stock firmware works with everything else here unchanged. See `firmware/rarm/README.md` before flashing it.
 
-The "Arm and board" and "Firmware" pages still target the older USB jog sketch in `arduino/arm_receiver/`.
+The "Arm and board" page still targets the older USB jog sketch in `arduino/arm_receiver/`; the Firmware page can flash that sketch too, next to Sam's and ours.
 
 ### Sequences (named JSON, reversible)
 A sequence is a named list of poses (`x, y, z` in mm, tool `angle` in degrees) with an optional magnet `action` per pose: `grab` or `release`. Storing the magnet as an action is what lets a sequence run backwards: the order flips and grab and release swap, so a box-to-tray move becomes tray-to-box without re-teaching it. `requires` and `ends` hold the conditions the task assumes and leaves behind, for the AI to match against.

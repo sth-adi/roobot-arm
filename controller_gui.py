@@ -156,7 +156,6 @@ class App:
             c.create_oval(cx - 45, cy - 45, cx + 45, cy + 45, fill="#25262b", outline=IDLE, width=2)
             dot = c.create_oval(cx - 18, cy - 18, cx + 18, cy + 18, fill=IDLE, outline="")
             self.stick[name] = (dot, cx, cy)
-        self.sbtn = {"ls": self.stick["l"][0], "rs": self.stick["r"][0]}
         # d-pad
         self.dp = {}
         px, py = 260, 290

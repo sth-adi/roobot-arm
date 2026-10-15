@@ -141,6 +141,56 @@ class SequenceFirmware(unittest.TestCase):
                     {"poses": [{"x": 0, "y": 0, "z": 0, "angle": 0, "action": None}] * 21}):
             with self.assertRaises(urllib.error.HTTPError):
                 call(self.base, "/sequence", bad)
+
+    def test_server_passes_a_pose_speed_to_the_firmware(self):
+        call(self.base, "/sequence", {"poses": [{"x": 0, "y": 200, "z": 120, "angle": 0, "action": None, "speed": 22.5},
+                                                {"x": 0, "y": 200, "z": 100, "angle": 0, "action": None}]})
+        self.assertEqual([p[5] for p in call(self.base, "/sequence")["poses"]], [22.5, 0.0])      # sixth number; 0 = the normal limit
+        for bad in (-1, 5000, "fast"):
+            with self.assertRaises(urllib.error.HTTPError):
+                call(self.base, "/sequence", {"poses": [{"x": 0, "y": 0, "z": 0, "angle": 0, "action": None, "speed": bad}]})
+
+    def restart_firmware(self):
+        """A new power-up: forget the old report, so what is read next comes from the new firmware (which ignores a sequence queued before it started)."""
+        self.emu.stop()
+        with server._lock:
+            server._armstate.update(data=None, received_at=None)
+        self.emu = emulator.Emulator(self.exe, self.base[len("http://"):])
+        self.wait(lambda s: "x" in s, 15, "the first state report after a restart")
+
+    def run_timed(self, speed):
+        """Seconds the firmware takes over the one big move of a sequence whose poses carry this speed (None = no speed)."""
+        far = {"x": 90, "y": 190, "z": 70, "angle": 0, "action": None}
+        poses = [{"x": 0, "y": 200, "z": 120, "angle": 0, "action": None}, dict(far)]
+        if speed:
+            poses[0]["speed"] = poses[1]["speed"] = speed
+        self.wait(lambda s: "x" in s, 15, "the first state report")
+        sid = call(self.base, "/sequence", {"poses": poses})["id"]
+        started = None
+        end = time.time() + 120
+        while time.time() < end:
+            s = self.state()
+            if started is None and s.get("mode") == "sequence":
+                started = time.time()
+            if s.get("seqDone") == sid:
+                return time.time() - (started or time.time())
+            time.sleep(0.05)
+        self.fail("the sequence did not finish")
+
+    def test_a_pose_speed_changes_how_fast_the_arm_moves(self):
+        self.wait(lambda s: "x" in s, 15, "the first state report")
+        self.assertEqual(self.state().get("poseSpeeds"), 1)                 # this firmware says it reads a speed per pose
+        slow = self.run_timed(8)
+        self.assertGreater(slow, 2.5)
+        self.restart_firmware()
+        fast = self.run_timed(55)
+        self.assertLess(fast, slow - 2.0)                                    # the same move, much quicker at 55 deg/s than at 8
+
+    def test_the_normal_limit_is_back_after_a_sped_up_run(self):
+        sped = self.run_timed(55)
+        self.restart_firmware()
+        plain = self.run_timed(None)                                         # no speeds: the 30 deg/s default again, not 55
+        self.assertGreater(plain, sped + 0.4)
 
 
 if __name__ == "__main__":

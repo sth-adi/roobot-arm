@@ -4,7 +4,7 @@
     python emu/emulator.py --firmware stock   --host 127.0.0.1:8100 --seconds 30
     python emu/emulator.py --firmware patched --host 127.0.0.1:8000
 
---firmware: stock (firmware/stock/src as shipped), patched (stock + firmware/stock/patches/damper-and-failsafes.patch), ours (patched + sequences-and-magnet.patch: magnet, sequence runs, state packet),
+--firmware: stock (firmware/stock/src as shipped), patched (stock + firmware/stock/patches/damper-and-failsafes.patch), ours (patched + sequences-and-magnet.patch: magnet, sequence runs, state packet; + sequence-speeds.patch: a speed per pose),
 or rarm (the rewrite in firmware/rarm/src). --host is the server the firmware polls: the local server directly, or the
 network proxy (emu/netproxy.py) for a link with latency, loss and handshake cost. Needs a C++ compiler (g++; on Windows MinGW-w64 via MSYS2) and git or patch for `patched`.
 Prints the servo positions as they change and the network statistics every 5 s. Library use: see class Emulator.
@@ -54,18 +54,21 @@ def compiler():
 
 
 def apply_patch(tree, patch_file):
-    """Apply a unified diff (paths a/src/..) inside `tree`. Uses git apply (Windows has git) and falls back to patch."""
+    """Apply a unified diff (paths a/src/..) inside `tree`. Uses git apply (Windows has git) and falls back to patch.
+    Inside another git repository (a home folder that is a repo makes every temp folder one) git apply quietly SKIPS
+    every file and still exits 0, so git is told not to look above `tree`, and a skipped file is an error."""
     attempts = []
     if shutil.which("git"):
-        attempts.append(["git", "apply", "-p1", patch_file])
+        attempts.append(["git", "apply", "-v", "-p1", patch_file])
     if shutil.which("patch"):
         attempts.append(["patch", "-p1", "-i", patch_file])
     if not attempts:
         raise RuntimeError("need git or patch to apply the firmware patch")
+    env = dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.dirname(os.path.abspath(tree)))
     r = None
     for cmd in attempts:
-        r = subprocess.run(cmd, cwd=tree, capture_output=True, text=True)
-        if r.returncode == 0:
+        r = subprocess.run(cmd, cwd=tree, capture_output=True, text=True, env=env)
+        if r.returncode == 0 and "Skipped patch" not in r.stdout + r.stderr:
             return
     raise RuntimeError("patch does not apply:\n" + r.stdout + r.stderr)
 
@@ -86,6 +89,7 @@ def firmware_src(kind, workdir):
         apply_patch(tree, os.path.join(FW, "stock", "patches", "damper-and-failsafes.patch"))
         if kind == "ours":                       # plus the electromagnet, sequence runs and the state packet
             apply_patch(tree, os.path.join(FW, "stock", "patches", "sequences-and-magnet.patch"))
+            apply_patch(tree, os.path.join(FW, "stock", "patches", "sequence-speeds.patch"))     # plus a joint speed limit per sequence pose
         return os.path.join(tree, "src")
     raise ValueError("firmware must be stock, patched, ours or rarm")
 

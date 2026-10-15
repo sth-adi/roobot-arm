@@ -17,7 +17,9 @@ Faster is cheaper, so the search pushes free-space moves up and holds back the m
 The simulated arm has no inertia and the two limits are ESTIMATES, not measurements: they are the knobs to calibrate against the real
 arm. Speeds tuned here are honoured by the virtual arm; firmware that reads a per-pose speed is a separate step.
 """
+import json
 import math
+import os
 import random
 import time
 
@@ -25,7 +27,8 @@ from sim import armsim as A
 from sim import sequences as SEQ
 from sim.workcell import Workcell
 
-SPEED_MIN, SPEED_MAX = 5.0, 90.0        # search bounds, deg/s (the damper default is 30)
+SPEED_MIN, SPEED_MAX = 5.0, 60.0        # search bounds, deg/s (the damper default is 30; 60 is the firmware's own cap, MaxJointDegPerSecondCap)
+FW_MOVE_S = 10.0                        # the firmware gives up waiting for a move after 12 s and goes on, so a tuned move must finish well inside that
 REF_SPEED = 10.0                        # the slow, safe speed the reference outcome is taken at
 DT = 0.02                               # the hub's 50 Hz step
 MAX_SEG_S = 60.0
@@ -65,7 +68,7 @@ def rollout(seq, speeds, limits=None, tool=A.DEFAULT_TOOL_MM, arm_limits=None, h
         goal = A.inverse_kin((p["x"], p["y"], p["z"], p["angle"]), sim.angles, sim.limits, sim.tool)
         if goal is None:
             fail("pose %d is out of reach" % (i + 1))
-            out["segments"].append({"i": i, "speed": speeds[i], "tip_start": 0.0, "tip_end": 0.0, "holding": False, "time": 0.0})
+            out["segments"].append({"i": i, "speed": speeds[i], "tip_start": 0.0, "tip_end": 0.0, "holding": False, "time": 0.0, "moves": False, "lands": False})
             continue
         sim.rate = float(speeds[i])
         holding = cell.held is not None
@@ -86,6 +89,8 @@ def rollout(seq, speeds, limits=None, tool=A.DEFAULT_TOOL_MM, arm_limits=None, h
             t += DT
         if not arrived:
             fail("pose %d: move did not finish" % (i + 1))
+        elif t > FW_MOVE_S:
+            fail("pose %d: move takes %.1f s, longer than the firmware waits" % (i + 1, t))
         if check and cell.held is not None and v_end > slip:
             cell.set_magnet(False)
             fail("pose %d: key dropped at the stop (%d mm/s)" % (i + 1, v_end))
@@ -109,7 +114,7 @@ def rollout(seq, speeds, limits=None, tool=A.DEFAULT_TOOL_MM, arm_limits=None, h
                 t += DT
         out["time"] += t
         out["segments"].append({"i": i, "speed": float(speeds[i]), "tip_start": round(v_start or 0.0, 1), "tip_end": round(v_end, 1),
-                                "holding": holding, "time": round(t, 2), "moves": travel > 0.5})
+                                "holding": holding, "time": round(t, 2), "moves": travel > 0.5, "lands": bool(lands)})
     out["time"] = round(out["time"], 2)
     out["keys"] = {k["id"]: cell.where(k) for k in cell.keys}
     return out
@@ -180,3 +185,85 @@ def tune(seq, start=None, limits=None, generations=40, offspring=8, restarts=3, 
     return {"speeds": speeds, "baseline": {"speeds": x0, "time": base["time"], "failures": base["failures"], "problems": base["problems"]},
             "tuned": {"time": tuned["time"], "failures": tuned["failures"], "problems": tuned["problems"], "segments": tuned["segments"]},
             "history": history, "evals": sc.evals, "generations": gen, "limits": sc.limits, "seconds": round(time.time() - t0, 1)}
+
+
+# ---- feedback from real runs ------------------------------------------------------------------------------------------------
+# The simulated arm has no inertia and the two limits are estimates, so they are corrected from what happens on the real arm.
+# A trial runs the tuned speeds on the arm, scaled down first; the person says how it went; the verdict moves a limit.
+OUTCOMES = ("ok", "dropped", "missed", "rough")
+LADDER = (0.5, 0.75, 1.0)               # fractions of the tuned speeds a trial may use, in order: a rung is only open once the one below went ok
+SLIP_FLOOR, KNOCK_FLOOR, MARGIN_FLOOR = 40.0, 20.0, 0.5
+CAL_SHRINK = 0.9                        # a failure puts the limit at this fraction of the speed that was seen to fail
+
+
+def scaled(speeds, scale):
+    """The tuned speeds at a fraction of full speed, kept inside the firmware's range."""
+    return [round(max(3.0, min(SPEED_MAX, v * scale)), 1) for v in speeds]
+
+
+def observed(seq, speeds, limits=None, **arm):
+    """What the simulator says these speeds ask of the arm: the fastest the tool tip moves while a key is carried, and when arriving
+    at a grab or release. These are the numbers a failed real run is blamed on."""
+    r = rollout(seq, speeds, limits, check=False, **arm)
+    hold = [max(s["tip_start"], s["tip_end"]) for s in r["segments"] if s["holding"] and s["moves"]]
+    land = [s["tip_end"] for s in r["segments"] if s["lands"] and s["moves"]]
+    return {"time": r["time"], "hold_mm_s": round(max(hold), 1) if hold else 0.0, "land_mm_s": round(max(land), 1) if land else 0.0}
+
+
+def calibrate(limits, outcome, seen):
+    """New limits after a real run, and a sentence about what changed. `seen` is observed() of the speeds that were run."""
+    lim, note = dict(clean_limits(limits)), "The limits are unchanged."
+    if outcome not in OUTCOMES:
+        raise ValueError("outcome must be one of " + ", ".join(OUTCOMES))
+    if outcome == "dropped" and seen["hold_mm_s"] > 0:
+        lim["slip_mm_s"] = round(max(SLIP_FLOOR, min(lim["slip_mm_s"], CAL_SHRINK * seen["hold_mm_s"])), 1)
+        note = "The key slipped with the tip at up to %g mm/s while carrying it, so the slip limit is now %g mm/s." % (seen["hold_mm_s"], lim["slip_mm_s"])
+    elif outcome == "missed" and seen["land_mm_s"] > 0:
+        lim["knock_mm_s"] = round(max(KNOCK_FLOOR, min(lim["knock_mm_s"], CAL_SHRINK * seen["land_mm_s"])), 1)
+        note = "A grab or release went wrong arriving at up to %g mm/s, so the knock limit is now %g mm/s." % (seen["land_mm_s"], lim["knock_mm_s"])
+    elif outcome == "rough":
+        lim["margin"] = round(max(MARGIN_FLOOR, lim["margin"] * CAL_SHRINK), 3)
+        note = "The motion was too rough, so the safety margin is now %g." % lim["margin"]
+    return lim, note
+
+
+class Calibration:
+    """Per sequence: the limits learned from real runs and the log of those runs (tuning/<name>.json, local to this PC)."""
+
+    def __init__(self, folder):
+        self.folder = folder
+
+    def _path(self, name):
+        if not SEQ.NAME_RE.match(name or ""):
+            raise ValueError("name: letters, digits, - and _ only")
+        return os.path.join(self.folder, name + ".json")
+
+    def load(self, name):
+        try:
+            with open(self._path(name), encoding="utf-8") as f:
+                d = json.load(f)
+            return {"limits": clean_limits(d.get("limits")), "trials": list(d.get("trials") or [])[-50:]}
+        except (OSError, ValueError):
+            return {"limits": dict(DEFAULT_LIMITS), "trials": []}
+
+    def save(self, name, data):
+        os.makedirs(self.folder, exist_ok=True)
+        with open(self._path(name), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    def allowed_scale(self, name, speeds):
+        """The highest fraction of `speeds` a trial may use now: the first rung, or the rung above the highest one that went ok for
+        exactly these speeds. A change of speeds (a new tuning) starts the ladder again."""
+        key = [round(v, 1) for v in speeds]
+        done = [t["scale"] for t in self.load(name)["trials"] if t.get("outcome") == "ok" and t.get("tuned") == key]
+        top = max(done) if done else 0.0
+        return next((r for r in LADDER if r > top + 1e-9), LADDER[-1])
+
+    def record(self, name, tuned, scale, outcome, seen):
+        data = self.load(name)
+        before = data["limits"]
+        data["limits"], note = calibrate(before, outcome, seen)
+        data["trials"].append({"t": round(time.time()), "tuned": [round(v, 1) for v in tuned], "scale": scale, "outcome": outcome, "seen": seen,
+                               "limits_before": before, "limits_after": data["limits"]})
+        self.save(name, data)
+        return data, note

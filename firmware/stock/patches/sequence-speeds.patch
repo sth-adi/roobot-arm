@@ -1,0 +1,108 @@
+diff --git a/src/WifiFunctions.h b/src/WifiFunctions.h
+index 7112175..6af6d35 100644
+--- a/src/WifiFunctions.h
++++ b/src/WifiFunctions.h
+@@ -291,9 +291,10 @@ void SendArmStatus(const String& armStatus)
+ // ---- sequences (added): the server holds one sequence at a time; "seqId" in the controller packet says there is a new one ----
+ constexpr int MaxSequencePoses = 20;
+ 
+-// GET /sequence -> {"id":N,"poses":[[x,y,z,angle,action],...]}, action 0 none, 1 grab (magnet on), 2 release (magnet off).
++// GET /sequence -> {"id":N,"poses":[[x,y,z,angle,action,speed],...]}, action 0 none, 1 grab (magnet on), 2 release (magnet off);
++// speed (optional, deg/s) is the joint speed limit for the move into that pose, 0 or missing = the normal limit.
+ // Returns the number of poses (0 = an empty sequence, which means "stop"), or -1 if the request or the body failed.
+-int FetchSequence(int& id, RobotPosition* poses, int* actions, int maxPoses)
++int FetchSequence(int& id, RobotPosition* poses, int* actions, float* speeds, int maxPoses)
+ {
+     if (WiFi.status() != WL_CONNECTED) {
+         return -1;
+@@ -349,8 +350,18 @@ int FetchSequence(int& id, RobotPosition* poses, int* actions, int maxPoses)
+                 ++p;
+             }
+         }
++        float speed = 0.0f;                 // the sixth number is optional: an older server sends five
++        if (*p && *p != ']') {
++            char* speedEnd = nullptr;
++            const float parsed = strtof(p, &speedEnd);
++            if (speedEnd != p) {
++                speed = parsed;
++                p = speedEnd;
++            }
++        }
+         poses[count] = {v[0], v[1], v[2], v[3]};
+         actions[count] = static_cast<int>(v[4]);
++        speeds[count] = speed > 0.0f ? speed : 0.0f;
+         ++count;
+     }
+     return count;
+diff --git a/src/main.cpp b/src/main.cpp
+index 9b0a6e1..a9a8727 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -21,6 +21,8 @@ int savedPositionCount = 0;
+ 
+ // ---- electromagnet and sequence runs (added) ----
+ int savedActions[MaxSavedPositions];   // per saved position: 0 nothing, 1 grab (magnet on), 2 release (magnet off); only used by sequence runs
++float savedSpeeds[MaxSavedPositions];  // per saved position: joint speed limit (deg/s) for the move into it, 0 = the normal limit; only used by sequence runs
++float SequencePoseSpeed = 0;           // the limit of the sequence move in progress (0 = none): read by the slew, never replaces MaxJointDegPerSecond
+ bool magnetOn = false;
+ 
+ void SetMagnet(bool on)
+@@ -73,7 +75,12 @@ int ServoCommandAngle(int jointIndex, int logicalAngle)
+ // Move commandedAngles toward goal, no joint faster than the limit and all four scaled together. True on arrival.
+ bool SlewCommandedAngles(const RobotAngles& goal, float seconds)
+ {
+-    const float step = radians(MaxJointDegPerSecond) * seconds;
++    // A sequence pose may carry its own limit. It is held to the same cap as the packet's maxSpeed, and the normal limit is left alone.
++    float limit = MaxJointDegPerSecond;
++    if (SequencePoseSpeed > 0.0f) {
++        limit = SequencePoseSpeed > MaxJointDegPerSecondCap ? MaxJointDegPerSecondCap : (SequencePoseSpeed < 1.0f ? 1.0f : SequencePoseSpeed);
++    }
++    const float step = radians(limit) * seconds;
+     const float d[4] = {goal.s1 - commandedAngles.s1, goal.s2 - commandedAngles.s2,
+                         goal.s3 - commandedAngles.s3, goal.s4 - commandedAngles.s4};
+     float biggest = 0.0f;
+@@ -368,7 +375,8 @@ void loop()
+         int baselineId = 0;
+         RobotPosition ignoredPoses[MaxSavedPositions];
+         int ignoredActions[MaxSavedPositions];
+-        if (FetchSequence(baselineId, ignoredPoses, ignoredActions, MaxSavedPositions) >= 0) {
++        float ignoredSpeeds[MaxSavedPositions];
++        if (FetchSequence(baselineId, ignoredPoses, ignoredActions, ignoredSpeeds, MaxSavedPositions) >= 0) {
+             lastSeqId = baselineId;
+         }
+     }
+@@ -393,7 +401,8 @@ void loop()
+             int fetchedId = 0;
+             RobotPosition fetched[MaxSavedPositions];
+             int fetchedActions[MaxSavedPositions];
+-            const int fetchedCount = FetchSequence(fetchedId, fetched, fetchedActions, MaxSavedPositions);
++            float fetchedSpeeds[MaxSavedPositions];
++            const int fetchedCount = FetchSequence(fetchedId, fetched, fetchedActions, fetchedSpeeds, MaxSavedPositions);
+             if (fetchedCount == 0) {
+                 sequenceRun = false;
+                 stateDue = true;
+@@ -402,6 +411,7 @@ void loop()
+                 for (int i = 0; i < fetchedCount; ++i) {
+                     savedPositions[i] = fetched[i];
+                     savedActions[i] = fetchedActions[i];
++                    savedSpeeds[i] = fetchedSpeeds[i];
+                 }
+                 savedPositionCount = fetchedCount;       // the saved list is replaced: this is the "wipe and load"
+                 replayingPositions = false;
+@@ -516,6 +526,7 @@ void loop()
+     }
+ 
+     // Speed limit: walk the servo angles toward the target (or home) no faster than MaxJointDegPerSecond.
++    SequencePoseSpeed = (sequenceRun && seqWaiting && !movingHome && seqIndex < savedPositionCount) ? savedSpeeds[seqIndex] : 0.0f;   // 0 whenever no sequence move is under way
+     const unsigned long slewNow = millis();
+     const float slewSeconds = lastSlewTime == 0 ? 0.0f : min(slewNow - lastSlewTime, 100UL) / 1000.0f;
+     lastSlewTime = slewNow;
+@@ -578,7 +589,7 @@ void loop()
+             + ",\"mode\":\"" + (sequenceRun ? "sequence" : replayingPositions ? "replay" : movingHome ? "home" : "idle")
+             + "\",\"step\":" + String(seqIndex) + ",\"saved\":" + String(savedPositionCount)
+             + ",\"seqId\":" + String(runningSeqId) + ",\"seqDone\":" + String(doneSeqId)
+-            + ",\"atHome\":" + (atHome ? "1" : "0") + "}"
++            + ",\"atHome\":" + (atHome ? "1" : "0") + ",\"poseSpeeds\":1}"
+         );
+     }
+ 

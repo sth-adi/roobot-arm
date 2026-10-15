@@ -53,6 +53,7 @@ import sim.tuner as TUNER  # noqa: E402
 import agent as AGENT  # noqa: E402
 import preflight as PRE  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
+CALIB = TUNER.Calibration(str(ROOT / "tuning"))        # limits learned from real-arm trials, per sequence (local to this PC)
 
 IS_WIN = sys.platform == "win32"
 NOWIN = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
@@ -574,7 +575,7 @@ class Hub:
         "sam": {"label": "Sam's firmware", "kind": "stock", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
                 "desc": "The UWE-RArm firmware exactly as shipped (firmware/stock/src, untouched). Polls the end server itself."},
         "ours": {"label": "Our firmware", "kind": "ours", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
-                 "desc": "Sam's firmware plus our two patches: damper and failsafes, sequences and magnet."},
+                 "desc": "Sam's firmware plus our three patches: damper and failsafes, sequences and magnet, a speed per sequence pose."},
         "usb": {"label": "USB jog sketch", "kind": None, "fqbn": FQBN, "libs": ["ArduinoJson"],
                 "desc": "Our older sketch (arduino/arm_receiver): jog control over USB or WiFi."},
     }
@@ -919,6 +920,7 @@ class Hub:
     last_run = None
     tune = {"state": "idle"}                        # the speed tuner (its own mode, simulation only): idle | running | done | cancelled | failed
     _tune_cancel = False
+    trial = {"state": "idle"}                       # a real-arm trial of tuned speeds: idle | homing | running | verdict | done | failed | aborted
     chat = []                                       # the conversation shown on the Chat page: user / ai / robot / error messages
     _chat_seq = 0
 
@@ -943,6 +945,8 @@ class Hub:
             raise RuntimeError("a task is already running")
         if self.tune.get("state") == "running":
             raise RuntimeError("the speed tuner is running: wait for it or cancel it")
+        if self.trial.get("state") in ("homing", "running"):
+            raise RuntimeError("a speed trial is running on the arm: wait for it or abort it")
         self.task = {"state": "working", "request": request, "log": [], "error": None, "warning": None}
         self.chat_add("user", request)
         threading.Thread(target=self._do_task, args=(request,), daemon=True).start()
@@ -969,6 +973,25 @@ class Hub:
         self._tlog("%s%s" % (e["title"], (". " + e["hint"]) if e.get("hint") else ""), "failed", chat=False)
         self.chat_add("error", e["title"], detail=e.get("detail"), hint=e.get("hint"), code=e.get("code"), state="failed")
 
+    def _ensure_home(self, st, log=None):
+        """Get the arm to home grip (magnet off, at home) before a run. None when it is there, else a structured error."""
+        if st["home_grip"]:
+            return None
+        (log or self._tlog)("Not at home grip: going home first")
+        if st.get("source") == "esp32":
+            if st["magnet"]:
+                self._esp_tap("X")                  # magnet off first
+            self._esp_tap("B")                      # then go home
+        else:
+            with self.sim_lock:
+                self.sim.stop_replay()
+                self.cell.set_magnet(False)
+                self.sim.go_home()
+        if not self._wait(lambda: self.state_packet()["at_home"] and not self.state_packet()["magnet"], 30):
+            return PRE.err("HOME_FAILED", "The arm could not get to its home position", "It did not reach home grip within 30 s.",
+                           "Check the arm is powered and armed, then try again.")
+        return None
+
     def _do_task(self, request):
         try:
             st = self.state_packet()
@@ -990,20 +1013,9 @@ class Hub:
             problems = PRE.check(request, plan, seq, st)
             if problems:
                 return self._fail(problems[0])
-            if not st["home_grip"]:
-                self._tlog("Not at home grip: going home first")
-                if st.get("source") == "esp32":
-                    if st["magnet"]:
-                        self._esp_tap("X")                  # magnet off first
-                    self._esp_tap("B")                      # then go home
-                else:
-                    with self.sim_lock:
-                        self.sim.stop_replay()
-                        self.cell.set_magnet(False)
-                        self.sim.go_home()
-                if not self._wait(lambda: self.state_packet()["at_home"] and not self.state_packet()["magnet"], 30):
-                    return self._fail(PRE.err("HOME_FAILED", "The arm could not get to its home position", "It did not reach home grip within 30 s.",
-                                              "Check the arm is powered and armed, then try again."))
+            bad = self._ensure_home(st)
+            if bad:
+                return self._fail(bad)
             self._tlog("At home grip: running", "running")
             self.load_sequence(seq, False, True)
             if not self._wait(lambda: self._run_once is None, 120):
@@ -1028,6 +1040,8 @@ class Hub:
                 raise RuntimeError("a tuning run is already going")
             if self.task.get("state") in ("working", "running"):
                 raise RuntimeError("the arm is busy with a task: let it finish first")
+            if self.trial.get("state") in ("homing", "running"):
+                raise RuntimeError("a speed trial is running on the arm")
             seq = LIBRARY.get(name)
             lim = TUNER.clean_limits(d.get("limits"))
             gens = max(5, min(150, int(d.get("generations") or 40)))
@@ -1037,6 +1051,12 @@ class Hub:
             threading.Thread(target=self._do_tune, args=(seq, start, lim, gens), daemon=True).start()
         elif a == "cancel":
             self._tune_cancel = True
+        elif a == "trial":
+            self._trial_start(name, float(d.get("scale") or 0))
+        elif a == "verdict":
+            self._trial_verdict(str(d.get("outcome") or ""))
+        elif a == "abort":
+            self._trial_abort()
         elif a in ("apply", "clear"):
             if self.tune.get("state") == "running":
                 raise RuntimeError("the tuner is running")
@@ -1056,8 +1076,122 @@ class Hub:
             raise ValueError("unknown action")
         return self.tune_status()
 
-    def tune_status(self):
-        return dict(self.tune)
+    def tune_status(self, name=None):
+        d = dict(self.tune)
+        d["trial"] = dict(self.trial)
+        n = name or self.tune.get("name") or self.trial.get("name")
+        esp = self.esp_state()
+        d["board"] = {"esp": bool(esp), "pose_speeds": bool(esp and esp.get("poseSpeeds")), "armed": bool(self.armed or self.emu.running)}
+        if n:
+            try:
+                c = CALIB.load(n)
+                d["calib"] = {"name": n, "limits": c["limits"], "trials": c["trials"][-8:]}
+                tuned = self._tuned_speeds(n, LIBRARY.get(n))
+                if tuned:
+                    d["ladder"] = {"name": n, "allowed": CALIB.allowed_scale(n, tuned), "rungs": list(TUNER.LADDER)}
+            except (ValueError, KeyError):
+                pass
+        return d
+
+    def _arm_args(self):
+        return {"tool": self.sim.tool, "arm_limits": [list(p) for p in self.sim.limits], "homes": list(self.sim.homes)}
+
+    def _tuned_speeds(self, name, seq):
+        """The speeds a trial would use: the latest clean tuning result for this sequence, else the speeds saved in its file."""
+        res = self.tune.get("result") if self.tune.get("name") == name else None
+        if res and not res["tuned"]["failures"]:
+            return list(res["speeds"])
+        saved = SEQ.speeds_of(seq)
+        return [s or (self.sim.rate or 30.0) for s in saved] if any(saved) else None
+
+    # ---- real-arm trials: the tuned speeds run on the arm, a fraction of them at first, and what the person sees corrects the limits ----
+    def _trial_log(self, msg):
+        self.trial.setdefault("log", []).append(msg)
+        self.log("hub", "trial: " + msg)
+
+    def _trial_start(self, name, scale):
+        if self.trial.get("state") in ("homing", "running"):
+            raise RuntimeError("a trial is already running")
+        if self.tune.get("state") == "running":
+            raise RuntimeError("the tuner is running")
+        if self.task.get("state") in ("working", "running"):
+            raise RuntimeError("the arm is busy with a task: let it finish first")
+        seq = LIBRARY.get(name)
+        tuned = self._tuned_speeds(name, seq)
+        if not tuned:
+            raise ValueError("tune %s first: there are no speeds to try yet" % name)
+        esp = self.esp_state()
+        if not esp:
+            raise ValueError("no ESP32 is reporting: a trial runs on the arm itself (plug it in, flash Our firmware, arm the output)")
+        if not esp.get("poseSpeeds"):
+            raise ValueError("the firmware on the board does not read a speed per pose: flash Our firmware from the Firmware page first")
+        if not (self.armed or self.emu.running):
+            raise ValueError("the output is SAFE: arm it first, because a trial moves the real arm")
+        allowed = CALIB.allowed_scale(name, tuned)
+        if not (0.3 <= scale <= allowed + 1e-9):
+            raise ValueError("that rung is not open: the highest you can run now is %d%% (the rungs are %s, and each opens once the one below went ok)"
+                             % (round(allowed * 100), ", ".join("%d%%" % round(r * 100) for r in TUNER.LADDER)))
+        speeds = TUNER.scaled(tuned, scale)
+        lim = CALIB.load(name)["limits"]
+        self.trial = {"state": "homing", "name": name, "scale": scale, "tuned": [round(v, 1) for v in tuned], "speeds": speeds, "log": [],
+                      "predicted": TUNER.observed(seq, speeds, lim, **self._arm_args()), "started": time.time()}
+        self._trial_log("%d%% of the tuned speeds: %s deg/s" % (round(scale * 100), speeds))
+        threading.Thread(target=self._do_trial, args=(SEQ.with_speeds(seq, speeds),), daemon=True).start()
+
+    def _do_trial(self, seq):
+        tr = self.trial
+        try:
+            bad = self._ensure_home(self.state_packet(), self._trial_log)
+            if bad:
+                tr.update(state="failed", error=bad["title"] + ". " + (bad.get("hint") or ""))
+                return
+            if tr.get("state") == "aborted":
+                return
+            tr["state"] = "running"
+            self._trial_log("At home grip: running")
+            self.load_sequence(seq, False, True)
+            if not self._wait(lambda: self._run_once is None or tr.get("state") == "aborted", 120):
+                tr.update(state="failed", error="The sequence did not finish within 120 s. Press B to send the arm home.")
+                return
+            if tr.get("state") == "aborted":
+                return
+            time.sleep(1.0)
+            tr["state"] = "verdict"
+            self._trial_log("Finished: watch the arm and say how it went")
+        except Exception as e:                           # a trial must never kill the hub
+            tr.update(state="failed", error=str(e)[:300])
+            self._trial_log("failed: %s" % e)
+
+    def _trial_abort(self):
+        if self.trial.get("state") not in ("homing", "running"):
+            return
+        self.trial["state"] = "aborted"
+        try:
+            self._http("/sequence", {"poses": []}, timeout=2.0)       # an empty sequence stops a run on the ESP
+        except Exception:
+            pass
+        self._run_once = None
+        self._trial_log("aborted: the run was stopped (the SAFE button or Escape also cuts the output)")
+
+    def _trial_verdict(self, outcome):
+        tr = self.trial
+        if tr.get("state") != "verdict":
+            raise ValueError("there is no finished trial waiting for a verdict")
+        if outcome not in TUNER.OUTCOMES:
+            raise ValueError("outcome must be one of " + ", ".join(TUNER.OUTCOMES))
+        name = tr["name"]
+        seq = LIBRARY.get(name)
+        lim = CALIB.load(name)["limits"]
+        seen = TUNER.observed(seq, tr["speeds"], lim, **self._arm_args())
+        data, note = CALIB.record(name, tr["tuned"], tr["scale"], outcome, seen)
+        nxt = CALIB.allowed_scale(name, tr["tuned"])
+        if outcome == "ok":
+            note = ("These speeds are proven at full strength on the arm: save them into the sequence." if tr["scale"] >= TUNER.LADDER[-1] - 1e-9
+                    else "Good. The %d%% rung is open now." % round(nxt * 100))
+        else:
+            note += " Tune again to get speeds that respect it."
+        tr.update(state="done", outcome=outcome, note=note, seen=seen, limits=data["limits"])
+        self._trial_log("verdict %s: %s" % (outcome, note))
 
     def _do_tune(self, seq, start, lim, gens):
         def progress(g, of, best):
@@ -1269,7 +1403,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             return self._json(200, HUB.state_packet())
         if path == "/api/tune":
-            return self._json(200, HUB.tune_status())
+            q = urllib.parse.parse_qs(self.path.partition("?")[2])
+            try:
+                return self._json(200, HUB.tune_status((q.get("name") or [None])[0]))
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
         if path == "/api/chat":
             q = urllib.parse.parse_qs(self.path.partition("?")[2])
             try:

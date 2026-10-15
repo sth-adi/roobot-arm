@@ -880,7 +880,7 @@ function mountTune(root) {
   root.innerHTML = `
   <div class="cols"><div>
     <section class="sec" style="border-top:0;padding-top:0"><h2>Speed tuner</h2>
-      <p class="lead">Learns a speed (deg/s) for every move of a sequence by running it again and again in a private copy of the virtual arm, keeping what scores better. Slow where a key is carried or a grab or release is coming, fast everywhere else. Simulation only: it never moves the real arm.</p>
+      <p class="lead">Learns a speed (deg/s) for every move of a sequence by running it again and again in a private copy of the virtual arm, keeping what scores better. Slow where a key is carried or a grab or release is coming, fast everywhere else. The tuning itself only ever runs in simulation; the section below it is what tries the result on the real arm.</p>
       <div class="inline" style="flex-wrap:wrap;gap:8px">
         <label class="muted">Sequence <select id="t-seq" aria-label="Sequence"></select></label>
         <label class="muted">Search length <input id="t-gen" type="number" min="5" max="150" value="40" style="width:70px" aria-label="Generations"></label>
@@ -900,9 +900,22 @@ function mountTune(root) {
     <section class="sec" id="t-res" hidden><h2>Result</h2><div id="t-sum" class="lead"></div><div id="t-chart"></div><div class="rows" id="t-rows"></div>
       <div class="inline" style="margin-top:10px;gap:8px"><button class="btn" id="t-apply" type="button">Save speeds into the sequence</button><button class="btn" id="t-clear" type="button">Remove saved speeds</button></div>
       <p class="note" id="t-note"></p></section>
+    <section class="sec" id="t-trial" hidden><h2>Try it on the real arm</h2>
+      <p class="lead">The simulator has no inertia and its limits are estimates, so the tuned speeds are checked on the arm itself, a fraction of them first. Each rung only opens once the one below went well. What you see afterwards corrects the limits, and the next tuning respects them. <b>This moves the arm: keep clear. The SAFE button and Escape cut the output.</b></p>
+      <div id="t-ready" class="rows"></div>
+      <div class="inline" id="t-rungs" style="flex-wrap:wrap;gap:8px;margin-top:10px"></div>
+      <div id="t-tstate" class="note" style="margin-top:8px"></div>
+      <div class="inline" id="t-verdict" style="flex-wrap:wrap;gap:8px;margin-top:8px" hidden>
+        <span class="muted">How did it go?</span>
+        <button class="btn" data-v="ok" type="button">It went fine</button><button class="btn" data-v="dropped" type="button">The key dropped</button>
+        <button class="btn" data-v="missed" type="button">A grab or release went wrong</button><button class="btn" data-v="rough" type="button">Too rough</button>
+      </div>
+      <button class="btn danger" id="t-abort" type="button" hidden style="margin-top:8px">Abort the run</button>
+      <div id="t-learned" class="note" style="margin-top:10px"></div>
+    </section>
   </div></div>`;
   const $r = (q) => root.querySelector(q);
-  let dead = false, seqs = [], shown = null;
+  let dead = false, seqs = [], shown = null, limitsTouched = false, lastLimitsFor = "";
   const num = (id) => Number($r(id).value);
   const post = (body) => api("/api/tune", body);
   const limits = () => ({ slip_mm_s: num("#t-slip"), knock_mm_s: num("#t-knock"), margin: num("#t-margin") });
@@ -927,7 +940,7 @@ function mountTune(root) {
         <span style="display:flex;gap:8px;align-items:center"><span style="display:inline-block;height:8px;width:${Math.round(res.speeds[i] / mx * 160)}px;background:${s.moves ? "var(--accent)" : "var(--line-strong)"}"></span><span class="mono">${res.speeds[i]}</span><span class="muted">${note}</span></span>
         <span class="mono muted">${s.tip_start} / ${s.tip_end}</span></div>`;
     }).join("");
-    $r("#t-note").textContent = u.failures ? "This result still fails in the simulation, so it cannot be saved." : "Saving writes a speed on each pose of the sequence file. The virtual arm then uses it every time the sequence runs, including from Chat. The real arm's firmware does not read it yet.";
+    $r("#t-note").textContent = u.failures ? "This result still fails in the simulation, so it cannot be saved." : "Saving writes a speed on each pose of the sequence file. The virtual arm then uses it every time the sequence runs, including from Chat, and so does the arm when it runs Our firmware (Sam's firmware has no speed per pose).";
     $r("#t-apply").disabled = !!u.failures || t.state === "running";
   };
   const loadSeq = async (name) => {
@@ -936,7 +949,7 @@ function mountTune(root) {
   const poll = async () => {
     if (dead || !document.body.contains($r("#t-go"))) return;
     try {
-      const t = await (await fetch("/api/tune")).json(), busy = t.state === "running";
+      const sel = $r("#t-seq").value, t = await (await fetch("/api/tune" + (sel ? "?name=" + encodeURIComponent(sel) : ""))).json(), busy = t.state === "running";
       const st = $r("#t-st");
       st.className = "st " + (busy ? "run" : t.state === "done" ? "ok" : t.state === "failed" ? "bad" : "idle");
       st.textContent = t.state;
@@ -946,10 +959,46 @@ function mountTune(root) {
       if (t.name && t.result && (shown == null || shown.name !== t.name)) await loadSeq(t.name);
       if (t.name && Array.from($r("#t-seq").options).some((o) => o.value === t.name) && !busy && !$r("#t-seq").dataset.touched) $r("#t-seq").value = t.name;
       showResult(t, shown && t.name === shown.name ? shown : null);
+      fillLimits(t.calib); showTrial(t, !!t.ladder);
     } catch (e) { /* hub not reachable */ }
     setTimeout(poll, 700);
   };
-  $r("#t-seq").addEventListener("change", () => { $r("#t-seq").dataset.touched = "1"; });
+  $r("#t-seq").addEventListener("change", () => { $r("#t-seq").dataset.touched = "1"; limitsTouched = false; lastLimitsFor = ""; });
+  ["#t-slip", "#t-knock", "#t-margin"].forEach((id) => $r(id).addEventListener("input", () => { limitsTouched = true; }));
+  const fillLimits = (c) => {
+    if (!c || limitsTouched || lastLimitsFor === c.name + JSON.stringify(c.limits)) return;
+    lastLimitsFor = c.name + JSON.stringify(c.limits);
+    $r("#t-slip").value = c.limits.slip_mm_s; $r("#t-knock").value = c.limits.knock_mm_s; $r("#t-margin").value = c.limits.margin;
+  };
+  const showTrial = (t, haveSpeeds) => {
+    const sec = $r("#t-trial"), tr = t.trial || {}, b = t.board || {}, busy = tr.state === "homing" || tr.state === "running";
+    sec.hidden = !(haveSpeeds || tr.name);
+    if (sec.hidden) return;
+    const tick = (ok, yes, no) => `<div style="padding:3px 0"><span class="st ${ok ? "ok" : "bad"}">${ok ? yes : no}</span></div>`;
+    $r("#t-ready").innerHTML = tick(b.esp, "An ESP32 is reporting", "No ESP32 is reporting (plug it in, or start the emulated one on the Arm and board page)")
+      + tick(b.pose_speeds, "Its firmware reads a speed per pose", "Its firmware does not read a speed per pose: flash Our firmware on the Firmware page")
+      + tick(b.armed, "The output is armed", "The output is SAFE: arm it (top right) when you are ready for the arm to move");
+    const ready = b.esp && b.pose_speeds && b.armed && !busy && t.state !== "running", lad = t.ladder || { allowed: 0.5, rungs: [0.5, 0.75, 1] };
+    $r("#t-rungs").innerHTML = lad.rungs.map((r) => `<button class="btn" data-scale="${r}" type="button" ${ready && r <= lad.allowed + 1e-9 ? "" : "disabled"}>Run at ${Math.round(r * 100)}%${r <= lad.allowed + 1e-9 ? "" : " (locked)"}</button>`).join("");
+    const names = { homing: "Getting the arm to home grip", running: "Running on the arm", verdict: "Finished: how did it go?", done: "Done", failed: "Did not run", aborted: "Aborted" };
+    $r("#t-tstate").innerHTML = tr.state && tr.state !== "idle" ? `<b>${names[tr.state] || tr.state}</b>${tr.scale ? ` at ${Math.round(tr.scale * 100)}%` : ""}${tr.error ? ` <span style="color:var(--bad)">${esc(tr.error)}</span>` : ""}`
+      + `${tr.predicted ? `<div class="muted">The simulator expects about ${tr.predicted.time} s, tool tip up to ${tr.predicted.hold_mm_s} mm/s while carrying the key and ${tr.predicted.land_mm_s} mm/s arriving at a grab or release.</div>` : ""}`
+      + `${tr.note ? `<div>${esc(tr.note)}</div>` : ""}<div class="mono muted" style="font-size:12px">${(tr.log || []).map(esc).join("<br>")}</div>` : "";
+    $r("#t-verdict").hidden = tr.state !== "verdict"; $r("#t-abort").hidden = !busy;
+    const c = t.calib;
+    $r("#t-learned").innerHTML = c ? `Limits learned from the arm for ${esc(c.name)}: key slips above <b>${c.limits.slip_mm_s}</b> mm/s, grab or release knocked above <b>${c.limits.knock_mm_s}</b> mm/s, margin <b>${c.limits.margin}</b>. ${(c.trials || []).length} real run(s) so far${(c.trials || []).length ? ": " + c.trials.map((x) => `${Math.round(x.scale * 100)}% ${x.outcome}`).join(", ") : ""}.` : "";
+  };
+  $r("#t-rungs").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-scale]"); if (!b || b.disabled) return;
+    const r = await post({ action: "trial", name: $r("#t-seq").value, scale: Number(b.dataset.scale) });
+    if (r.error) toast(r.error, "bad");
+  });
+  $r("#t-verdict").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-v]"); if (!b) return;
+    const r = await post({ action: "verdict", outcome: b.dataset.v });
+    if (r.error) toast(r.error, "bad");
+  });
+  $r("#t-abort").addEventListener("click", () => post({ action: "abort" }));
   $r("#t-go").addEventListener("click", async () => {
     const r = await post({ action: "start", name: $r("#t-seq").value, generations: num("#t-gen"), from_current: $r("#t-cur").checked, limits: limits() });
     if (r.error) toast(r.error, "bad");
@@ -1432,7 +1481,7 @@ const PAGES = [
   { id: "board", group: "Hardware", title: "Arm and board", sub: "The ESP32 over USB: log, settings and outputs", icon: "cpu", mount: mountBoard },
   { id: "firmware", group: "", title: "Firmware", sub: "Compile and upload the ESP32 sketch", icon: "upload-simple", mount: mountFirmware },
   { id: "services", group: "System", title: "Services", sub: "Start and stop what the system runs on", icon: "plugs-connected", mount: mountServices },
-  { id: "tune", group: "Plan", title: "Tune", sub: "Learn a speed for every move of a sequence (simulation only)", icon: "gauge", mount: mountTune },
+  { id: "tune", group: "Plan", title: "Tune", sub: "Learn a speed for every move of a sequence, then try it on the arm", icon: "gauge", mount: mountTune },
   { id: "ai", group: "", title: "AI and jobs", sub: "Where instruction packets and the AI assistant will plug in", icon: "brain", mount: mountAI },
   { id: "project", group: "", title: "Project", sub: "Repository, commits and how to run the hub", icon: "git-branch", mount: mountProject },
 ];

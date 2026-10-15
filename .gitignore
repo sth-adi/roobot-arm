@@ -10,8 +10,9 @@ __pycache__/
 # Arduino secrets
 secrets.h
 
-# hub key for the phone link
+# hub key for the phone link, and the self-made HTTPS certificate with its private key
 .hub_token
+.hub_cert/
 phone_link.txt
 sequences/
 

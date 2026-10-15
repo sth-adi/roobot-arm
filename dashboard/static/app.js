@@ -1049,7 +1049,7 @@ function mountChat(root) {
   };
   mic.addEventListener("click", async () => {
     if (rec) return rec.finish();
-    if (!navigator.mediaDevices || !window.isSecureContext) return toast("The microphone only works at http://localhost:8765 on this PC; browsers block it on other addresses without HTTPS.", "bad");
+    if (!navigator.mediaDevices || !window.isSecureContext) return toast("Browsers only allow the microphone on https or localhost. On the phone, open the HTTPS link from the Services page (or the launcher window), and accept the certificate warning once.", "bad");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
       const ctx = new (window.AudioContext || window.webkitAudioContext)(), src = ctx.createMediaStreamSource(stream), proc = ctx.createScriptProcessor(4096, 1, 1), chunks = [];
@@ -1627,7 +1627,9 @@ function mountArm(root) {
         <div class="note" id="m-net-s"></div><div class="note" id="m-err" style="color:var(--bad)"></div></div>
       <div class="sidesec"><h2>Input</h2><div class="note mono" id="s-in"></div></div>
       <div class="sidesec" id="s-phone" hidden><h2>On your phone</h2><div class="note">Same WiFi. Open this once, then Add to Home Screen.</div>
-        <div class="inline"><input id="s-url" readonly aria-label="Phone link" style="flex:1;min-width:0"><button class="btn sm" id="s-copy" type="button">Copy</button></div></div>
+        <div class="inline"><input id="s-url" readonly aria-label="Phone link" style="flex:1;min-width:0"><button class="btn sm" id="s-copy" type="button">Copy</button></div>
+        <div id="s-https" hidden><div class="note">With the microphone (HTTPS). The phone warns about the certificate once: continue.</div>
+        <div class="inline"><input id="s-urls" readonly aria-label="Phone link with the microphone" style="flex:1;min-width:0"><button class="btn sm" id="s-copys" type="button">Copy</button></div></div></div>
       <a class="note" href="#/control">More: calibration, damper, network details</a>
     </aside></div>`;
   const $r = (q) => root.querySelector(q);
@@ -1692,6 +1694,7 @@ function mountArm(root) {
     const r = await api("/api/sequence", { load: pkt }); toast(r.ok ? `Loaded ${r.loaded} positions` : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad"); });
   $r("#w-reset").addEventListener("click", () => api("/api/world", { reset: true }));
   $r("#s-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($r("#s-url").value); toast("Link copied", "ok"); } catch (e) { $r("#s-url").select(); } });
+  $r("#s-copys").addEventListener("click", async () => { try { await navigator.clipboard.writeText($r("#s-urls").value); toast("Link copied", "ok"); } catch (e) { $r("#s-urls").select(); } });
   const emu = async (b) => { const r = await api("/api/emu", b); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); };
   const fw = $r("#m-fw"), net = $r("#m-net"), go = $r("#m-go");
   go.addEventListener("click", () => { const e = S.st && S.st.emu; (e && (e.state === "running" || e.state === "building")) ? emu({ action: "stop" }) : emu({ action: "start", firmware: fw.value, preset: net.value }); });
@@ -1726,6 +1729,8 @@ function mountArm(root) {
       $r("#s-in").textContent = `${f1(st.pps, 0)} packets/s, ${age == null ? "none yet" : "last " + f1(age, 1) + " s ago"}`;
       $r("#s-phone").hidden = !st.phone_url;
       if (st.phone_url && $r("#s-url").value !== st.phone_url) $r("#s-url").value = st.phone_url;
+      $r("#s-https").hidden = !st.phone_url_https;
+      if (st.phone_url_https && $r("#s-urls").value !== st.phone_url_https) $r("#s-urls").value = st.phone_url_https;
     },
     frame(st) { padFrame(root, st); },
     pose(p) {

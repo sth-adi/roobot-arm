@@ -54,6 +54,7 @@ import sim.servo_map as SERVOMAP  # noqa: E402
 import agent as AGENT  # noqa: E402
 import preflight as PRE  # noqa: E402
 import voice as VOICE  # noqa: E402
+import tls as TLS  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
 CALIB = TUNER.Calibration(str(ROOT / "tuning"))        # limits learned from real-arm trials, per sequence (local to this PC)
 
@@ -133,6 +134,7 @@ class Hub:
         self._esp = None                        # (state dict, time) last report of our firmware via the server's /armstate
         self._esp_run = None                    # id of the sequence the ESP is running for us
         self.phone_url = None                   # set by main() with --lan
+        self.phone_url_https = None             # the same over HTTPS (port + 1), which the phone's microphone needs
         self.cell = Workcell()                  # boxes, keys, tray and the electromagnet (sim/workcell.py)
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
         self.packets = collections.deque(maxlen=500)
@@ -1063,6 +1065,7 @@ class Hub:
             "sim": self._sim_snapshot(),
             "emu": self.emu.snapshot(),
             "phone_url": self.phone_url,
+            "phone_url_https": self.phone_url_https,
             "build": BUILD,
             "emu_input": self.emu.running and self.forward_control is True and not self.armed,
         }
@@ -1984,6 +1987,7 @@ def main():
     ap.add_argument("--no-open", action="store_true", help="do not open the browser")
     ap.add_argument("--lan", action="store_true",
                     help="also serve other devices on the network (a phone), which need the key printed in the link; see launch.py")
+    ap.add_argument("--no-https", action="store_true", help="with --lan, do not also serve HTTPS on port+1 (the phone's microphone needs it)")
     ap.add_argument("--send-speed", action="store_true",
                     help="also send the damper to the arm as maxSpeed (needs the modified firmware in firmware/rarm)")
     args = ap.parse_args()
@@ -2010,11 +2014,26 @@ def main():
         raise SystemExit(f"Cannot listen on {bind}:{args.port} ({e}). Is the hub already running?")
     httpd.daemon_threads = True
     HTTPD = httpd
+    httpsd = None
+    if args.lan and not args.no_https:
+        try:
+            cert_p, key_p = TLS.ensure_cert(ROOT / ".hub_cert", TLS.local_ips([lan_ip()]))
+            httpsd = TLS.TlsServer((bind, args.port + 1), Handler, cert_p, key_p)
+            HUB.phone_url_https = f"https://{lan_ip()}:{args.port + 1}/?key={LAN_TOKEN}"
+            https_print = "certificate fingerprint (SHA-256): " + TLS.fingerprint(cert_p)
+        except Exception as e:                      # cryptography missing, port busy: the plain link still works, only the phone's microphone does not
+            httpsd = None
+            https_print = "HTTPS for the phone is off (%s: %s)" % (type(e).__name__, str(e)[:100])
     HUB.start()
+    if httpsd:
+        threading.Thread(target=httpsd.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{args.port}"
     print(f"Robot arm hub on {url}  (output starts SAFE; Ctrl+C to stop)")
     if HUB.phone_url:
         print(f"On your phone (same WiFi): {HUB.phone_url}", flush=True)
+        if HUB.phone_url_https:
+            print(f"On your phone, HTTPS (needed for the microphone; accept the certificate warning once): {HUB.phone_url_https}", flush=True)
+        print(https_print, flush=True)
     if not args.no_open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
@@ -2024,6 +2043,9 @@ def main():
     finally:
         HUB.shutdown()
         httpd.server_close()
+        if httpsd:
+            httpsd.shutdown()
+            httpsd.server_close()
 
 
 if __name__ == "__main__":

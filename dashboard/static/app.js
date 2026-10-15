@@ -876,6 +876,103 @@ function mountChat(root) {
   return { destroy() { dead = true; } };
 }
 
+function mountTune(root) {
+  root.innerHTML = `
+  <div class="cols"><div>
+    <section class="sec" style="border-top:0;padding-top:0"><h2>Speed tuner</h2>
+      <p class="lead">Learns a speed (deg/s) for every move of a sequence by running it again and again in a private copy of the virtual arm, keeping what scores better. Slow where a key is carried or a grab or release is coming, fast everywhere else. Simulation only: it never moves the real arm.</p>
+      <div class="inline" style="flex-wrap:wrap;gap:8px">
+        <label class="muted">Sequence <select id="t-seq" aria-label="Sequence"></select></label>
+        <label class="muted">Search length <input id="t-gen" type="number" min="5" max="150" value="40" style="width:70px" aria-label="Generations"></label>
+        <label class="muted"><input id="t-cur" type="checkbox"> start from its saved speeds</label>
+        <button class="btn" id="t-go" type="button">Tune</button><button class="btn" id="t-stop" type="button" hidden>Cancel</button>
+        <span id="t-st" class="st idle">idle</span>
+      </div>
+      <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">Limits the tuner must respect (estimates: adjust them after watching the real arm)</summary>
+        <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:6px">
+          <label class="muted">Key slips above (tip mm/s) <input id="t-slip" type="number" value="220" style="width:80px"></label>
+          <label class="muted">Grab or release knocked above (mm/s) <input id="t-knock" type="number" value="110" style="width:80px"></label>
+          <label class="muted">Safety margin <input id="t-margin" type="number" step="0.05" min="0.3" max="1" value="0.85" style="width:70px"></label>
+        </div>
+      </details>
+      <div id="t-prog" class="note" style="margin-top:8px"></div>
+    </section>
+    <section class="sec" id="t-res" hidden><h2>Result</h2><div id="t-sum" class="lead"></div><div id="t-chart"></div><div class="rows" id="t-rows"></div>
+      <div class="inline" style="margin-top:10px;gap:8px"><button class="btn" id="t-apply" type="button">Save speeds into the sequence</button><button class="btn" id="t-clear" type="button">Remove saved speeds</button></div>
+      <p class="note" id="t-note"></p></section>
+  </div></div>`;
+  const $r = (q) => root.querySelector(q);
+  let dead = false, seqs = [], shown = null;
+  const num = (id) => Number($r(id).value);
+  const post = (body) => api("/api/tune", body);
+  const limits = () => ({ slip_mm_s: num("#t-slip"), knock_mm_s: num("#t-knock"), margin: num("#t-margin") });
+  const spark = (h) => {
+    if (!h || h.length < 2) return "";
+    const w = 360, ht = 70, mx = Math.max(...h), mn = Math.min(...h), r = mx - mn || 1;
+    const pts = h.map((v, i) => `${(i / (h.length - 1) * w).toFixed(1)},${(ht - 6 - (v - mn) / r * (ht - 12)).toFixed(1)}`).join(" ");
+    return `<svg viewBox="0 0 ${w} ${ht}" width="100%" style="max-width:${w}px" role="img" aria-label="Cost per generation, falling from ${mx} to ${mn}"><polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2"/></svg><div class="muted" style="font-size:12px">Best cost per generation: ${mx} s to ${mn} s</div>`;
+  };
+  const showResult = (t, seq) => {
+    const res = t.result, sec = $r("#t-res");
+    if (!res || !seq) { sec.hidden = true; return; }
+    sec.hidden = false;
+    const b = res.baseline, u = res.tuned, gain = b.time ? Math.round((1 - u.time / b.time) * 100) : 0;
+    $r("#t-sum").innerHTML = `<b>${b.time} s</b> at ${b.speeds.every((v) => v === b.speeds[0]) ? b.speeds[0] + " deg/s everywhere" : "its saved speeds"} <b>→ ${u.time} s</b> tuned (${gain >= 0 ? gain + "% faster" : -gain + "% slower"}), ${u.failures ? `<span style="color:var(--bad)">${u.failures} failure(s)</span>` : "no failures"}. ${res.evals} simulated runs in ${res.seconds} s.`;
+    $r("#t-chart").innerHTML = spark(res.history);
+    const mx = Math.max(...res.speeds, 1), grid = "display:grid;grid-template-columns:34px 80px 1fr 150px;gap:8px;padding:4px 0";
+    $r("#t-rows").innerHTML = `<div class="muted mono" style="${grid}"><span>#</span><span>action</span><span>tuned speed (deg/s)</span><span>tip start / end mm/s</span></div>` + res.tuned.segments.map((s, i) => {
+      const p = (seq.poses || [])[i] || {};
+      const note = !s.moves ? "no move" : s.holding ? "carrying key" : "";
+      return `<div style="${grid};border-top:1px solid var(--line);align-items:center"><span class="mono">${i + 1}</span><span>${esc(p.action || "")}</span>
+        <span style="display:flex;gap:8px;align-items:center"><span style="display:inline-block;height:8px;width:${Math.round(res.speeds[i] / mx * 160)}px;background:${s.moves ? "var(--accent)" : "var(--line-strong)"}"></span><span class="mono">${res.speeds[i]}</span><span class="muted">${note}</span></span>
+        <span class="mono muted">${s.tip_start} / ${s.tip_end}</span></div>`;
+    }).join("");
+    $r("#t-note").textContent = u.failures ? "This result still fails in the simulation, so it cannot be saved." : "Saving writes a speed on each pose of the sequence file. The virtual arm then uses it every time the sequence runs, including from Chat. The real arm's firmware does not read it yet.";
+    $r("#t-apply").disabled = !!u.failures || t.state === "running";
+  };
+  const loadSeq = async (name) => {
+    try { shown = await (await fetch("/api/sequences/" + encodeURIComponent(name))).json(); } catch (e) { shown = null; }
+  };
+  const poll = async () => {
+    if (dead || !document.body.contains($r("#t-go"))) return;
+    try {
+      const t = await (await fetch("/api/tune")).json(), busy = t.state === "running";
+      const st = $r("#t-st");
+      st.className = "st " + (busy ? "run" : t.state === "done" ? "ok" : t.state === "failed" ? "bad" : "idle");
+      st.textContent = t.state;
+      $r("#t-go").disabled = busy || !seqs.length; $r("#t-stop").hidden = !busy; $r("#t-seq").disabled = busy;
+      $r("#t-prog").innerHTML = busy ? `Generation ${t.gen} of ${t.of}${t.best != null ? `, best cost so far ${t.best} s` : ""}<div style="height:6px;background:var(--line);margin-top:4px"><div style="height:6px;background:var(--accent);width:${Math.round(t.gen / Math.max(1, t.of) * 100)}%"></div></div>`
+        : t.state === "failed" ? `<span style="color:var(--bad)">${esc(t.error || "failed")}</span>` : "";
+      if (t.name && t.result && (shown == null || shown.name !== t.name)) await loadSeq(t.name);
+      if (t.name && Array.from($r("#t-seq").options).some((o) => o.value === t.name) && !busy && !$r("#t-seq").dataset.touched) $r("#t-seq").value = t.name;
+      showResult(t, shown && t.name === shown.name ? shown : null);
+    } catch (e) { /* hub not reachable */ }
+    setTimeout(poll, 700);
+  };
+  $r("#t-seq").addEventListener("change", () => { $r("#t-seq").dataset.touched = "1"; });
+  $r("#t-go").addEventListener("click", async () => {
+    const r = await post({ action: "start", name: $r("#t-seq").value, generations: num("#t-gen"), from_current: $r("#t-cur").checked, limits: limits() });
+    if (r.error) toast(r.error, "bad");
+  });
+  $r("#t-stop").addEventListener("click", () => post({ action: "cancel" }));
+  $r("#t-apply").addEventListener("click", async () => {
+    const t = await (await fetch("/api/tune")).json(), r = await post({ action: "apply", name: t.name });
+    if (r.error) return toast(r.error, "bad");
+    toast("Speeds saved into " + t.name, "ok"); await loadSeq(t.name);
+  });
+  $r("#t-clear").addEventListener("click", async () => {
+    const name = $r("#t-seq").value, r = await post({ action: "clear", name });
+    if (r.error) return toast(r.error, "bad");
+    toast("Speeds removed from " + name, "ok"); await loadSeq(name);
+  });
+  (async () => {
+    try { seqs = (await (await fetch("/api/sequences")).json()).sequences || []; } catch (e) { seqs = []; }
+    $r("#t-seq").innerHTML = seqs.length ? seqs.map((s) => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join("") : '<option value="">(no sequences yet: record one on the Robot page)</option>';
+    poll();
+  })();
+  return { destroy() { dead = true; } };
+}
+
 function mountProject(root) {
   root.innerHTML = `<div id="p-body"><div class="skel" style="height:90px"></div></div>`;
   return {
@@ -1335,7 +1432,8 @@ const PAGES = [
   { id: "board", group: "Hardware", title: "Arm and board", sub: "The ESP32 over USB: log, settings and outputs", icon: "cpu", mount: mountBoard },
   { id: "firmware", group: "", title: "Firmware", sub: "Compile and upload the ESP32 sketch", icon: "upload-simple", mount: mountFirmware },
   { id: "services", group: "System", title: "Services", sub: "Start and stop what the system runs on", icon: "plugs-connected", mount: mountServices },
-  { id: "ai", group: "Plan", title: "AI and jobs", sub: "Where instruction packets and the AI assistant will plug in", icon: "brain", mount: mountAI },
+  { id: "tune", group: "Plan", title: "Tune", sub: "Learn a speed for every move of a sequence (simulation only)", icon: "gauge", mount: mountTune },
+  { id: "ai", group: "", title: "AI and jobs", sub: "Where instruction packets and the AI assistant will plug in", icon: "brain", mount: mountAI },
   { id: "project", group: "", title: "Project", sub: "Repository, commits and how to run the hub", icon: "git-branch", mount: mountProject },
 ];
 let cur = null, curId = null;

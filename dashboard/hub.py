@@ -49,6 +49,7 @@ from emu_runner import EmuRunner  # noqa: E402
 from stamp import code_stamp  # noqa: E402
 from sim.workcell import Workcell  # noqa: E402
 import sim.sequences as SEQ  # noqa: E402
+import sim.tuner as TUNER  # noqa: E402
 import agent as AGENT  # noqa: E402
 import preflight as PRE  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
@@ -916,6 +917,8 @@ class Hub:
 
     task = {"state": "idle"}
     last_run = None
+    tune = {"state": "idle"}                        # the speed tuner (its own mode, simulation only): idle | running | done | cancelled | failed
+    _tune_cancel = False
     chat = []                                       # the conversation shown on the Chat page: user / ai / robot / error messages
     _chat_seq = 0
 
@@ -938,6 +941,8 @@ class Hub:
             raise ValueError("say what you want done")
         if self.task.get("state") in ("working", "running"):
             raise RuntimeError("a task is already running")
+        if self.tune.get("state") == "running":
+            raise RuntimeError("the speed tuner is running: wait for it or cancel it")
         self.task = {"state": "working", "request": request, "log": [], "error": None, "warning": None}
         self.chat_add("user", request)
         threading.Thread(target=self._do_task, args=(request,), daemon=True).start()
@@ -1014,6 +1019,59 @@ class Hub:
         except Exception as e:                       # a task must never kill the hub
             self._fail(PRE.err("INTERNAL", "Something went wrong inside the hub", str(e)[:200], "Check the hub console."))
 
+    # ---- speed tuner: runs the sequence headless in a private virtual arm, so it never moves the live arm or the one on screen ----
+    def tune_action(self, d):
+        a = d.get("action")
+        name = str(d.get("name") or "")
+        if a == "start":
+            if self.tune.get("state") == "running":
+                raise RuntimeError("a tuning run is already going")
+            if self.task.get("state") in ("working", "running"):
+                raise RuntimeError("the arm is busy with a task: let it finish first")
+            seq = LIBRARY.get(name)
+            lim = TUNER.clean_limits(d.get("limits"))
+            gens = max(5, min(150, int(d.get("generations") or 40)))
+            start = [s or (self.sim.rate or 30.0) for s in SEQ.speeds_of(seq)] if d.get("from_current") else None
+            self._tune_cancel = False
+            self.tune = {"state": "running", "name": name, "gen": 0, "of": gens * 3, "best": None, "limits": lim, "started": time.time()}
+            threading.Thread(target=self._do_tune, args=(seq, start, lim, gens), daemon=True).start()
+        elif a == "cancel":
+            self._tune_cancel = True
+        elif a in ("apply", "clear"):
+            if self.tune.get("state") == "running":
+                raise RuntimeError("the tuner is running")
+            seq = LIBRARY.get(name)
+            if a == "apply":
+                res = self.tune.get("result")
+                if self.tune.get("name") != name or not res:
+                    raise ValueError("there is no tuning result for %s: run the tuner first" % name)
+                if res["tuned"]["failures"]:
+                    raise ValueError("this result still has failures in the simulation, so it will not be saved")
+                LIBRARY.save(SEQ.with_speeds(seq, res["speeds"]))
+                self.log("hub", "tuned speeds saved into sequence %s: %s deg/s" % (name, res["speeds"]))
+            else:
+                LIBRARY.save(SEQ.with_speeds(seq, None))
+                self.log("hub", "per-pose speeds cleared from sequence %s" % name)
+        else:
+            raise ValueError("unknown action")
+        return self.tune_status()
+
+    def tune_status(self):
+        return dict(self.tune)
+
+    def _do_tune(self, seq, start, lim, gens):
+        def progress(g, of, best):
+            self.tune.update(gen=g, of=of, best=round(best, 2))
+        try:
+            res = TUNER.tune(seq, start, lim, generations=gens, progress=progress, cancel=lambda: self._tune_cancel,
+                             tool=self.sim.tool, arm_limits=[list(p) for p in self.sim.limits], homes=list(self.sim.homes))
+            self.tune.update(state="cancelled" if self._tune_cancel else "done", result=res)
+            self.log("hub", "tuner %s on %s: %.1f s -> %.1f s, %d failures, %d runs" % (self.tune["state"], self.tune["name"], res["baseline"]["time"],
+                                                                                    res["tuned"]["time"], res["tuned"]["failures"], res["evals"]))
+        except Exception as e:                           # a tuning run must never kill the hub
+            self.tune.update(state="failed", error=str(e)[:300])
+            self.log("hub", "tuner failed: %s" % e)
+
     def current_sequence(self, name="", description="", requires=None, ends=None):
         """The virtual arm's saved positions (with the magnet state of each) as a sequence packet."""
         with self.sim_lock:
@@ -1035,6 +1093,7 @@ class Hub:
         with self.sim_lock:
             self.sim.stop_replay()
             self.sim.saved[:] = saved
+            self.sim.saved_speed[:] = SEQ.speeds_of(seq)    # per-pose speeds from the tuner (None = the damper setting)
             self.cell.saved_magnet = mag
             self.cell.reset_keys_on_lap = not run         # a one-off run starts from the world as it is: a reversed task needs the key where it was left
             self.cell.last_applied = None
@@ -1209,6 +1268,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, HUB.current_sequence())
         if path == "/api/state":
             return self._json(200, HUB.state_packet())
+        if path == "/api/tune":
+            return self._json(200, HUB.tune_status())
         if path == "/api/chat":
             q = urllib.parse.parse_qs(self.path.partition("?")[2])
             try:
@@ -1356,6 +1417,15 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     return self._json(400, {"error": str(e)})
                 return self._json(200, {"ok": True, "path": str(pth), "packet": pkt})
+            if path == "/api/tune":             # the speed tuner: start | cancel | apply | clear
+                try:
+                    return self._json(200, HUB.tune_action(d))
+                except KeyError:
+                    return self._json(404, {"error": "no such sequence"})
+                except ValueError as e:
+                    return self._json(400, {"error": str(e)})
+                except RuntimeError as e:
+                    return self._json(409, {"error": str(e)})
             if path == "/api/ask":              # plain-language task: home grip first, then the best-matching sequence
                 try:
                     HUB.ask(d.get("request", ""))

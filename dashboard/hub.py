@@ -1114,7 +1114,7 @@ class Hub:
                     "holding": held is not None, "home_grip": at_home and not esp.get("magnet") and held is None,
                     "mode": "running" if esp.get("mode") == "sequence" else esp.get("mode"), "saved": esp.get("saved"),
                     "running_step": esp.get("step") if esp.get("mode") == "sequence" else None, "keys": keys,
-                    "last_run": self.last_run, "task": dict(self.task),
+                    "last_run": self.last_run, "last_move": self.last_move, "task": dict(self.task),
                     "ai": "groq" if AGENT.api_key() else "keywords", "armed": self.armed, "poses": [list(p) for p in self.sim.saved]}
         with self.sim_lock:
             x, y, z, th = self.sim.pose()
@@ -1125,11 +1125,12 @@ class Hub:
                     "pose": {"x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "angle": round(th, 1)},
                     "at_home": at_home, "magnet": self.cell.magnet, "holding": held is not None, "home_grip": at_home and not self.cell.magnet and held is None,
                     "mode": "running" if self.sim.replaying else self.sim.mode, "saved": len(self.sim.saved), "running_step": self.sim.replay_idx if self.sim.replaying else None,
-                    "keys": {str(k["id"]): self.cell.where(k) for k in self.cell.keys}, "last_run": self.last_run, "task": dict(self.task),
+                    "keys": {str(k["id"]): self.cell.where(k) for k in self.cell.keys}, "last_run": self.last_run, "last_move": self.last_move, "task": dict(self.task),
                     "ai": "groq" if AGENT.api_key() else "keywords", "armed": self.armed, "poses": [list(p) for p in self.sim.saved]}
 
     task = {"state": "idle"}
     last_run = None
+    last_move = None                                # {"dx","dy","dz"} of the nudge done most recently, while it is still the last thing done (so "move it back" can reverse it)
     tune = {"state": "idle"}                        # the speed tuner (its own mode, simulation only): idle | running | done | cancelled | failed
     _tune_cancel = False
     points = None                                   # three points of the user's choosing to move between (see points_action)
@@ -1201,6 +1202,7 @@ class Hub:
         if echo:
             self.chat_add("user", request)
         self._run_once = None
+        self.last_move = None
         try:
             if self.esp_state():
                 self._http("/sequence", {"poses": []}, timeout=2.0)         # an empty list stops a run on the ESP32
@@ -1238,6 +1240,7 @@ class Hub:
         if act == "move_by":
             return self._do_move(plan, st, tid)
         if act == "go_home":
+            self.last_move = None
             if st["at_home"]:
                 return self._tlog("Already at home", "done")
             self._tlog("Going home", "running")
@@ -1281,6 +1284,7 @@ class Hub:
             return self._fail(PRE.err("RUN_TIMEOUT", "The move did not finish", "It was still running after 60 s.", "Say stop, then go home."))
         if self._tid != tid:
             return
+        self.last_move = {"dx": d[0], "dy": d[1], "dz": d[2]}
         self._tlog("Moved", "done")
 
     def _ensure_home(self, st, log=None):
@@ -1298,12 +1302,13 @@ class Hub:
         try:
             st = self.state_packet()
             library = LIBRARY.list()
-            self.chat_add("system", "Asking the AI: %d sequences in the library, arm state %s" % (len(library), json.dumps({k: st.get(k) for k in ("at_home", "holding", "last_run")})))
+            self.chat_add("system", "Asking the AI: %d sequences in the library, arm state %s" % (len(library), json.dumps({k: st.get(k) for k in ("at_home", "holding", "last_run", "last_move")})))
             plan = AGENT.choose(request, library, st)
             if plan.get("ai_error"):
                 self.task["warning"] = "Groq was not used: " + plan["ai_error"]
                 self._tlog("Groq was not used: " + plan["ai_error"])
             self.chat_add("ai", plan.get("reason") or "", by=plan.get("by"), model=plan.get("model"), action=plan.get("action"), sequence=plan.get("sequence"), reverse=plan.get("reverse"),
+                          on=plan.get("on"), dx=plan.get("dx"), dy=plan.get("dy"), dz=plan.get("dz"),
                           raw=plan.get("raw"), ms=plan.get("ms"), tokens=plan.get("tokens"))
             act = plan.get("action") or "run_sequence"
             if act != "run_sequence":
@@ -1336,6 +1341,7 @@ class Hub:
             if bad:
                 return self._fail(bad)
             self.last_run = {"name": plan["sequence"], "reverse": plan["reverse"]}
+            self.last_move = None
             fin = self.state_packet()
             self._tlog("Done", "done", chat=False)
             self.chat_add("robot", "Done", state="done", result={"at_home": fin.get("at_home"), "holding": fin.get("holding"), "magnet": fin.get("magnet"), "keys": fin.get("keys")})

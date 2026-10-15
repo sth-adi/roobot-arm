@@ -25,6 +25,14 @@ class AgentTest(unittest.TestCase):
         c = agent.keyword_choice("put it back", LIB, {"name": "box2_to_tray", "reverse": True})
         self.assertFalse(c["reverse"])
 
+    def test_undo_a_nudge(self):
+        state = {"last_move": {"dx": 0.0, "dy": 30.0, "dz": 0.0}, "last_run": {"name": "box2_to_tray", "reverse": False}}
+        with mock.patch.object(agent, "api_key", return_value="k"), mock.patch.object(agent, "groq_choice", side_effect=AssertionError("model not needed")):
+            c = agent.choose("move it back", LIB, state)
+        self.assertEqual((c["action"], c["dy"], c["by"]), ("move_by", -30.0, "keywords"))
+        self.assertEqual(agent.keyword_choice("undo", LIB, state["last_run"], state["last_move"])["action"], "move_by")
+        self.assertEqual(agent.keyword_choice("undo", LIB, state["last_run"], None)["reverse"], True)   # no nudge: undo the sequence as before
+
     def test_nothing_matches(self):
         self.assertIsNone(agent.keyword_choice("paint the wall", LIB)["sequence"])
 

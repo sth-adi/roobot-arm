@@ -43,6 +43,23 @@ def parse_move(request):
     return {"dx": d[0], "dy": d[1], "dz": d[2]} if found else None
 
 
+UNDO_WORDS = {"undo", "back", "reverse", "revert", "restore", "opposite", "return"}
+
+
+def undo_move(request, last_move):
+    """'move it back' / 'undo' right after a nudge -> the opposite nudge, else None. Only when the last thing done was a nudge,
+    and never for a request about keys, boxes or the tray, or one that names a distance (that is a new move) or home."""
+    if not last_move or has_topic(request) or parse_move(request):
+        return None
+    w = set(re.findall(r"[a-z]+", request.lower()))
+    if not w & UNDO_WORDS or w & {"home", "default", "rest", "magnet"}:
+        return None
+    try:
+        return {"action": "move_by", "reason": "undoing the last nudge", **{k: -float(last_move[k]) for k in ("dx", "dy", "dz")}}
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
 def check_move(delta, pose, reachable):
     """Errors that stop a nudge before the arm moves, else None. reachable(x, y, z, angle) -> bool is the inverse-kinematics check."""
     try:
@@ -69,7 +86,7 @@ def is_stop(request):
     return bool(STOP_RE.search(request))
 
 
-def keyword_action(request):
+def keyword_action(request, last_move=None):
     """A plan for the quick commands (stop, home, magnet, status) found by words alone, or None. Used without Groq and as a double check."""
     w = set(re.findall(r"[a-z]+", request.lower()))
     if is_stop(request):
@@ -80,6 +97,9 @@ def keyword_action(request):
     mv = parse_move(request)
     if mv:
         return dict({"action": "move_by", "reason": "explicit distance"}, **mv)
+    undo = undo_move(request, last_move)
+    if undo:
+        return undo
     if w & {"home", "default", "rest"} and not w & _TOPIC_WORDS:
         return {"action": "go_home", "reason": "home words"}
     if (w & {"status", "where", "holding", "state"} or request.strip().endswith("?")) and not w & {"put", "move", "take", "bring", "fetch", "give", "return"}:

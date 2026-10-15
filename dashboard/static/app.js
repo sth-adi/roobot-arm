@@ -983,7 +983,14 @@ function mountChat(root) {
     const t = new Date(m.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     let who = { user: "You", ai: "AI", robot: "Arm", error: "Error", system: "Hub" }[m.role] || m.role, body = "";
     if (m.role === "ai") {
-      const pick = m.sequence ? `Running <b class="mono">${esc(m.sequence)}</b>${m.reverse ? " <b>reversed</b>" : ""}` : "No sequence fits that request";
+      const sg = (n) => (n >= 0 ? "+" : "") + Math.round(n);
+      const pick = m.sequence ? `Running <b class="mono">${esc(m.sequence)}</b>${m.reverse ? " <b>reversed</b>" : ""}`
+        : m.action === "go_home" ? "Go home"
+        : m.action === "stop" ? "Stop"
+        : m.action === "status" ? "Status (no motion)"
+        : m.action === "magnet" ? `Magnet <b>${m.on === false ? "off" : m.on ? "on" : "?"}</b>`
+        : m.action === "move_by" ? `Nudge: dx ${sg(+m.dx || 0)}, dy ${sg(+m.dy || 0)}, dz ${sg(+m.dz || 0)} mm`
+        : "No sequence fits that request";
       body = `<div>${pick}</div>${m.text ? `<div class="muted">${esc(m.text)}</div>` : ""}<div class="meta">${kv({ by: m.by, model: m.model, ms: m.ms, tokens: m.tokens })}</div>`
         + (m.raw ? `<details><summary>Raw AI reply</summary><pre class="mono">${esc(m.raw)}</pre></details>` : "");
     } else if (m.role === "error") {

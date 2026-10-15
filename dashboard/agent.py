@@ -6,6 +6,7 @@ library before anything runs. With no GROQ_API_KEY (environment or .env) or no n
 import json
 import os
 import re
+import time
 import urllib.request
 from pathlib import Path
 
@@ -68,10 +69,13 @@ def groq_choice(request, library, state, key, timeout=15, model=None):
                        "messages": [{"role": "system", "content": system}, {"role": "user", "content": request[:500]}]}).encode()
     req = urllib.request.Request(GROQ_URL, body, {"Content-Type": "application/json", "Authorization": "Bearer " + key,
                                                  "User-Agent": "roobot-arm/1.0", "Accept": "application/json"})   # Groq sits behind Cloudflare, which rejects the default Python-urllib agent
+    t0 = time.time()
     with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.loads(r.read())
-    ans = json.loads(out["choices"][0]["message"]["content"])
-    return {"sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "key": ans.get("key"), "reason": str(ans.get("reason", ""))[:200], "by": "groq", "model": model or GROQ_MODEL}
+    raw = out["choices"][0]["message"]["content"]
+    ans = json.loads(raw)
+    return {"sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "key": ans.get("key"), "reason": str(ans.get("reason", ""))[:200], "by": "groq",
+            "model": model or GROQ_MODEL, "raw": raw[:1000], "ms": int((time.time() - t0) * 1000), "tokens": (out.get("usage") or {}).get("total_tokens")}   # raw/ms/tokens are shown in the chat page
 
 
 def _why(e):

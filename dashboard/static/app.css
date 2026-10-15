@@ -329,3 +329,24 @@ body.fill #main { max-width: none; padding: 0; }
 #nav a:hover { background: var(--surface-2); }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
 ::-webkit-scrollbar { width: 10px; height: 10px; } ::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; border: 2px solid var(--bg); } ::-webkit-scrollbar-track { background: transparent; }
+
+/* Chat page */
+.chat { display: flex; flex-direction: column; height: calc(100vh - 150px); min-height: 360px; max-width: 880px; margin: 0 auto; padding: 0 16px; }
+.chat-bar { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; padding: 8px 0; font-size: 13px; }
+.chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 8px 0; }
+.msg { max-width: 82%; padding: 8px 12px; border: 1px solid var(--line); background: var(--surface); font-size: 14px; overflow-wrap: anywhere; }
+.msg .who { display: flex; gap: 10px; font-size: 12px; font-weight: 600; margin-bottom: 3px; }
+.msg.user { align-self: flex-end; background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.msg.user .who .muted { color: inherit; opacity: .7; }
+.msg.robot { border-left: 3px solid var(--ok); }
+.msg.ai { border-left: 3px solid var(--accent); background: var(--surface-2); }
+.msg.error { border-left: 3px solid var(--bad); }
+.msg.system { align-self: center; max-width: 100%; border-style: dashed; background: transparent; color: var(--muted); font-size: 12px; }
+.msg .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.msg .chip { font-size: 11px; padding: 0 6px; border: 1px solid var(--line-strong); color: var(--muted); }
+.msg .chip b { color: var(--text); font-weight: 600; }
+.msg details { margin-top: 6px; } .msg summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.msg pre { margin: 4px 0 0; padding: 6px 8px; background: var(--bg); border: 1px solid var(--line); font-size: 12px; white-space: pre-wrap; }
+.chat .empty { margin: auto; }
+.chat-in { display: flex; gap: 8px; padding: 10px 0 14px; }
+.chat-in input { flex: 1; min-width: 0; }

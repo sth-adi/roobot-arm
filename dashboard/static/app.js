@@ -653,6 +653,19 @@ function mountBoard(root) {
         <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:10px"><label class="muted">Joint to channel map <input id="m-map" value="3,2,1,0" style="width:90px" aria-label="Joint to channel map"></label><button class="btn sm" id="m-map-set" type="button">Send to board</button></div>
         <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:10px"><label class="muted">Pulse range (us) <input id="m-pulse" value="500,2400" style="width:110px" aria-label="Pulse width at 0 and at 180 degrees"></label><button class="btn sm" id="m-pulse-set" type="button">Send to board</button></div>
         <p class="note">Mirror mode uses Sam's servo mapping: 500 us at 0 degrees to 2400 us at 180 degrees, 90 degrees at 1450 us, because the model's joint angles and the trained limits and homes are in that convention. If your servos need a different span, change it here; the board remembers it.</p>
+        <details class="sidesec" id="m-check" style="margin-top:10px"><summary><b>Check the servo mapping</b> (measure it, do not guess)</summary>
+          <p class="note">Mirror mode turns joint angles into pulses with a straight line (the pulse range above). Whether that line suits your servos can only be measured. With mirror on, the output armed and the arm at home (press B first), use a phone inclinometer or a protractor:</p>
+          <ol class="note" style="padding-left:18px"><li>Pick a joint and press <b>Hold at 45&deg;</b>. When it stops, measure where it really is and type that in. Do the same for <b>135&deg;</b>.</li>
+            <li>Press <b>Work out the pulse range</b>. It says which range makes the arm match the model, and whether Sam's 500 to 2400 us or the earlier guess of 1000 to 2000 us is the closer one.</li>
+            <li>If it differs, press <b>Send to board</b>. Press <b>Release joint</b> when you are done.</li></ol>
+          <p class="note"><b>How to read each joint</b> (the other joints at home). Base: degrees from fully left, so 90 is straight ahead and 135 is 45&deg; to the right. Shoulder: the upper arm's angle above horizontal, pointing forward, so 90 is straight up. Elbow: 90 plus the forearm's slope above horizontal, with the upper arm vertical, so 90 is a level forearm. Wrist: 90 plus the tool's slope above horizontal, with the forearm level, so 90 is a level tool. The joint goes to 45 or 135 servo degrees and can reach the table: keep clear.</p>
+          <div class="inline" style="flex-wrap:wrap;gap:8px"><label class="muted">Joint <select id="m-cj" aria-label="Joint to check"><option value="1">1 base</option><option value="2" selected>2 shoulder</option><option value="3">3 elbow</option><option value="4">4 wrist</option></select></label>
+            <button class="btn sm" id="m-c45" type="button">Hold at 45&deg;</button><button class="btn sm" id="m-c135" type="button">Hold at 135&deg;</button><button class="btn sm" id="m-crel" type="button">Release joint</button><span class="note" id="m-cstate"></span></div>
+          <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:8px"><label class="muted">Measured at 45&deg; <input id="m-m45" type="number" step="0.5" style="width:78px"></label>
+            <label class="muted">Measured at 135&deg; <input id="m-m135" type="number" step="0.5" style="width:78px"></label><button class="btn sm" id="m-cfit" type="button">Work out the pulse range</button></div>
+          <div class="note" id="m-fit" style="margin-top:8px"></div>
+          <div class="inline" style="margin-top:6px"><button class="btn sm" id="m-fit-send" type="button" hidden>Send to board</button></div>
+        </details>
         <p class="note" id="m-cal" style="color:var(--warn)" hidden>The joint limits are still the defaults (0 to 180 for every joint). Set what each joint can safely do on the Control page before the real arm moves: with the defaults the arm can be told to go to the very end of a servo's travel.</p>
         <p class="note">Channels are the board's outputs in the order of the pin map below (0 = OUT1 GPIO25 ... 3 = OUT4 GPIO32). The default 3,2,1,0 is how the arm is wired for Sam's firmware: joint 1 on GPIO32, 2 on GPIO27, 3 on GPIO26, 4 on GPIO25. The board remembers it.</p></section>
       <section class="sec"><h2>USB link</h2>
@@ -680,6 +693,27 @@ function mountBoard(root) {
     const b = e.target.closest("[data-j]"); if (!b) return;
     const r = await api("/api/mirror", { action: "test", joint: Number(b.dataset.j) });
     if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
+  });
+  let fitted = null;
+  const holdAngle = async (deg) => { const r = await api("/api/mirror", { action: "angle", joint: Number($r("#m-cj").value), deg }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); };
+  $r("#m-c45").addEventListener("click", () => holdAngle(45));
+  $r("#m-c135").addEventListener("click", () => holdAngle(135));
+  $r("#m-crel").addEventListener("click", async () => { await api("/api/mirror", { action: "angle_off" }); });
+  $r("#m-cfit").addEventListener("click", async () => {
+    const a = $r("#m-m45").value, b = $r("#m-m135").value, box = $r("#m-fit");
+    if (a === "" || b === "") { box.textContent = "Type in both measured angles first."; return; }
+    const r = await api("/api/mirror", { action: "fit", cmd_a: 45, meas_a: Number(a), cmd_b: 135, meas_b: Number(b) });
+    fitted = null; $r("#m-fit-send").hidden = true;
+    if (!r.ok) { box.innerHTML = `<span style="color:var(--bad)">${esc(r.error || "The hub is not reachable")}</span>`; return; }
+    const f = r.mirror.fit, used = r.mirror.board_used;
+    fitted = f; $r("#m-fit-send").hidden = false;
+    const verdict = f.closest === "sam" ? "closer to Sam's 500 to 2400 us" : "closer to the earlier guess of 1000 to 2000 us";
+    box.innerHTML = `The board was using <b>${used[0]} to ${used[1]} us</b>. From your two measurements the range that makes the arm match the model is <b>${f.lo} to ${f.hi} us</b> (${f.us_per_deg} us per degree, 90&deg; at ${f.us_at_90} us). That is ${verdict} (${f.distance_sam_us} us from Sam's, ${f.distance_earlier_us} us from the earlier guess). Measure the other joints as well: a single joint can be off by itself.`;
+  });
+  $r("#m-fit-send").addEventListener("click", async () => {
+    if (!fitted) return;
+    const r = await api("/api/mirror", { action: "pulse", lo: fitted.lo, hi: fitted.hi });
+    if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); else { toast("Pulse range sent to the board", "ok"); $r("#m-pulse").value = fitted.lo + "," + fitted.hi; }
   });
   $r("#m-pulse-set").addEventListener("click", async () => {
     const [lo, hi] = $r("#m-pulse").value.split(",").map((v) => Number(v.trim()));
@@ -712,6 +746,8 @@ function mountBoard(root) {
       $r("#m-st").className = "st " + (mi.active ? "run" : mi.on ? "warn" : "idle");
       $r("#m-st").textContent = mi.testing ? "nudging joint " + mi.testing : mi.active ? "the real arm is following" : mi.on ? "on, waiting for ARM and the USB board" : "off";
       root.querySelectorAll("#m-test button").forEach((b) => { b.disabled = !mi.active; });
+      ["#m-c45", "#m-c135"].forEach((id) => { $r(id).disabled = !mi.active; });
+      $r("#m-cstate").textContent = mi.angle ? `holding joint ${mi.angle.joint} at ${mi.angle.deg} servo degrees` : "";
       const lim = st.sim && st.sim.limits;
       $r("#m-cal").hidden = !(mi.on && lim && lim.every((l) => l[0] === 0 && l[1] === 180));
       $r("#b-usb-n").textContent = u.enabled ? "On: opens the port when a board is plugged in." : "Off: the port is free for other tools.";

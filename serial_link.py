@@ -27,6 +27,7 @@ BUTTON_ORDER = ("a", "b", "x", "y", "lb", "rb", "back", "start", "ls", "rs")
 ESP32_USB_IDS = {(0x10C4, 0xEA60), (0x1A86, 0x7523), (0x303A, 0x1001)}  # CP210x, CH340, ESP32-S3
 RESCAN_S = 1.0
 HEARTBEAT_S = 0.1   # resend unchanged state so the ESP32 knows the link is alive
+PULSES_RE = re.compile(r"mirror pulses: 0 deg = ([\d.]+) us, 180 deg = ([\d.]+) us")
 SETTINGS_RE = re.compile(r"settings: max (?:rate|speed at full stick) ([\d.]+) deg/s.*?range ([\d.]+) deg")
 
 
@@ -58,6 +59,7 @@ class SerialLink:
         self.on_line = None              # optional callable(str): every complete line the board prints
         self.board_rate = None           # last damper settings the board reported (deg/s, deg)
         self.board_range = None
+        self.board_pulse = None          # (us at 0 degrees, us at 180 degrees) the board uses in mirror mode, once it has said
         self.phase = "off" if not self.enabled else "waiting"   # off | waiting | open | busy | suspended
         self.status = "serial: off" if not self.enabled else "serial: waiting for COM port"
         self._lock = threading.RLock()
@@ -135,6 +137,9 @@ class SerialLink:
             line = line.strip("\r ")
             if not line:
                 continue
+            mp = PULSES_RE.search(line)
+            if mp:
+                self.board_pulse = (float(mp.group(1)), float(mp.group(2)))
             m = SETTINGS_RE.search(line)
             if m:
                 self.board_rate, self.board_range = float(m.group(1)), float(m.group(2))

@@ -50,6 +50,7 @@ from stamp import code_stamp  # noqa: E402
 from sim.workcell import Workcell  # noqa: E402
 import sim.sequences as SEQ  # noqa: E402
 import sim.tuner as TUNER  # noqa: E402
+import sim.servo_map as SERVOMAP  # noqa: E402
 import agent as AGENT  # noqa: E402
 import preflight as PRE  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
@@ -518,6 +519,9 @@ class Hub:
     def _mirror_degrees(self):
         with self.sim_lock:
             degs = self.sim.servo_degrees()
+        if self._mirror_angle:                      # the servo-mapping check: this joint straight to the commanded servo degrees, the others stay where the model has them
+            joint, deg = self._mirror_angle
+            degs[joint] = deg
         t = self._mirror_test
         if t:
             joint, t0 = t
@@ -530,7 +534,9 @@ class Hub:
 
     def mirror_status(self):
         return {"on": bool(self.mirror["on"]), "active": bool(self.mirror["on"] and self.armed and self.link.connected),
-                "testing": (self._mirror_test[0] + 1) if self._mirror_test else None}
+                "testing": (self._mirror_test[0] + 1) if self._mirror_test else None,
+                "angle": ({"joint": self._mirror_angle[0] + 1, "deg": self._mirror_angle[1]} if self._mirror_angle else None),
+                "pulse": list(self.link.board_pulse) if self.link.board_pulse else None}
 
     def mirror_action(self, d):
         a = d.get("action")
@@ -539,7 +545,7 @@ class Hub:
             self.log("hub", "mirror mode ON: the real arm will follow the virtual arm whenever the output is ARMED")
         elif a == "off":
             self.mirror["on"] = False
-            self._mirror_test = None
+            self._mirror_test = self._mirror_angle = None
             self.link.update(NEUTRAL)               # stick frame: the board stops mirroring and holds where it is
             self.log("hub", "mirror mode off")
         elif a == "test":
@@ -550,6 +556,22 @@ class Hub:
                 raise ValueError("switch mirror mode on, arm the output and have the board on USB first")
             self._mirror_test = (joint - 1, time.time())
             self.log("hub", "mirror test: nudging joint %d by +-8 degrees, watch which part of the arm moves" % joint)
+        elif a == "angle":
+            joint, deg = int(d.get("joint") or 0), float(d.get("deg"))
+            if joint not in (1, 2, 3, 4) or not (30.0 <= deg <= 150.0):
+                raise ValueError("joint 1 to 4, and an angle from 30 to 150 degrees")
+            if not (self.mirror["on"] and self.armed and self.link.connected):
+                raise ValueError("switch mirror mode on, arm the output and have the board on USB first")
+            self._mirror_test = None
+            self._mirror_angle = (joint - 1, deg)
+            self.log("hub", "servo check: joint %d held at %g servo degrees, measure where it really is" % (joint, deg))
+        elif a == "angle_off":
+            self._mirror_angle = None
+            self.log("hub", "servo check: joint released back to the virtual arm")
+        elif a == "fit":
+            board = tuple(self.link.board_pulse) if self.link.board_pulse else SERVOMAP.SAM
+            fit = SERVOMAP.fit_pulse_range(d.get("cmd_a", 45), d.get("meas_a"), d.get("cmd_b", 135), d.get("meas_b"), board)
+            return dict(self.mirror_status(), fit=fit, board_used=list(board))
         elif a == "pulse":
             lo, hi = float(d.get("lo")), float(d.get("hi"))
             if not (400 <= lo and hi <= 2600 and hi - lo >= 600):
@@ -577,6 +599,7 @@ class Hub:
             self.armed = on
             self.armed_since = time.time() if on else None
         if not on:
+            self._mirror_angle = self._mirror_test = None
             self.link.update(NEUTRAL)               # stop any motion immediately over USB
         res = self.set_forward(on)
         self.log("hub", f"output {'ARMED' if on else 'SAFE'}"
@@ -1090,6 +1113,7 @@ class Hub:
     points_loop = False
     mirror = {"on": False}                          # mirror mode: the real arm (USB jog sketch) follows the virtual arm's joint angles; off until switched on
     _mirror_test = None                             # (joint index, start time) while one joint is being wiggled to find out which is which
+    _mirror_angle = None                            # (joint index, servo degrees) while one joint is held at an angle to measure it against the model
     trial = {"state": "idle"}                       # a real-arm trial of tuned speeds: idle | homing | running | verdict | done | failed | aborted
     chat = []                                       # the conversation shown on the Chat page: user / ai / robot / error messages
     _chat_seq = 0

@@ -172,6 +172,8 @@ class ArmSim:
         self.model, self.patch = model, bool(patch) and model == "stock"
         self.tool = float(tool_mm)
         self.rate = float(rate)                       # damper, deg/s per joint; 0 = no limit
+        self.chord_sense = CHORD_SENSE                # stick speed: tool tip mm/s at full stick (the firmware's ChordSense, 20)
+        self.angle_sense = ANGLE_SENSE                # and tool angle deg/s at full stick (AngleSense, 20)
         self.limits, self.homes = _clean_pairs(limits or DEFAULT_LIMITS, homes or DEFAULT_HOMES)
         self.angles = self._home_angles()
         self.mode = "idle"                            # idle | manual | home | replay
@@ -276,6 +278,14 @@ class ArmSim:
         if not (0 <= v <= 1000):
             raise ValueError("speed must be 0-1000 deg/s")
         self.rate = v
+
+    def set_stick_speed(self, mm_s):
+        """How fast a full stick moves the tool tip (mm/s); the tool angle turns at the same number in deg/s. The firmware's value is 20.
+        This is separate from the damper, which only caps joint speed: with the stick speed at 20 the damper never gets a chance to matter."""
+        v = float(mm_s)
+        if not (5.0 <= v <= 200.0):
+            raise ValueError("stick speed must be 5-200 mm/s")
+        self.chord_sense = self.angle_sense = v
 
     def set_tool(self, mm):
         v = float(mm)
@@ -400,8 +410,8 @@ class ArmSim:
         # sticks: Cartesian jog through inverse kinematics, damped
         if self.mode in ("idle", "manual") and (sx or sy or rx or ry):
             x, y, z, th = self.pose()
-            req = (x + sx * CHORD_SENSE * dt, y + sy * CHORD_SENSE * dt,
-                   z + ry * CHORD_SENSE * dt, th + rx * ANGLE_SENSE * dt)
+            req = (x + sx * self.chord_sense * dt, y + sy * self.chord_sense * dt,
+                   z + ry * self.chord_sense * dt, th + rx * self.angle_sense * dt)
             goal = inverse_kin(req, self.angles, self.limits, self.tool)
             self.ik_ok = goal is not None
             self.mode = "manual"
@@ -494,8 +504,8 @@ class ArmSim:
                     rx, ry = _dz(float(a.get("RSX", 0))), _dz(float(a.get("RSY", 0)))
                     e = elapsed / 1000.0
                     x, y, z, th = self._t_pos
-                    req = (x + sx * CHORD_SENSE * e, y + sy * CHORD_SENSE * e, z + ry * CHORD_SENSE * e,
-                           th + rx * ANGLE_SENSE * e)
+                    req = (x + sx * self.chord_sense * e, y + sy * self.chord_sense * e, z + ry * self.chord_sense * e,
+                           th + rx * self.angle_sense * e)
                     self._sticks_active = bool(sx or sy or rx or ry)
                     goal = inverse_kin(req, self._t_ang, self.limits, self.tool)
                     self.ik_ok = goal is not None
@@ -581,7 +591,7 @@ class ArmSim:
             "xyz": [r1(x), r1(y), r1(z)], "tool_angle": r1(th),
             "points": [[r1(c) for c in p] for p in joint_points(self.angles, self.tool)],
             "saved": len(self.saved), "replay_idx": self.replay_idx, "replaying": self.replaying, "latched": self.latched,
-            "rate": self.rate, "tool": self.tool, "model": self.model, "patch": self.patch,
+            "rate": self.rate, "stick_speed": self.chord_sense, "tool": self.tool, "model": self.model, "patch": self.patch,
             "target": [r1(v) for v in self._t_pos[:3]] if self.model == "stock" else None,
             "limits": self.limits, "homes": self.homes,
         }

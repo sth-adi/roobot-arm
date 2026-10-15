@@ -338,6 +338,10 @@ function mountControl(root) {
         <div class="field"><div class="inline"><input type="range" id="c-rate" min="0" max="60" step="1" aria-label="Fastest joint speed in degrees per second"><span class="mono" id="c-rate-v" style="min-width:90px;text-align:right"></span></div>
           <div class="note" id="c-rate-n"></div></div>
       </section>
+      <section class="sec"><h2>Move speed (sequences)</h2>
+        <p class="lead">Sequence poses are reached on a smooth straight line through space, with the speed easing in and out (the linear move from Sam's UWE-RArm repo). This is the peak tool speed along that line, in millimetres per second; 0 goes back to every joint heading straight for the pose. The damper above still caps the joints underneath.</p>
+        <div class="field"><div class="inline"><input type="range" id="c-move" min="0" max="300" step="10" aria-label="Peak tool speed of straight-line moves in millimetres per second"><span class="mono" id="c-move-v" style="min-width:90px;text-align:right"></span></div></div>
+      </section>
       <section class="sec"><h2>Stick speed</h2>
         <p class="lead">How fast a full stick moves the tool tip, in millimetres per second. The firmware's own value is 20, which is slow, and the damper above cannot speed it up: it only limits joint speed. Raise this for a quicker arm; the joint speed limit still applies on top.</p>
         <div class="field"><div class="inline"><input type="range" id="c-stick" min="10" max="150" step="5" aria-label="Tool tip speed at full stick in millimetres per second"><span class="mono" id="c-stick-v" style="min-width:90px;text-align:right"></span></div></div>
@@ -394,6 +398,16 @@ function mountControl(root) {
   stickSl.addEventListener("change", async () => {
     stickT = performance.now();
     const r = await api("/api/sim", { stick_speed: +stickSl.value });
+    if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
+  });
+  // move speed
+  const moveSl = $r("#c-move");
+  let moveT = 0;
+  const moveLabel = (v) => (+v === 0 ? "off (joint moves)" : v + " mm/s");
+  moveSl.addEventListener("input", () => { moveT = performance.now(); $r("#c-move-v").textContent = moveLabel(moveSl.value); });
+  moveSl.addEventListener("change", async () => {
+    moveT = performance.now();
+    const v = +moveSl.value, r = await api("/api/sim", { move_speed: v === 0 ? 0 : Math.max(10, v) });
     if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
   });
   // firmware model
@@ -499,6 +513,7 @@ function mountControl(root) {
         : sm.patch ? "Stock logic plus: speed limit on the servo output, input capped at 100 ms per packet, stick input pauses while the arm lags its target by 25 degrees, Go home waits for arrival and re-syncs the target."
         : `As shipped: no speed limit, the XYZ target is separate from the arm (target ${sm.target ? sm.target.join(", ") : "-"}), Go home gives up after 3 s, and once it ends the arm swings back to the pre-home target.`;
       slider.value = cfg.rate;
+      if (sm && sm.move_speed != null && performance.now() - moveT > 1500) { moveSl.value = sm.move_speed; $r("#c-move-v").textContent = moveLabel(sm.move_speed); }
       if (sm && sm.stick_speed != null && performance.now() - stickT > 1500) { stickSl.value = sm.stick_speed; $r("#c-stick-v").textContent = sm.stick_speed + " mm/s"; }
       $r("#c-rate-v").textContent = cfg.rate > 0 ? `${cfg.rate} deg/s` : "no limit";
       $r("#c-rate-n").textContent = sm && sm.model === "stock" && !sm.patch ? "The stock firmware has no speed limiter: this setting is ignored in this mode." : cfg.rate > 0 ? `A 90 degree joint move takes at least ${Math.round(90 / cfg.rate)} s.` : "No limit: joints are capped at 180 deg/s.";

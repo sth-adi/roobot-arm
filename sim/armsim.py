@@ -95,9 +95,16 @@ def joint_points(a, tool=DEFAULT_TOOL_MM):
     return pts
 
 
+def _lround(x):
+    """C's lroundf: halves go away from zero."""
+    return int(math.floor(x + 0.5)) if x >= 0 else -int(math.floor(-x + 0.5))
+
+
 def _within_limits(a, limits):
     for i in range(4):
-        d = math.degrees(a[i])
+        # Servo commands are whole degrees, so the check is on whole degrees too (UWE-RArm commit 98416af..314e4b4): comparing the raw
+        # float rejected an exactly trained limit, e.g. 115.00001 against a limit of 115.
+        d = _lround(math.degrees(a[i]))
         lo, hi = min(limits[i]), max(limits[i])
         if d < lo or d > hi:
             return False
@@ -165,7 +172,33 @@ def _clean_pairs(limits, homes):
     return [list(p) for p in limits], list(homes)
 
 
+def quintic(p):
+    """Smootherstep, 10p^3 - 15p^4 + 6p^5: zero speed and zero acceleration at both ends (peak slope 1.875)."""
+    return p * p * p * (10.0 + p * (-15.0 + 6.0 * p))
+
+
+class LinearMove:
+    """A straight line in x, y, z and tool angle from `start` to `end`, eased with a quintic, as UWE-RArm's CommandJointAnglesLinear does it.
+    `speed_mm_s` is the PEAK tool speed: the duration is stretched by the easing's peak slope (1.875) so the peak is what was asked for.
+    A move that only turns the tool takes at least 0.5 s and turns at most 30 deg/s at the peak. The firmware blocks while it runs; this
+    is stepped from the arm's own clock instead, so everything else (damper, sticks, failsafes) keeps running."""
+
+    def __init__(self, start, end, speed_mm_s, t0_ms):
+        self.start, self.end, self.t0 = tuple(start), tuple(end), t0_ms
+        dist = math.dist(self.start[:3], self.end[:3])
+        dang = abs(self.end[3] - self.start[3])
+        self.duration_ms = max(500.0, 1.875 * dist * 1000.0 / speed_mm_s, 1.875 * dang * 1000.0 / 30.0)
+
+    def at(self, now_ms):
+        """(pose, finished) at this time."""
+        p = min(1.0, max(0.0, (now_ms - self.t0) / self.duration_ms))
+        e = quintic(p)
+        return tuple(s + (t - s) * e for s, t in zip(self.start, self.end)), p >= 1.0
+
+
 class ArmSim:
+    move_mm_s = 0.0      # peak speed of straight-line moves between sequence poses (mm/s); 0 = the firmware as shipped (every joint straight to the pose)
+
     def __init__(self, tool_mm=DEFAULT_TOOL_MM, rate=30.0, limits=None, homes=None, model="improved", patch=False):
         if model not in ("improved", "stock"):
             raise ValueError("model must be 'improved' or 'stock'")
@@ -206,6 +239,7 @@ class ArmSim:
         self._home_start_ms = 0
         self._home_arrived_ms = None
         self._replaying = False
+        self._lin = None                              # the straight-line move to a sequence pose that is under way, if any
         self._a_press_ms = 0
         self._replay_ms = 0
         self._last_update_ms = None
@@ -437,6 +471,7 @@ class ArmSim:
         return [int(round(math.degrees(v))) for v in self.angles]
 
     def _stock_start_home(self):
+        self._lin = None
         self.attached = True
         self._moving_home = True
         self._home_start_ms = self._ms
@@ -479,18 +514,21 @@ class ArmSim:
                 self._replaying = False
                 self.say("Position replay stopped")
             self._prev["A"] = btn_a
-            step_due = now - self._replay_ms >= 1500
+            step_due = now - self._replay_ms >= 1500 and self._lin is None
             if self._replaying and self.wait_arrival:      # sequence runs: move on once the arm has got there, not on a fixed clock
                 lag_deg = max(abs(math.degrees(self._t_ang[i] - self.angles[i])) for i in range(4))
-                step_due = now - self._replay_ms >= 300 and (lag_deg < 0.6 or now - self._replay_ms >= 12000)
+                step_due = now - self._replay_ms >= 300 and (lag_deg < 0.6 or now - self._replay_ms >= 12000) and self._lin is None
             if self._replaying and step_due and not (self.once and self.replay_idx >= len(self.saved)):
                 target = self.saved[self.replay_idx]
                 goal = inverse_kin(target, self._t_ang, self.limits, self.tool)
                 if goal is not None:
                     self._pick_seg_rate(self.replay_idx)
-                    self._t_pos, self._t_ang = target, goal
-                    if not self.patch:
-                        self._stock_write()
+                    if self.move_mm_s > 0:
+                        self._lin = LinearMove(self._t_pos, target, self.move_mm_s, now)       # a smooth straight line to the pose
+                    else:
+                        self._t_pos, self._t_ang = target, goal
+                        if not self.patch:
+                            self._stock_write()
                 self.replay_idx = self.replay_idx + 1 if self.once else (self.replay_idx + 1) % len(self.saved)
                 self._replay_ms = now
             self._sticks_active = False
@@ -515,6 +553,8 @@ class ArmSim:
                             self._stock_write()
             self._last_update_ms = now
 
+        if self._lin is not None:
+            self._advance_linear(now)
         if self.patch:                            # damper on the servo output; every loop, whether or not a packet came
             goal = self._home_angles() if self._moving_home else self._t_ang
             arrived = self._slew(goal, max(0.0, min(dt, 0.1)))
@@ -539,6 +579,33 @@ class ArmSim:
         self.mode = "home" if self._moving_home else "replay" if self._replaying else \
             "manual" if self._sticks_active else "idle"
 
+    def _advance_linear(self, now):
+        """One tick of the straight-line move: the eased point on the line goes through the inverse kinematics and becomes the new target
+        angles, which the damper then follows. Where the firmware gives up on a line that leaves the workspace, the arm here goes straight
+        to the pose instead, so a sequence never stalls."""
+        mv = self._lin
+        pos, done = mv.at(now)
+        goal = inverse_kin(pos, self._t_ang, self.limits, self.tool)
+        if goal is None:
+            self._lin = None
+            end_goal = inverse_kin(mv.end, self._t_ang, self.limits, self.tool)
+            self.say("Straight line leaves the workspace: going straight to the pose")
+            if end_goal is not None:
+                self._t_pos, self._t_ang = mv.end, end_goal
+        else:
+            self._t_pos, self._t_ang = pos, goal
+            if done:
+                self._lin = None
+        if not self.patch:
+            self._stock_write()
+
+    def set_move_speed(self, mm_s):
+        """Peak tool speed of straight-line moves between sequence poses, mm/s; 0 turns it off (every joint straight to the pose)."""
+        v = float(mm_s)
+        if v != 0.0 and not (10.0 <= v <= 400.0):
+            raise ValueError("move speed must be 0 (off) or 10-400 mm/s")
+        self.move_mm_s = v
+
     wait_arrival = False
     once = False                       # a one-off run: after the last position is sent the arm stays there instead of starting another lap
 
@@ -559,6 +626,7 @@ class ArmSim:
         return True
 
     def stop_replay(self):
+        self._lin = None
         self._seg_rate = None
         self.latched = False
         self.wait_arrival = False
@@ -591,7 +659,7 @@ class ArmSim:
             "xyz": [r1(x), r1(y), r1(z)], "tool_angle": r1(th),
             "points": [[r1(c) for c in p] for p in joint_points(self.angles, self.tool)],
             "saved": len(self.saved), "replay_idx": self.replay_idx, "replaying": self.replaying, "latched": self.latched,
-            "rate": self.rate, "stick_speed": self.chord_sense, "tool": self.tool, "model": self.model, "patch": self.patch,
+            "rate": self.rate, "stick_speed": self.chord_sense, "move_speed": self.move_mm_s, "tool": self.tool, "model": self.model, "patch": self.patch,
             "target": [r1(v) for v in self._t_pos[:3]] if self.model == "stock" else None,
             "limits": self.limits, "homes": self.homes,
         }

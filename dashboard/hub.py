@@ -120,7 +120,8 @@ class Hub:
         self.latest, self.latest_recv, self.latest_count = None, 0.0, 0
         self.latest_wire = None                 # the same packet in the UWE-RArm wire format, what the arm reads
         # virtual ESP32 + arm (sim/armsim.py): always running, so the preview works with no hardware and while SAFE
-        self.sim = ArmSim(model="stock", patch=True)   # our firmware: UWE-RArm stock + firmware/stock/patches (damper, failsafes, tap-to-save)
+        self.sim = ArmSim(model="stock", patch=True)
+        self.sim.move_mm_s = 100.0                      # sequence poses are reached on a smooth straight line (UWE-RArm's linear move, 100 mm/s peak)   # our firmware: UWE-RArm stock + firmware/stock/patches (damper, failsafes, tap-to-save)
         self.sim_lock = threading.Lock()
         self._sim_status_sent = None
         self._cal_synced = False
@@ -1559,6 +1560,8 @@ class Handler(BaseHTTPRequestHandler):
                         HUB.sim.set_rate(d["rate"])
                     if "stick_speed" in d:
                         HUB.sim.set_stick_speed(d["stick_speed"])
+                    if "move_speed" in d:
+                        HUB.sim.set_move_speed(d["move_speed"])
                     if "tool" in d:
                         HUB.sim.set_tool(d["tool"])
                     if "replay" in d:

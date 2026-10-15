@@ -138,6 +138,30 @@ def _elbow_branch(target, theta, branch, limits, tool):
     return out
 
 
+def _elbow_raw(target, theta, branch, tool):
+    """The inverse kinematics of one elbow branch WITHOUT the limit check: (joint angles in radians, None) or (None, why not)."""
+    x, y, z = target
+    wrist_r = math.hypot(x, y) - tool * math.cos(theta)
+    wrist_z = z - tool * math.sin(theta)
+    d = math.hypot(wrist_r, wrist_z - SHOULDER_Z)
+    lo, hi = abs(L_UPPER - L_FORE), L_UPPER + L_FORE
+    if not math.isfinite(d) or d < 1e-4:
+        return None, "the wrist would sit on the shoulder axis"
+    if d > hi or d < lo:
+        return None, "the wrist would be %.0f mm from the shoulder, and the two arm links only allow %.0f to %.0f mm" % (d, lo, hi)
+    mid = 0.5 * (d * d - (L_FORE ** 2 - L_UPPER ** 2)) / d
+    bis = math.sqrt(max(0.0, L_UPPER ** 2 - mid * mid))
+    mid_axis = math.atan2(wrist_z - SHOULDER_Z, wrist_r)
+    s1 = math.atan2(x, y) + HALF_PI
+    s2 = mid_axis + math.atan2(bis * branch, mid)
+    elbow_r = L_UPPER * math.cos(s2)
+    elbow_z = L_UPPER * math.sin(s2) + SHOULDER_Z
+    fore = math.atan2(wrist_z - elbow_z, wrist_r - elbow_r)
+    s3 = fore - s2 + math.pi
+    s4 = -s2 - s3 + theta + 3.0 * HALF_PI
+    return (s1, s2, s3, s4), None
+
+
 def inverse_kin(target, prev, limits, tool=DEFAULT_TOOL_MM):
     """(x, y, z, tool angle deg) -> joint angles in radians, or None if unreachable or outside the limits.
     Tries both elbow configurations and takes the one closer to `prev`, like InverseKinTransform."""
@@ -312,6 +336,39 @@ class ArmSim:
         if not (0 <= v <= 1000):
             raise ValueError("speed must be 0-1000 deg/s")
         self.rate = v
+
+    def ik_report(self, target):
+        """How the inverse kinematics solves a target (x, y, z, tool angle): both elbow solutions with their joint angles, whether each is
+        usable and if not why, which one the arm would take from where it is, and a forward-kinematics check of that one."""
+        x, y, z, a = (float(v) for v in target)
+        theta = math.radians(a)
+        names = {1: "elbow up", -1: "elbow down"}
+        branches = []
+        for br in (1, -1):
+            raw, why = _elbow_raw((x, y, z), theta, br, self.tool)
+            entry = {"branch": br, "name": names[br], "angles": None, "ok": False, "why": why}
+            if raw is not None:
+                degs = [math.degrees(v) for v in raw]
+                entry["angles"] = [round(v, 1) for v in degs]
+                bad = []
+                for i in range(4):
+                    lo, hi = min(self.limits[i]), max(self.limits[i])
+                    if not (lo <= _lround(degs[i]) <= hi):
+                        bad.append("joint %d would be %.0f deg but its limit is %d to %d" % (i + 1, degs[i], lo, hi))
+                entry["ok"] = not bad
+                entry["why"] = "; ".join(bad) or None
+            branches.append(entry)
+        prev = self._t_ang if self.model == "stock" else self.angles
+        goal = inverse_kin((x, y, z, a), prev, self.limits, self.tool)
+        out = {"target": [x, y, z, a], "reachable": goal is not None, "branches": branches, "chosen": None, "fk_error_mm": None}
+        if goal is not None:
+            degs = [round(math.degrees(v), 1) for v in goal]
+            for e in branches:
+                if e["angles"] and all(abs(p - q) < 0.15 for p, q in zip(e["angles"], degs)):
+                    out["chosen"] = e["branch"]
+            fx, fy, fz, _ = forward_kin(goal, self.tool)
+            out["fk_error_mm"] = round(math.dist((fx, fy, fz), (x, y, z)), 4)
+        return out
 
     def set_stick_speed(self, mm_s):
         """How fast a full stick moves the tool tip (mm/s); the tool angle turns at the same number in deg/s. The firmware's value is 20.
@@ -661,6 +718,8 @@ class ArmSim:
             "saved": len(self.saved), "replay_idx": self.replay_idx, "replaying": self.replaying, "latched": self.latched,
             "rate": self.rate, "stick_speed": self.chord_sense, "move_speed": self.move_mm_s, "tool": self.tool, "model": self.model, "patch": self.patch,
             "target": [r1(v) for v in self._t_pos[:3]] if self.model == "stock" else None,
+            "linear": ({"to": [r1(v) for v in self._lin.end], "progress": round(max(0.0, min(1.0, (self._ms - self._lin.t0) / self._lin.duration_ms)), 3)}
+                       if getattr(self, "_lin", None) is not None else None),
             "limits": self.limits, "homes": self.homes,
         }
 

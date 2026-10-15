@@ -92,5 +92,42 @@ class QuickCommandTest(unittest.TestCase):
         self.assertIsNone(P.check_action({"action": "status"}, {}, False))
 
 
+class FreeMovementTest(unittest.TestCase):
+    POSE = {"x": 0.0, "y": 200.0, "z": 100.0, "angle": 0.0}
+
+    def test_parse(self):
+        self.assertEqual(P.parse_move("move up 2 cm"), {"dx": 0.0, "dy": 0.0, "dz": 20.0})
+        self.assertEqual(P.parse_move("go left 5mm and down 1 cm"), {"dx": -5.0, "dy": 0.0, "dz": -10.0})
+        self.assertEqual(P.parse_move("raise 30 millimetres"), {"dx": 0.0, "dy": 0.0, "dz": 30.0})
+
+    def test_needs_a_number_and_unit_and_no_key_words(self):
+        self.assertIsNone(P.parse_move("go back"))
+        self.assertIsNone(P.parse_move("move up a bit"))
+        self.assertIsNone(P.parse_move("move up 2"))                                   # no unit: ambiguous, never guessed
+        self.assertIsNone(P.parse_move("put the key back"))
+        self.assertIsNone(P.parse_move("move the key 2 cm to the left"))               # keys only ever use taught sequences
+        self.assertIsNone(P.parse_move("bring key 2 back from the tray, up 3 cm"))
+
+    def test_checks(self):
+        ok = lambda *a: True
+        self.assertIsNone(P.check_move({"dx": 0, "dy": 0, "dz": 20}, self.POSE, ok))
+        self.assertEqual(P.check_move({"dx": 0, "dy": 0, "dz": 0.2}, self.POSE, ok)["code"], "NOTHING_TO_MOVE")
+        self.assertEqual(P.check_move({"dx": 90, "dy": 90, "dz": 0}, self.POSE, ok)["code"], "MOVE_TOO_FAR")
+        self.assertEqual(P.check_move({"dx": 0, "dy": 0, "dz": -95}, self.POSE, ok)["code"], "MOVE_TOO_LOW")
+        self.assertEqual(P.check_move({"dx": 0, "dy": 50, "dz": 0}, self.POSE, lambda x, y, z, a: y < 230)["code"], "MOVE_UNREACHABLE")   # the end is out, so is the line
+        self.assertEqual(P.check_move({"dx": "x", "dy": 0, "dz": 5}, self.POSE, ok)["code"], "MOVE_UNKNOWN")
+        self.assertEqual(P.check_move({"dx": float("nan"), "dy": 0, "dz": 0}, self.POSE, ok)["code"], "NOTHING_TO_MOVE")
+
+    def test_midline_obstacle_is_caught(self):
+        self.assertEqual(P.check_move({"dx": 60, "dy": 0, "dz": 0}, self.POSE, lambda x, y, z, a: not (25 < x < 35))["code"], "MOVE_UNREACHABLE")
+
+    def test_through_keyword_action(self):
+        self.assertEqual(P.keyword_action("move up 2 cm")["action"], "move_by")
+        self.assertEqual(P.keyword_action("put key 2 back")["action"] if P.keyword_action("put key 2 back") else None, None)
+
+    def test_moving_needs_the_output_armed(self):
+        self.assertEqual(P.check_action({"action": "move_by"}, {}, False)["code"], "OUTPUT_SAFE")
+
+
 if __name__ == "__main__":
     unittest.main()

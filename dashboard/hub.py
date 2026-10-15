@@ -1226,7 +1226,7 @@ class Hub:
                     self.cell.set_magnet(False)
                 self.sim.go_home()
 
-    def _do_action(self, act, plan, st):
+    def _do_action(self, act, plan, st, tid=0):
         """The quick commands the AI can ask for: status, go_home, magnet. Fixed menu: no coordinates, nothing the model wrote reaches the arm."""
         bad = PRE.check_action(plan, st, st.get("source") != "esp32" or self.armed or self.emu.running)
         if bad:
@@ -1235,6 +1235,8 @@ class Hub:
             return self._tlog(PRE.describe(st), "done")
         if act == "stop":
             return self._stop_now(self.task.get("request", ""), echo=False)
+        if act == "move_by":
+            return self._do_move(plan, st, tid)
         if act == "go_home":
             if st["at_home"]:
                 return self._tlog("Already at home", "done")
@@ -1258,6 +1260,28 @@ class Hub:
                                           "Check the relay wiring and the magnet pin setting."))
             return self._tlog("Magnet %s" % ("on" if want else "off"), "done")
         return self._fail(PRE.err("INTERNAL", "Unknown action %s" % act))
+
+    def _do_move(self, plan, st, tid):
+        """A small relative nudge, run as a one-pose sequence (so it uses the same straight-line move the ESP32 already runs). Checked first, capped, operator-style."""
+        if PRE.has_topic(self.task.get("request", "")):
+            return self._fail(PRE.err("FREE_MOVE_NOT_FOR_KEYS", "Free movement is not used for keys, boxes or the tray",
+                                      "Fetching and returning keys only run a taught, checked sequence.", "Ask for the key by name, or teach the move as a sequence."))
+        pose = st.get("pose") or {}
+        with self.sim_lock:
+            reach = lambda x, y, z, a: bool(self.sim.ik_report((x, y, z, a))["reachable"])
+            bad = PRE.check_move(plan, pose, reach)
+        if bad:
+            return self._fail(bad)
+        d = [float(plan.get(k) or 0.0) for k in ("dx", "dy", "dz")]
+        target = (float(pose["x"]) + d[0], float(pose["y"]) + d[1], float(pose["z"]) + d[2], float(pose["angle"]))
+        mm = sum(c * c for c in d) ** 0.5
+        self._tlog("Moving %.0f mm (dx %+.0f, dy %+.0f, dz %+.0f)" % (mm, *d), "running")
+        self.load_sequence(SEQ.make_sequence([target], [False], "nudge", "free movement"), False, True)   # no magnet action: a nudge leaves the magnet as it is
+        if not self._wait(lambda: self._run_once is None, 60):
+            return self._fail(PRE.err("RUN_TIMEOUT", "The move did not finish", "It was still running after 60 s.", "Say stop, then go home."))
+        if self._tid != tid:
+            return
+        self._tlog("Moved", "done")
 
     def _ensure_home(self, st, log=None):
         """Get the arm to home grip (magnet off, at home) before a run. None when it is there, else a structured error."""
@@ -1285,7 +1309,7 @@ class Hub:
             if act != "run_sequence":
                 self.task["plan"] = plan
                 self._tlog("Chose action %s (%s, %s)" % (act, plan.get("by"), plan.get("reason") or ""), chat=False)
-                return self._do_action(act, plan, st)
+                return self._do_action(act, plan, st, tid)
             if not plan["sequence"]:
                 return self._fail(PRE.no_sequence(request, plan))
             seq = LIBRARY.get(plan["sequence"])

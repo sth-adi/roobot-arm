@@ -12,9 +12,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 try:
-    from preflight import ACTIONS, SCOPE, keyword_action
+    from preflight import ACTIONS, SCOPE, keyword_action, undo_move
 except ImportError:                                    # imported as dashboard.agent
-    from dashboard.preflight import ACTIONS, SCOPE, keyword_action
+    from dashboard.preflight import ACTIONS, SCOPE, keyword_action, undo_move
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 FALLBACK_MODELS = ["openai/gpt-oss-120b", "llama-3.1-8b-instant"]   # cheapest first (Groq list prices); tried in turn when Groq says model_not_found (a project can have models switched off)
@@ -41,9 +41,9 @@ def _words(s):
     return [w for w in re.findall(r"[a-z0-9]+", s.lower().replace("_", " ")) if w not in STOP]
 
 
-def keyword_choice(request, library, last=None):
+def keyword_choice(request, library, last=None, last_move=None):
     """Best overlap between the request and each sequence's name + description; backwards words flip the direction."""
-    quick = keyword_action(request)
+    quick = keyword_action(request, last_move)
     if quick:
         return dict({"sequence": None, "reverse": False, "by": "keywords"}, **quick)
     req = set(_words(request))
@@ -71,7 +71,7 @@ def groq_choice(request, library, state, key, timeout=15, model=None):
               'status for a question about the arm or keys (no motion); run_sequence for everything that moves a key. '
               'move_by nudges the tip by a small distance in mm (dx right, dy away from the base, dz up; at most 100 mm in total) and is NEVER used for fetching, returning or putting a key. '
               "Each sequence moves a key between places; running it reversed does the opposite move. Use null if nothing fits. "
-              "Sequences: " + json.dumps(catalog) + " Arm state: " + json.dumps({k: state.get(k) for k in ("at_home", "holding", "keys", "last_run")}) + " last_run is the sequence that ran most recently; undoing it means running it with the opposite reverse flag.")
+              "Sequences: " + json.dumps(catalog) + " Arm state: " + json.dumps({k: state.get(k) for k in ("at_home", "holding", "keys", "last_run", "last_move")}) + " last_run is the sequence that ran most recently; undoing it means running it with the opposite reverse flag. last_move, when set, is the nudge done most recently (it replaces last_run for undoing): undo it with move_by and the opposite dx, dy, dz.")
     extra = {"reasoning_effort": "low", "max_completion_tokens": 600} if "gpt-oss" in (model or GROQ_MODEL) else {"max_tokens": 200}   # a one-line JSON answer needs little thinking
     body = json.dumps({**extra, "model": model or GROQ_MODEL, "temperature": 0, "response_format": {"type": "json_object"},
                        "messages": [{"role": "system", "content": system}, {"role": "user", "content": request[:500]}]}).encode()
@@ -104,6 +104,9 @@ def choose(request, library, state):
     key = api_key()
     err = ""
     names = {s["name"] for s in library}
+    undo = undo_move(request, state.get("last_move"))     # the opposite of a number the hub recorded: decided here, no model needed
+    if undo:
+        return dict({"sequence": None, "reverse": False, "by": "keywords"}, **undo)
     if key:
         try:
             import urllib.error
@@ -130,6 +133,6 @@ def choose(request, library, state):
             err = _why(e)
     else:
         err = "no GROQ_API_KEY found (environment or .env in the repository folder)"
-    c = keyword_choice(request, library, state.get("last_run"))
+    c = keyword_choice(request, library, state.get("last_run"), state.get("last_move"))
     c["ai_error"] = err
     return c

@@ -125,6 +125,27 @@ class FreeMovementTest(unittest.TestCase):
         self.assertEqual(P.keyword_action("move up 2 cm")["action"], "move_by")
         self.assertEqual(P.keyword_action("put key 2 back")["action"] if P.keyword_action("put key 2 back") else None, None)
 
+    def test_undo_reverses_the_last_nudge(self):
+        last = {"dx": 0.0, "dy": 0.0, "dz": 80.0}
+        for text in ("move it back", "undo", "put it back", "reverse that", "go back"):
+            r = P.keyword_action(text, last)
+            self.assertEqual((r["action"], r["dx"], r["dy"], r["dz"]), ("move_by", 0.0, 0.0, -80.0), text)
+        self.assertEqual(P.undo_move("move it back", {"dx": -5, "dy": 0, "dz": 10})["dx"], 5.0)
+
+    def test_undo_needs_a_nudge_and_stays_out_of_the_way(self):
+        last = {"dx": 0.0, "dy": 0.0, "dz": 80.0}
+        self.assertIsNone(P.undo_move("move it back", None))                              # last thing was not a nudge
+        self.assertIsNone(P.keyword_action("undo", None))
+        self.assertIsNone(P.undo_move("put key 2 back", last))                            # keys only ever use taught sequences
+        self.assertIsNone(P.undo_move("return the key to the tray", last))
+        self.assertEqual(P.keyword_action("go back to home", last)["action"], "go_home")
+        self.assertEqual(P.keyword_action("move back 2 cm", last)["dy"], -20.0)           # a new move with a distance, not an undo
+        self.assertIsNone(P.undo_move("undo", {"dx": "x", "dy": 0, "dz": 0}))
+
+    def test_undo_still_goes_through_the_checks(self):
+        r = P.undo_move("undo", {"dx": 0.0, "dy": 0.0, "dz": 95.0})
+        self.assertEqual(P.check_move(r, {"x": 0.0, "y": 200.0, "z": 20.0, "angle": 0.0}, lambda *a: True)["code"], "MOVE_TOO_LOW")
+
     def test_moving_needs_the_output_armed(self):
         self.assertEqual(P.check_action({"action": "move_by"}, {}, False)["code"], "OUTPUT_SAFE")
 

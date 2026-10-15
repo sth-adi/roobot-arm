@@ -64,10 +64,12 @@ def keyword_choice(request, library, last=None):
 def groq_choice(request, library, state, key, timeout=15, model=None):
     catalog = [{"name": s["name"], "description": s["description"], "requires": s["requires"], "ends": s["ends"]} for s in library]
     system = ("You decide what a robot arm should do. " + SCOPE + " Never invent a sequence and never write coordinates or angles. Answer ONLY with JSON: "
-              '{"action": <"run_sequence" | "go_home" | "stop" | "magnet" | "status">, "sequence": <name from the list or null>, "reverse": <true to run it backwards for the opposite task>, '
-              '"key": <key number the person named, else null>, "on": <true or false, for magnet only>, "reason": <short>}. '
+              '{"action": <"run_sequence" | "go_home" | "stop" | "magnet" | "status" | "move_by">, "sequence": <name from the list or null>, "reverse": <true to run it backwards for the opposite task>, '
+              '"key": <key number the person named, else null>, "on": <true or false, for magnet only>, '
+              '"dx": <mm>, "dy": <mm>, "dz": <mm>, "reason": <short>}. '
               'Use go_home for "go to home position" or "return to default"; stop to stop moving; magnet to switch the electromagnet on or off (release/drop means off); '
               'status for a question about the arm or keys (no motion); run_sequence for everything that moves a key. '
+              'move_by nudges the tip by a small distance in mm (dx right, dy away from the base, dz up; at most 100 mm in total) and is NEVER used for fetching, returning or putting a key. '
               "Each sequence moves a key between places; running it reversed does the opposite move. Use null if nothing fits. "
               "Sequences: " + json.dumps(catalog) + " Arm state: " + json.dumps({k: state.get(k) for k in ("at_home", "holding", "keys", "last_run")}) + " last_run is the sequence that ran most recently; undoing it means running it with the opposite reverse flag.")
     extra = {"reasoning_effort": "low", "max_completion_tokens": 600} if "gpt-oss" in (model or GROQ_MODEL) else {"max_tokens": 200}   # a one-line JSON answer needs little thinking
@@ -81,7 +83,8 @@ def groq_choice(request, library, state, key, timeout=15, model=None):
     raw = out["choices"][0]["message"]["content"]
     ans = json.loads(raw)
     act = ans.get("action") if ans.get("action") in ACTIONS else "run_sequence"
-    return {"action": act, "on": ans.get("on") if isinstance(ans.get("on"), bool) else None, "sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "key": ans.get("key"), "reason": str(ans.get("reason", ""))[:200], "by": "groq",
+    return {"action": act, "on": ans.get("on") if isinstance(ans.get("on"), bool) else None,
+            **{k: ans.get(k) for k in ("dx", "dy", "dz") if isinstance(ans.get(k), (int, float)) and not isinstance(ans.get(k), bool)}, "sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "key": ans.get("key"), "reason": str(ans.get("reason", ""))[:200], "by": "groq",
             "model": model or GROQ_MODEL, "raw": raw[:1000], "ms": int((time.time() - t0) * 1000), "tokens": (out.get("usage") or {}).get("total_tokens")}   # raw/ms/tokens are shown in the chat page
 
 

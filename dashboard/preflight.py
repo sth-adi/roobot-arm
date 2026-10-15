@@ -12,9 +12,56 @@ KEY_IDS = ("1", "2", "3")
 _TOPIC = re.compile(r"\b(keys?|box(es)?|tray|fetch|bring|return|put|take|move|pick|drop|give|hand)\b", re.I)
 
 
-ACTIONS = ("run_sequence", "go_home", "stop", "magnet", "status")   # the only things the AI can ask the arm to do besides running a taught sequence
+ACTIONS = ("run_sequence", "go_home", "stop", "magnet", "status", "move_by")   # the only things the AI can ask the arm to do besides running a taught sequence
 STOP_RE = re.compile(r"\b(stop|halt|abort|freeze|e-?stop|emergency|cancel)\b", re.I)
 _TOPIC_WORDS = {"key", "keys", "box", "boxes", "tray"}
+
+
+# ---- free movement: small relative nudges only (x right, y away from the base, z up). Never used for fetching or returning keys. ----
+MOVE_MAX_MM = 100.0        # per command; ask again for more
+MOVE_MIN_Z = 10.0          # the tip is never sent lower than this above the table
+_DIR = {"up": (0, 0, 1), "raise": (0, 0, 1), "lift": (0, 0, 1), "down": (0, 0, -1), "lower": (0, 0, -1), "left": (-1, 0, 0), "right": (1, 0, 0),
+        "forward": (0, 1, 0), "forwards": (0, 1, 0), "back": (0, -1, 0), "backward": (0, -1, 0), "backwards": (0, -1, 0)}
+_MOVE = re.compile(r"\b(up|down|raise|lift|lower|left|right|forwards?|backwards?|back)\b(?:\s+(?:by|about))?\s+(\d+(?:\.\d+)?)\s*(mm|millimet\w*|cm|centimet\w*)\b", re.I)
+
+
+def has_topic(request):
+    return bool(set(re.findall(r"[a-z]+", request.lower())) & _TOPIC_WORDS)
+
+
+def parse_move(request):
+    """'move up 2 cm and left 5 mm' -> {"dx","dy","dz"} in mm. Only with an explicit number and unit, and never in a request about keys, boxes or the tray."""
+    if has_topic(request):
+        return None
+    d = [0.0, 0.0, 0.0]
+    found = False
+    for m in _MOVE.finditer(request):
+        mm = float(m.group(2)) * (10.0 if m.group(3).lower().startswith("c") else 1.0)
+        for i, c in enumerate(_DIR[m.group(1).lower()]):
+            d[i] += c * mm
+        found = True
+    return {"dx": d[0], "dy": d[1], "dz": d[2]} if found else None
+
+
+def check_move(delta, pose, reachable):
+    """Errors that stop a nudge before the arm moves, else None. reachable(x, y, z, angle) -> bool is the inverse-kinematics check."""
+    try:
+        dx, dy, dz = (float(delta[k]) for k in ("dx", "dy", "dz"))
+        x, y, z, a = (float(pose[k]) for k in ("x", "y", "z", "angle"))
+    except (TypeError, ValueError, KeyError):
+        return err("MOVE_UNKNOWN", "I could not read the move or the arm's position", "", "Say it like: move up 2 cm.")
+    dist = (dx * dx + dy * dy + dz * dz) ** 0.5
+    if dist != dist or dist < 1.0:
+        return err("NOTHING_TO_MOVE", "That is less than 1 mm", "", "Give a distance, like: move up 2 cm.")
+    if dist > MOVE_MAX_MM:
+        return err("MOVE_TOO_FAR", "That is %.0f mm: the limit is %.0f mm per command" % (dist, MOVE_MAX_MM), "", "Ask in smaller steps.")
+    if z + dz < MOVE_MIN_Z:
+        return err("MOVE_TOO_LOW", "That would put the tip %.0f mm above the table; the minimum is %.0f mm" % (z + dz, MOVE_MIN_Z), "", "Move less far down.")
+    for i in range(1, 11):                                    # the whole straight line must be reachable, not only the end
+        f = i / 10.0
+        if not reachable(x + dx * f, y + dy * f, z + dz * f, a):
+            return err("MOVE_UNREACHABLE", "The arm cannot reach there", "Part of that straight line is outside its reach or joint limits.", "Try a smaller move or another direction.")
+    return None
 
 
 def is_stop(request):
@@ -30,6 +77,9 @@ def keyword_action(request):
     on, off = w & {"on", "enable", "activate", "engage", "grab"}, w & {"off", "disable", "deactivate", "release", "drop"}
     if ("magnet" in w or w & {"release", "drop"}) and bool(on) != bool(off):
         return {"action": "magnet", "on": bool(on), "reason": "magnet words"}
+    mv = parse_move(request)
+    if mv:
+        return dict({"action": "move_by", "reason": "explicit distance"}, **mv)
     if w & {"home", "default", "rest"} and not w & _TOPIC_WORDS:
         return {"action": "go_home", "reason": "home words"}
     if (w & {"status", "where", "holding", "state"} or request.strip().endswith("?")) and not w & {"put", "move", "take", "bring", "fetch", "give", "return"}:
@@ -49,7 +99,7 @@ def describe(state):
 def check_action(plan, state, output_ok):
     """Stop is always allowed; moving the real arm needs the output armed. None when fine."""
     a = plan.get("action")
-    if a in ("go_home", "magnet") and not output_ok:
+    if a in ("go_home", "magnet", "move_by") and not output_ok:
         return err("OUTPUT_SAFE", "The output is SAFE", "This would move the real arm.", "Arm the output (Escape returns to SAFE), then ask again.")
     return None
 

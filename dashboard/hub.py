@@ -1135,6 +1135,8 @@ class Hub:
         request = str(request).strip()[:500]
         if not request:
             raise ValueError("say what you want done")
+        if PRE.is_stop(request):                       # first, before any busy check, AI or network call
+            return self._stop_now(request)
         if self.task.get("state") in ("working", "running"):
             raise RuntimeError("a task is already running")
         if self.tune.get("state") == "running":
@@ -1143,7 +1145,8 @@ class Hub:
             raise RuntimeError("a speed trial is running on the arm: wait for it or abort it")
         self.task = {"state": "working", "request": request, "log": [], "error": None, "warning": None}
         self.chat_add("user", request)
-        threading.Thread(target=self._do_task, args=(request,), daemon=True).start()
+        Hub._tid += 1
+        threading.Thread(target=self._do_task, args=(request, Hub._tid), daemon=True).start()
 
     def _tlog(self, msg, state=None, chat=True):
         self.task["log"].append(msg)
@@ -1167,26 +1170,84 @@ class Hub:
         self._tlog("%s%s" % (e["title"], (". " + e["hint"]) if e.get("hint") else ""), "failed", chat=False)
         self.chat_add("error", e["title"], detail=e.get("detail"), hint=e.get("hint"), code=e.get("code"), state="failed")
 
-    def _ensure_home(self, st, log=None):
-        """Get the arm to home grip (magnet off, at home) before a run. None when it is there, else a structured error."""
-        if st["home_grip"]:
-            return None
-        (log or self._tlog)("Not at home grip: going home first")
+    _tid = 0                                           # task number: a stop bumps it, so a task that was running knows it must not carry on
+
+    def _stop_now(self, request, echo=True):
+        """Stop moving right now, without asking the AI: end a sequence run (virtual or on the ESP32) and any replay. The arm holds where it is."""
+        Hub._tid += 1
+        if echo:
+            self.chat_add("user", request)
+        self._run_once = None
+        try:
+            if self.esp_state():
+                self._http("/sequence", {"poses": []}, timeout=2.0)         # an empty list stops a run on the ESP32
+                self._esp_run = None
+        except Exception as e:
+            self.log("hub", "could not tell the ESP32 to stop: %s" % e)
+        with self.sim_lock:
+            self.sim.stop_replay()
+        self.task = {"state": "stopped", "request": request, "log": ["Stopped"], "error": None, "warning": None}
+        self.log("agent", "stopped on request")
+        self.chat_add("robot", "Stopped. The arm holds where it is.", state="stopped")
+
+    def _send_home(self, st, release):
+        """Start the move home (B). release=True switches the magnet off first, as a sequence run needs."""
         if st.get("source") == "esp32":
-            if st["magnet"]:
+            if release and st["magnet"]:
                 self._esp_tap("X")                  # magnet off first
             self._esp_tap("B")                      # then go home
         else:
             with self.sim_lock:
                 self.sim.stop_replay()
-                self.cell.set_magnet(False)
+                if release:
+                    self.cell.set_magnet(False)
                 self.sim.go_home()
+
+    def _do_action(self, act, plan, st):
+        """The quick commands the AI can ask for: status, go_home, magnet. Fixed menu: no coordinates, nothing the model wrote reaches the arm."""
+        bad = PRE.check_action(plan, st, st.get("source") != "esp32" or self.armed or self.emu.running)
+        if bad:
+            return self._fail(bad)
+        if act == "status":
+            return self._tlog(PRE.describe(st), "done")
+        if act == "stop":
+            return self._stop_now(self.task.get("request", ""), echo=False)
+        if act == "go_home":
+            if st["at_home"]:
+                return self._tlog("Already at home", "done")
+            self._tlog("Going home", "running")
+            self._send_home(st, release=False)
+            if not self._wait(lambda: self.state_packet()["at_home"], 30):
+                return self._fail(PRE.err("HOME_FAILED", "The arm could not get to its home position", "It did not reach home within 30 s.",
+                                          "Check the arm is powered and armed, then try again."))
+            return self._tlog("At home", "done")
+        if act == "magnet":
+            want = bool(plan.get("on"))
+            if bool(st["magnet"]) == want:
+                return self._tlog("The magnet is already %s" % ("on" if want else "off"), "done")
+            if st.get("source") == "esp32":
+                self._esp_tap("X")                  # the firmware toggles on each X press
+            else:
+                with self.sim_lock:
+                    self.cell.set_magnet(want)
+            if not self._wait(lambda: bool(self.state_packet()["magnet"]) == want, 6):
+                return self._fail(PRE.err("MAGNET_FAILED", "The magnet did not switch %s" % ("on" if want else "off"), "The arm did not report the change.",
+                                          "Check the relay wiring and the magnet pin setting."))
+            return self._tlog("Magnet %s" % ("on" if want else "off"), "done")
+        return self._fail(PRE.err("INTERNAL", "Unknown action %s" % act))
+
+    def _ensure_home(self, st, log=None):
+        """Get the arm to home grip (magnet off, at home) before a run. None when it is there, else a structured error."""
+        if st["home_grip"]:
+            return None
+        (log or self._tlog)("Not at home grip: going home first")
+        self._send_home(st, release=True)
         if not self._wait(lambda: self.state_packet()["at_home"] and not self.state_packet()["magnet"], 30):
             return PRE.err("HOME_FAILED", "The arm could not get to its home position", "It did not reach home grip within 30 s.",
                            "Check the arm is powered and armed, then try again.")
         return None
 
-    def _do_task(self, request):
+    def _do_task(self, request, tid=0):
         try:
             st = self.state_packet()
             library = LIBRARY.list()
@@ -1195,8 +1256,13 @@ class Hub:
             if plan.get("ai_error"):
                 self.task["warning"] = "Groq was not used: " + plan["ai_error"]
                 self._tlog("Groq was not used: " + plan["ai_error"])
-            self.chat_add("ai", plan.get("reason") or "", by=plan.get("by"), model=plan.get("model"), sequence=plan.get("sequence"), reverse=plan.get("reverse"),
+            self.chat_add("ai", plan.get("reason") or "", by=plan.get("by"), model=plan.get("model"), action=plan.get("action"), sequence=plan.get("sequence"), reverse=plan.get("reverse"),
                           raw=plan.get("raw"), ms=plan.get("ms"), tokens=plan.get("tokens"))
+            act = plan.get("action") or "run_sequence"
+            if act != "run_sequence":
+                self.task["plan"] = plan
+                self._tlog("Chose action %s (%s, %s)" % (act, plan.get("by"), plan.get("reason") or ""), chat=False)
+                return self._do_action(act, plan, st)
             if not plan["sequence"]:
                 return self._fail(PRE.no_sequence(request, plan))
             seq = LIBRARY.get(plan["sequence"])
@@ -1208,12 +1274,16 @@ class Hub:
             if problems:
                 return self._fail(problems[0])
             bad = self._ensure_home(st)
+            if self._tid != tid:                         # stopped while going home
+                return
             if bad:
                 return self._fail(bad)
             self._tlog("At home grip: running", "running")
             self.load_sequence(seq, False, True)
             if not self._wait(lambda: self._run_once is None, 120):
                 return self._fail(PRE.err("RUN_TIMEOUT", "The sequence did not finish", "It was still running after 120 s.", "Press B to send the arm home."))
+            if self._tid != tid:                         # stopped mid-run: _stop_now already told the person
+                return
             time.sleep(1.5)                                  # let a released key finish falling before it is looked at
             bad = PRE.verify(seq, st, self.state_packet(), request, plan)
             if bad:

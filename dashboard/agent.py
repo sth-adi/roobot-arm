@@ -12,9 +12,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 try:
-    from preflight import SCOPE
+    from preflight import ACTIONS, SCOPE, keyword_action
 except ImportError:                                    # imported as dashboard.agent
-    from dashboard.preflight import SCOPE
+    from dashboard.preflight import ACTIONS, SCOPE, keyword_action
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 FALLBACK_MODELS = ["openai/gpt-oss-120b", "llama-3.1-8b-instant"]   # cheapest first (Groq list prices); tried in turn when Groq says model_not_found (a project can have models switched off)
@@ -43,6 +43,9 @@ def _words(s):
 
 def keyword_choice(request, library, last=None):
     """Best overlap between the request and each sequence's name + description; backwards words flip the direction."""
+    quick = keyword_action(request)
+    if quick:
+        return dict({"sequence": None, "reverse": False, "by": "keywords"}, **quick)
     req = set(_words(request))
     rev = bool(req & REVERSE_WORDS)
     best, best_score = None, 0
@@ -60,8 +63,11 @@ def keyword_choice(request, library, last=None):
 
 def groq_choice(request, library, state, key, timeout=15, model=None):
     catalog = [{"name": s["name"], "description": s["description"], "requires": s["requires"], "ends": s["ends"]} for s in library]
-    system = ("You pick which taught robot-arm sequence to run. " + SCOPE + " Never invent a sequence. Answer ONLY with JSON: "
-              '{"sequence": <name from the list or null>, "reverse": <true to run it backwards for the opposite task>, "key": <key number the person named, else null>, "reason": <short>}. '
+    system = ("You decide what a robot arm should do. " + SCOPE + " Never invent a sequence and never write coordinates or angles. Answer ONLY with JSON: "
+              '{"action": <"run_sequence" | "go_home" | "stop" | "magnet" | "status">, "sequence": <name from the list or null>, "reverse": <true to run it backwards for the opposite task>, '
+              '"key": <key number the person named, else null>, "on": <true or false, for magnet only>, "reason": <short>}. '
+              'Use go_home for "go to home position" or "return to default"; stop to stop moving; magnet to switch the electromagnet on or off (release/drop means off); '
+              'status for a question about the arm or keys (no motion); run_sequence for everything that moves a key. '
               "Each sequence moves a key between places; running it reversed does the opposite move. Use null if nothing fits. "
               "Sequences: " + json.dumps(catalog) + " Arm state: " + json.dumps({k: state.get(k) for k in ("at_home", "holding", "keys", "last_run")}) + " last_run is the sequence that ran most recently; undoing it means running it with the opposite reverse flag.")
     extra = {"reasoning_effort": "low", "max_completion_tokens": 600} if "gpt-oss" in (model or GROQ_MODEL) else {"max_tokens": 200}   # a one-line JSON answer needs little thinking
@@ -74,7 +80,8 @@ def groq_choice(request, library, state, key, timeout=15, model=None):
         out = json.loads(r.read())
     raw = out["choices"][0]["message"]["content"]
     ans = json.loads(raw)
-    return {"sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "key": ans.get("key"), "reason": str(ans.get("reason", ""))[:200], "by": "groq",
+    act = ans.get("action") if ans.get("action") in ACTIONS else "run_sequence"
+    return {"action": act, "on": ans.get("on") if isinstance(ans.get("on"), bool) else None, "sequence": ans.get("sequence"), "reverse": bool(ans.get("reverse")), "key": ans.get("key"), "reason": str(ans.get("reason", ""))[:200], "by": "groq",
             "model": model or GROQ_MODEL, "raw": raw[:1000], "ms": int((time.time() - t0) * 1000), "tokens": (out.get("usage") or {}).get("total_tokens")}   # raw/ms/tokens are shown in the chat page
 
 
@@ -108,7 +115,11 @@ def choose(request, library, state):
                         continue
                     break
                 _good_model[0] = m
-                if c["sequence"] is None or c["sequence"] in names:
+                c.setdefault("action", "run_sequence")
+                if c["action"] == "magnet" and c.get("on") is None:
+                    err = "Groq asked for the magnet without saying on or off"
+                    break
+                if c["action"] != "run_sequence" or c["sequence"] is None or c["sequence"] in names:
                     return c
                 err = "Groq named a sequence that is not in the library"
                 break

@@ -57,5 +57,40 @@ class PreflightTest(unittest.TestCase):
         self.assertEqual(P.verify(FWD, before, before, "", PLAN)["code"], "MOVE_FAILED")
 
 
+class QuickCommandTest(unittest.TestCase):
+    def act(self, text):
+        r = P.keyword_action(text)
+        return (r["action"], r.get("on")) if r else None
+
+    def test_commands(self):
+        self.assertEqual(self.act("go to home position"), ("go_home", None))
+        self.assertEqual(self.act("return to the default pose"), ("go_home", None))
+        self.assertEqual(self.act("stop"), ("stop", None))
+        self.assertEqual(self.act("STOP!! halt now"), ("stop", None))
+        self.assertEqual(self.act("turn the magnet on"), ("magnet", True))
+        self.assertEqual(self.act("switch magnet off"), ("magnet", False))
+        self.assertEqual(self.act("release it"), ("magnet", False))
+        self.assertEqual(self.act("where is key 2?"), ("status", None))
+
+    def test_key_moves_are_not_quick_commands(self):
+        self.assertIsNone(self.act("put key 2 on the tray"))
+        self.assertIsNone(self.act("take the key from box 1 back home"))     # a key move, not "go home"
+        self.assertIsNone(self.act("bring me the key?"))
+
+    def test_stop_is_decided_locally(self):
+        self.assertTrue(P.is_stop("please stop"))
+        self.assertFalse(P.is_stop("go home"))
+
+    def test_describe_uses_only_the_state(self):
+        s = P.describe({"at_home": True, "magnet": False, "holding": False, "keys": {"1": "box 1", "2": "tray"}})
+        self.assertIn("At home", s)
+        self.assertIn("key 2 on the tray", s)
+
+    def test_moving_the_real_arm_needs_the_output_armed(self):
+        self.assertEqual(P.check_action({"action": "go_home"}, {}, False)["code"], "OUTPUT_SAFE")
+        self.assertIsNone(P.check_action({"action": "go_home"}, {}, True))
+        self.assertIsNone(P.check_action({"action": "status"}, {}, False))
+
+
 if __name__ == "__main__":
     unittest.main()

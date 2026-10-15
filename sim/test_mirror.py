@@ -129,6 +129,13 @@ class SketchTest(unittest.TestCase):
     def test_stick_frames_take_over_and_hold(self):
         self.assertRegex(self.src, r"posMode = false;\s*holdPos\(\);")
 
+    def test_b_goes_home_in_jog_mode_and_a_stick_or_lost_input_cancels_it(self):
+        self.assertIn("if (i.b && !prevB && !posMode) {", self.src)                       # rising edge of B, jog mode only
+        self.assertIn("for (int n = 0; n < 4; n++) posGoalUs[n] = PULSE_MID_US;", self.src)   # home = centre, 90 degrees, like the virtual arm
+        self.assertIn("} else if (homing && stickMoved) {", self.src)
+        self.assertRegex(self.src, r"if \(homing\) \{\s*homing = false;")                  # fail-safe path stops homing too
+        self.assertIn("min(POS_MAX_DEG_S, degPerS)", self.src)                              # homing never exceeds the cap or the jog speed setting
+
     def test_the_channel_map_is_validated(self):
         self.assertIn("a != b && a != c && a != d && b != c && b != d && c != d", self.src)
         self.assertIsNotNone(re.search(r'jointMap\[4\] = \{3, 2, 1, 0\}', self.src))

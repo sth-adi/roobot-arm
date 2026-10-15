@@ -124,14 +124,19 @@ Preferences prefs;
 // ---- Mirror mode: absolute joint positions from the hub ------------------------------
 // The hub's virtual arm works out the inverse kinematics, home (B) and sequences. "@d1,d2,d3,d4,seq" sends its four joint angles
 // (servo degrees 0..180, 90 = centre) and the board follows them. Joint j drives PWM channel jointMap[j] (an index into PWM_PINS).
-// Safety: the pulse stays inside 1000..2000 us like the jog, the board never moves faster than POS_MAX_DEG_S whatever it is told,
-// the arm HOLDS where it is when the frames stop or a "$" stick frame arrives, and WiFi input is ignored while mirroring.
+// Pulses follow Sam's firmware (UWE-RArm RobotMovement.h): ESP32Servo attach(pin, 500, 2400), a joint angle is written as 500 us at 0 degrees up
+// to 2400 us at 180 degrees (10.56 us per degree, 90 degrees = 1450 us), because the model's joint angles and the trained limits and homes are in
+// that convention. The jog uses 1000..2000 us over its own travel setting, so the two differ: !pulse lo,hi changes the mirror mapping (saved).
+// Safety: the pulse never leaves the mirror range, the board never moves faster than POS_MAX_DEG_S whatever it is told, the arm HOLDS where it
+// is when the frames stop or a "$" stick frame arrives, and WiFi input is ignored while mirroring.
 const float POS_MAX_DEG_S = 60.0f;
+float mirrorUsAt0 = 500.0f, mirrorUsAt180 = 2400.0f;       // Sam's attach(pin, 500, 2400)
+float mirrorUsOf(float deg) { return mirrorUsAt0 + deg * (mirrorUsAt180 - mirrorUsAt0) / 180.0f; }
 uint8_t jointMap[4] = {3, 2, 1, 0};   // joint 1..4 -> GPIO 32, 27, 26, 25: how the arm is wired for Sam's firmware. !map a,b,c,d changes it (saved)
 bool posMode = false;
 float posGoalUs[4] = {1500, 1500, 1500, 1500};   // goal pulse per PWM channel
 
-// ---- Go home in jog mode: B walks every output back to centre (1500 us = 90 degrees, the same home the hub's virtual arm uses) ----
+// ---- Go home in jog mode: B walks every output to 90 degrees (1450 us in Sam's mapping), the same home the hub's virtual arm uses ----
 // It runs at the jog speed setting (!rate / !live), never above POS_MAX_DEG_S. Any stick movement, or input going stale, cancels it
 // and the outputs hold where they are. (In mirror mode the hub does the homing, because the virtual arm homes and the board follows.)
 bool homing = false;
@@ -145,6 +150,8 @@ void loadSettings() {
   prefs.begin("arm", false);
   maxRateDegS = prefs.getFloat("rate", DEFAULT_MAX_RATE_DEG_S);
   rangeDeg    = prefs.getFloat("range", DEFAULT_RANGE_DEG);
+  float lo = prefs.getFloat("mlo", 500.0f), hi = prefs.getFloat("mhi", 2400.0f);
+  if (lo >= 400 && hi <= 2600 && hi - lo >= 600) { mirrorUsAt0 = lo; mirrorUsAt180 = hi; }
   String m = prefs.getString("map", "3210");          // joint -> channel digits, e.g. "3210"
   if (m.length() == 4) {
     bool ok = true;
@@ -165,6 +172,8 @@ void showSettings() {
   Serial.printf("mirror: joint 1..4 -> GPIO %d %d %d %d (map %d%d%d%d), at most %.0f deg/s, %s\n",
                 PWM_PINS[jointMap[0]], PWM_PINS[jointMap[1]], PWM_PINS[jointMap[2]], PWM_PINS[jointMap[3]],
                 jointMap[0], jointMap[1], jointMap[2], jointMap[3], POS_MAX_DEG_S, posMode ? "following the hub" : "off");
+  Serial.printf("mirror pulses: 0 deg = %.0f us, 180 deg = %.0f us, 90 deg = %.0f us (Sam's firmware: 500 / 2400)\n",
+                mirrorUsAt0, mirrorUsAt180, mirrorUsOf(90.0f));
 }
 
 // Jog integrator: position += stick * speed * dt, then HOLD. Called every loop pass so the
@@ -181,7 +190,7 @@ void tickPwm() {
   float step = degPerS * usPerDeg * (dtMs / 1000.0f);  // us moved at full stick this tick
   if (posMode || homing) {                             // mirror / go home: walk each channel toward its goal, never faster than the cap
     float capDegS = posMode ? POS_MAX_DEG_S : min(POS_MAX_DEG_S, degPerS);      // mirror: the hub sets the pace; homing: the jog speed setting
-    float maxStep = capDegS * usPerDeg * (dtMs / 1000.0f);
+    float maxStep = capDegS * (posMode ? (mirrorUsAt180 - mirrorUsAt0) / 180.0f : usPerDeg) * (dtMs / 1000.0f);
     float farthest = 0;
     for (int n = 0; n < 4; n++) {
       curUs[n] += constrain(posGoalUs[n] - curUs[n], -maxStep, maxStep);
@@ -196,7 +205,8 @@ void tickPwm() {
     return;
   }
   for (int n = 0; n < 4; n++) {
-    tgtUs[n] = constrain(tgtUs[n] + axisCmd[n] * step, (float)PULSE_MIN_US, (float)PULSE_MAX_US);
+    // After mirroring a joint can sit outside the jog window: it may stay and move back in, but never jump to the edge of the window.
+    tgtUs[n] = constrain(tgtUs[n] + axisCmd[n] * step, min((float)PULSE_MIN_US, curUs[n]), max((float)PULSE_MAX_US, curUs[n]));
     curUs[n] = tgtUs[n];
     ledcWrite(PWM_PINS[n], (uint32_t)(curUs[n] * ((1UL << PWM_BITS) - 1) / (1000000.0f / PWM_FREQ_HZ)));
   }
@@ -214,9 +224,9 @@ void setupPwm() {
 void applyToArm(const ArmInput &i, bool log) {
   bool stickMoved = fabsf(i.lx) > 0.05f || fabsf(i.ly) > 0.05f || fabsf(i.rx) > 0.05f || fabsf(i.ry) > 0.05f;
   if (i.b && !prevB && !posMode) {                     // B pressed: go home
-    for (int n = 0; n < 4; n++) posGoalUs[n] = PULSE_MID_US;
+    for (int n = 0; n < 4; n++) posGoalUs[n] = mirrorUsOf(90.0f);
     homing = true;
-    Serial.println("HOME: B pressed, moving every output to centre (1500 us)");
+    Serial.println("HOME: B pressed, moving every output to 90 degrees (1450 us)");
   } else if (homing && stickMoved) {                   // a stick takes over from the homing move
     homing = false;
     for (int n = 0; n < 4; n++) tgtUs[n] = curUs[n];
@@ -243,6 +253,15 @@ void handleCommand(const String &s) {
     maxRateDegS = v; prefs.putFloat("rate", v); showSettings();
   } else if (sscanf(s.c_str(), "!range %f", &v) == 1 && v >= 10 && v <= 720) {
     rangeDeg = v; prefs.putFloat("range", v); showSettings();
+  } else if (s.startsWith("!pulse")) {
+    float lo, hi;
+    if (sscanf(s.c_str(), "!pulse %f,%f", &lo, &hi) == 2 && lo >= 400 && hi <= 2600 && hi - lo >= 600) {
+      mirrorUsAt0 = lo; mirrorUsAt180 = hi;
+      prefs.putFloat("mlo", lo); prefs.putFloat("mhi", hi);
+      showSettings();
+    } else {
+      Serial.println("!pulse needs lo,hi in us with 400 <= lo, hi <= 2600 and at least 600 apart, e.g. !pulse 500,2400");
+    }
   } else if (s.startsWith("!map")) {
     int a, b, c, d;
     if (sscanf(s.c_str(), "!map %d,%d,%d,%d", &a, &b, &c, &d) == 4 && a >= 0 && a <= 3 && b >= 0 && b <= 3 && c >= 0 && c <= 3 && d >= 0 && d <= 3
@@ -257,7 +276,7 @@ void handleCommand(const String &s) {
   } else if (s.startsWith("!show")) {
     showSettings();
   } else {
-    Serial.println("commands: !rate <deg/s, 0=unlimited> (saved) | !live <deg/s> (not saved) | !range <deg> | !map a,b,c,d (joint -> channel, saved) | !show");
+    Serial.println("commands: !rate <deg/s, 0=unlimited> (saved) | !live <deg/s> (not saved) | !range <deg> | !map a,b,c,d (joint -> channel, saved) | !pulse lo,hi (mirror pulse range, saved) | !show");
   }
 }
 
@@ -314,9 +333,8 @@ bool parsePosLine(const String &s) {
   float d[4];
   if (sscanf(s.c_str() + 1, "%f,%f,%f,%f", &d[0], &d[1], &d[2], &d[3]) != 4) return false;
   for (int j = 0; j < 4; j++) if (!(d[j] >= 0.0f && d[j] <= 180.0f)) return false;
-  float usPerDeg = (PULSE_MAX_US - PULSE_MIN_US) / rangeDeg;
   for (int j = 0; j < 4; j++) {
-    posGoalUs[jointMap[j]] = constrain(PULSE_MID_US + (d[j] - 90.0f) * usPerDeg, (float)PULSE_MIN_US, (float)PULSE_MAX_US);
+    posGoalUs[jointMap[j]] = constrain(mirrorUsOf(d[j]), mirrorUsAt0, mirrorUsAt180);
   }
   return true;
 }

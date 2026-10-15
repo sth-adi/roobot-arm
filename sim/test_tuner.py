@@ -9,7 +9,7 @@ from sim import sequences as S  # noqa: E402
 from sim import tuner as T  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SEQ = S.validate(json.load(open(os.path.join(ROOT, "sequences", "box2_to_tray.json"), encoding="utf-8")))
+SEQ = S.validate(json.load(open(os.path.join(ROOT, "sim", "fixtures", "pick_and_place.json"), encoding="utf-8")))
 N = len(SEQ["poses"])
 
 

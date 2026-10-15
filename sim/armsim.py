@@ -178,6 +178,8 @@ class ArmSim:
         self.attached = True
         self.ik_ok = True                             # False while the sticks ask for somewhere unreachable
         self.saved = []                               # saved (x, y, z, tool angle) positions
+        self.saved_speed = []                         # optional per saved position: joint speed limit (deg/s) for the replay move into it
+        self._seg_rate = None                         # the speed limit of the replay move in progress, if its position has one
         self.replay_idx = 0
         self._goal = None                             # joint-space goal for home / replay moves
         self._prev = {"A": False, "B": False}
@@ -238,7 +240,12 @@ class ArmSim:
         return forward_kin(self.angles, self.tool)
 
     def _limit_deg_s(self):
+        if self._seg_rate and self.replaying and self.mode != "home" and not getattr(self, "_moving_home", False):
+            return self._seg_rate
         return self.rate if self.rate > 0 else UNLIMITED_DEG_S
+
+    def _pick_seg_rate(self, idx):
+        self._seg_rate = self.saved_speed[idx] if 0 <= idx < len(self.saved_speed) else None
 
     def _slew(self, goal, dt):
         """Move all four joints toward `goal`, no joint faster than the damper. Returns True when arrived.
@@ -292,6 +299,7 @@ class ArmSim:
 
     def clear_saved(self):
         self.saved.clear()
+        self.saved_speed.clear()
         self.say("Saved positions cleared")
 
     # ---- servo output (what the ESP32 would write) -----------------------------------------------------------
@@ -358,6 +366,7 @@ class ArmSim:
             goal = inverse_kin(self.saved[self.replay_idx], self.angles, self.limits, self.tool)
             if goal is not None:
                 self._goal = goal
+                self._pick_seg_rate(self.replay_idx)
             self.replay_idx = (self.replay_idx + 1) % len(self.saved)
             self._replay_t = now
 
@@ -459,6 +468,7 @@ class ArmSim:
                 target = self.saved[self.replay_idx]
                 goal = inverse_kin(target, self._t_ang, self.limits, self.tool)
                 if goal is not None:
+                    self._pick_seg_rate(self.replay_idx)
                     self._t_pos, self._t_ang = target, goal
                     if not self.patch:
                         self._stock_write()
@@ -530,6 +540,7 @@ class ArmSim:
         return True
 
     def stop_replay(self):
+        self._seg_rate = None
         self.latched = False
         self.wait_arrival = False
         self.once = False

@@ -532,6 +532,15 @@ class Hub:
                 degs[joint] = max(0.0, min(180.0, degs[joint] + 8.0 * math.sin(2 * math.pi * el / 6.0)))     # a slow +-8 degree nudge of ONE joint
         return degs
 
+    def _mirror_prediction(self):
+        """Where the tool tip should end up at the test pose under each candidate servo mapping, given the pulse range the board is using now."""
+        board = tuple(self.link.board_pulse) if self.link.board_pulse else SERVOMAP.SAM
+        with self.sim_lock:
+            limits, tool = [list(p) for p in self.sim.limits], self.sim.tool
+        out = SERVOMAP.predict_tip(board=board, limits=limits, tool=tool, inverted=[l[0] > l[1] for l in limits])
+        out["board"] = list(board)
+        return out
+
     def mirror_status(self):
         return {"on": bool(self.mirror["on"]), "active": bool(self.mirror["on"] and self.armed and self.link.connected),
                 "testing": (self._mirror_test[0] + 1) if self._mirror_test else None,
@@ -568,6 +577,20 @@ class Hub:
         elif a == "angle_off":
             self._mirror_angle = None
             self.log("hub", "servo check: joint released back to the virtual arm")
+        elif a == "predict":
+            return dict(self.mirror_status(), prediction=self._mirror_prediction())
+        elif a == "test_pose":
+            if not (self.mirror["on"] and self.armed and self.link.connected):
+                raise ValueError("switch mirror mode on, arm the output and have the board on USB first")
+            self._points_check_free()
+            x, y, z, ang = SERVOMAP.TEST_POSE
+            self._mirror_angle = self._mirror_test = None
+            self.points_loop = False
+            self.load_sequence(SEQ.validate({"format": SEQ.FORMAT, "poses": [{"x": x, "y": y, "z": z, "angle": ang, "action": None}]}), False, True)
+            self.log("hub", "servo check: moving to the test pose (%g out, %g up): measure the tool tip with a ruler" % (y, z))
+        elif a == "judge":
+            pred = self._mirror_prediction()
+            return dict(self.mirror_status(), prediction=pred, judge=SERVOMAP.judge(d.get("reach"), d.get("height"), pred))
         elif a == "fit":
             board = tuple(self.link.board_pulse) if self.link.board_pulse else SERVOMAP.SAM
             fit = SERVOMAP.fit_pulse_range(d.get("cmd_a", 45), d.get("meas_a"), d.get("cmd_b", 135), d.get("meas_b"), board)

@@ -653,7 +653,16 @@ function mountBoard(root) {
         <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:10px"><label class="muted">Joint to channel map <input id="m-map" value="3,2,1,0" style="width:90px" aria-label="Joint to channel map"></label><button class="btn sm" id="m-map-set" type="button">Send to board</button></div>
         <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:10px"><label class="muted">Pulse range (us) <input id="m-pulse" value="500,2400" style="width:110px" aria-label="Pulse width at 0 and at 180 degrees"></label><button class="btn sm" id="m-pulse-set" type="button">Send to board</button></div>
         <p class="note">Mirror mode uses Sam's servo mapping: 500 us at 0 degrees to 2400 us at 180 degrees, 90 degrees at 1450 us, because the model's joint angles and the trained limits and homes are in that convention. If your servos need a different span, change it here; the board remembers it.</p>
-        <details class="sidesec" id="m-check" style="margin-top:10px"><summary><b>Check the servo mapping</b> (measure it, do not guess)</summary>
+        <div id="m-pose" style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px"><b>Does the real arm match the model?</b> One pose and a ruler.
+          <p class="note">With mirror on and the output armed, press the button: the arm goes to a tall pose. Then measure the tool tip with a ruler: how far <b>out</b> it is from the base's turning axis (horizontal distance), and how <b>high</b> above the table. The page shows what each possible servo mapping would put the tip at, and which your numbers are nearer to. You do not need to be precise: the predictions are about 9 cm apart, so a reading a centimetre out cannot change the answer.</p>
+          <div class="inline" style="flex-wrap:wrap;gap:8px"><button class="btn sm" id="m-pose-go" type="button">Go to the test pose</button></div>
+          <div class="note" id="m-pred" style="margin-top:8px"></div>
+          <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:8px"><label class="muted">Tip is this far out (mm) <input id="m-out" type="number" step="5" style="width:78px"></label>
+            <label class="muted">and this high (mm) <input id="m-up" type="number" step="5" style="width:78px"></label><button class="btn sm" id="m-judge" type="button">Which is nearer?</button></div>
+          <div class="note" id="m-verdict" style="margin-top:8px"></div>
+          <div class="inline" style="margin-top:6px"><button class="btn sm" id="m-judge-send" type="button" hidden>Send that range to the board</button></div>
+        </div>
+        <details class="sidesec" id="m-check" style="margin-top:10px"><summary><b>Advanced:</b> fit the exact range from two measured angles (only if the check above says neither)</summary>
           <p class="note">Mirror mode turns joint angles into pulses with a straight line (the pulse range above). Whether that line suits your servos can only be measured. With mirror on, the output armed and the arm at home (press B first), use a phone inclinometer or a protractor:</p>
           <ol class="note" style="padding-left:18px"><li>Pick a joint and press <b>Hold at 45&deg;</b>. When it stops, measure where it really is and type that in. Do the same for <b>135&deg;</b>.</li>
             <li>Press <b>Work out the pulse range</b>. It says which range makes the arm match the model, and whether Sam's 500 to 2400 us or the earlier guess of 1000 to 2000 us is the closer one.</li>
@@ -694,7 +703,39 @@ function mountBoard(root) {
     const r = await api("/api/mirror", { action: "test", joint: Number(b.dataset.j) });
     if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
   });
-  let fitted = null;
+  let fitted = null, judged = null, predKey = "";
+  const loadPred = async (force) => {
+    const r = await api("/api/mirror", { action: "predict" });
+    if (!r.ok || !r.mirror || !r.mirror.prediction) return;
+    const p = r.mirror.prediction, key = JSON.stringify(p.board);
+    if (!force && key === predKey) return;
+    predKey = key;
+    $r("#m-pred").innerHTML = `The model puts the tool tip <b>${p.model.reach} mm out and ${p.model.height} mm up</b>. The board is using ${p.board[0]} to ${p.board[1]} us. Where the real tip should be, depending on what the servos really follow:`
+      + `<ul style="margin:4px 0 0;padding-left:18px">${p.predictions.map((q) => `<li>${esc(q.name)}: <b>${q.reach} mm out, ${q.height} mm up</b></li>`).join("")}</ul>`;
+  };
+  $r("#m-pose-go").addEventListener("click", async () => { const r = await api("/api/mirror", { action: "test_pose" }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); });
+  $r("#m-judge").addEventListener("click", async () => {
+    const out = $r("#m-out").value, up = $r("#m-up").value, box = $r("#m-verdict");
+    judged = null; $r("#m-judge-send").hidden = true;
+    if (out === "" || up === "") { box.textContent = "Type in both numbers first."; return; }
+    const r = await api("/api/mirror", { action: "judge", reach: Number(out), height: Number(up) });
+    if (!r.ok) { box.innerHTML = `<span style="color:var(--bad)">${esc(r.error || "The hub is not reachable")}</span>`; return; }
+    const j = r.mirror.judge, cur = r.mirror.prediction.board, same = j.lo === cur[0] && j.hi === cur[1];
+    if (j.verdict === "clear") {
+      box.innerHTML = `Your tip is nearest to <b>${esc(j.nearest)}</b>: ${j.distance_mm} mm away, against ${j.other_mm} mm for the other. ` + (same ? "That is the range the board is already using, so the mapping is right: keep it." : `The board is not using that range. Press the button to send it.`);
+      if (!same) { judged = j; $r("#m-judge-send").textContent = `Send ${j.lo} to ${j.hi} us to the board`; $r("#m-judge-send").hidden = false; }
+    } else if (j.verdict === "unclear") {
+      box.innerHTML = `Your tip is between the two (${j.distance_mm} mm from the nearest, ${j.other_mm} mm from the other, and they are ${j.separation_mm} mm apart). Measure again, taking care to measure from the base's turning axis and from the table. If it stays in between, the servos may follow a third range: use the Advanced fit.`;
+    } else {
+      box.innerHTML = `<b>Your tip matches neither</b> (${j.distance_mm} mm from the nearest). So the pulse range is probably not the main problem. Check these, in this order: which part of the arm each joint moves (the Nudge test and the joint to channel map), a joint turning the wrong way (enter its limits reversed on the Control page), the tool length, and the joint limits.`;
+    }
+  });
+  $r("#m-judge-send").addEventListener("click", async () => {
+    if (!judged) return;
+    const r = await api("/api/mirror", { action: "pulse", lo: judged.lo, hi: judged.hi });
+    if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); else { toast("Pulse range sent to the board", "ok"); $r("#m-pulse").value = judged.lo + "," + judged.hi; setTimeout(() => loadPred(true), 800); }
+  });
+  loadPred(true);
   const holdAngle = async (deg) => { const r = await api("/api/mirror", { action: "angle", joint: Number($r("#m-cj").value), deg }); if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); };
   $r("#m-c45").addEventListener("click", () => holdAngle(45));
   $r("#m-c135").addEventListener("click", () => holdAngle(135));
@@ -746,7 +787,8 @@ function mountBoard(root) {
       $r("#m-st").className = "st " + (mi.active ? "run" : mi.on ? "warn" : "idle");
       $r("#m-st").textContent = mi.testing ? "nudging joint " + mi.testing : mi.active ? "the real arm is following" : mi.on ? "on, waiting for ARM and the USB board" : "off";
       root.querySelectorAll("#m-test button").forEach((b) => { b.disabled = !mi.active; });
-      ["#m-c45", "#m-c135"].forEach((id) => { $r(id).disabled = !mi.active; });
+      ["#m-c45", "#m-c135", "#m-pose-go"].forEach((id) => { $r(id).disabled = !mi.active; });
+      if (mi.pulse && JSON.stringify(mi.pulse) !== predKey) loadPred(true);
       $r("#m-cstate").textContent = mi.angle ? `holding joint ${mi.angle.joint} at ${mi.angle.deg} servo degrees` : "";
       const lim = st.sim && st.sim.limits;
       $r("#m-cal").hidden = !(mi.on && lim && lim.every((l) => l[0] === 0 && l[1] === 180));

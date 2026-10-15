@@ -113,5 +113,60 @@ class HubHoldsAJointTest(unittest.TestCase):
         self.assertEqual((out["fit"]["lo"], out["fit"]["hi"]), (1000, 2000))
 
 
+class PoseCheckTest(unittest.TestCase):
+    """The simpler check: one pose, two candidate mappings far apart, the person says which prediction is nearer."""
+
+    def test_the_two_predictions_are_far_apart_and_the_arm_stays_above_the_table(self):
+        p = M.predict_tip()
+        self.assertGreater(p["separation_mm"], 80)                      # far more than any ruler error
+        for q in p["predictions"]:
+            self.assertGreater(q["height"], 100)                        # even if the earlier guess is the true one, the tip is nowhere near the table or the base
+
+    def test_when_the_servos_follow_the_boards_own_mapping_the_tip_is_where_the_model_says(self):
+        p = M.predict_tip(board=M.SAM)
+        sam = p["predictions"][0]
+        self.assertEqual((sam["reach"], sam["height"]), (p["model"]["reach"], p["model"]["height"]))
+
+    def test_the_predictions_follow_the_boards_current_range(self):
+        on_earlier = M.predict_tip(board=M.EARLIER_GUESS)
+        self.assertEqual(on_earlier["predictions"][1]["reach"], on_earlier["model"]["reach"])        # now the earlier guess is the one that matches the model
+
+    def test_a_joint_that_runs_the_other_way_is_handled(self):
+        a = M.predict_tip(inverted=[False] * 4)
+        b = M.predict_tip(inverted=[True, False, False, False])
+        self.assertEqual(a["predictions"][0]["tip"], b["predictions"][0]["tip"])         # right range, right inversion: still where the model says
+        self.assertEqual(a["predictions"][1]["height"], b["predictions"][1]["height"])   # the base joint does not change height
+
+    def test_the_verdict_survives_a_sloppy_ruler(self):
+        p = M.predict_tip()
+        for dx, dy in ((0, 0), (12, -8), (-15, 15), (20, 10)):                          # readings a centimetre or two out
+            j = M.judge(p["predictions"][0]["reach"] + dx, p["predictions"][0]["height"] + dy, p)
+            self.assertEqual((j["verdict"], j["lo"], j["hi"]), ("clear", 500.0, 2400.0))
+            j = M.judge(p["predictions"][1]["reach"] + dx, p["predictions"][1]["height"] + dy, p)
+            self.assertEqual((j["verdict"], j["lo"], j["hi"]), ("clear", 1000.0, 2000.0))
+
+    def test_halfway_between_is_unclear_and_somewhere_else_is_neither(self):
+        p = M.predict_tip()
+        a, b = p["predictions"]
+        mid = M.judge((a["reach"] + b["reach"]) / 2, (a["height"] + b["height"]) / 2, p)
+        self.assertEqual(mid["verdict"], "unclear")
+        far = M.judge(60, 40, p)
+        self.assertEqual(far["verdict"], "neither")
+
+    def test_the_hub_gives_the_same_answer_and_refuses_the_move_when_not_ready(self):
+        import hub as H
+        h = H.Hub("http://127.0.0.1:1")
+        h.link = linked()
+        out = h.mirror_action({"action": "predict"})
+        self.assertEqual(out["prediction"]["board"], [500.0, 2400.0])                    # the board has not said otherwise
+        self.assertGreater(out["prediction"]["separation_mm"], 80)
+        judged = h.mirror_action({"action": "judge", "reach": 104, "height": 172})
+        self.assertEqual((judged["judge"]["verdict"], judged["judge"]["lo"]), ("clear", 1000.0))
+        with self.assertRaises(ValueError):
+            h.mirror_action({"action": "test_pose"})                                     # mirror off and SAFE: no move
+        h.link.board_pulse = (1000.0, 2000.0)                                            # once the board reports another range, the predictions follow it
+        self.assertEqual(h.mirror_action({"action": "predict"})["prediction"]["board"], [1000.0, 2000.0])
+
+
 if __name__ == "__main__":
     unittest.main()

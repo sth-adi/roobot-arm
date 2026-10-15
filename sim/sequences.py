@@ -13,6 +13,7 @@ FORMAT = "roobot-arm-sequence"
 VERSION = 2
 MAX_POSES = 20
 ACTIONS = (None, "grab", "release")
+SPEED_RANGE = (1.0, 180.0)      # optional per-pose joint speed limit, deg/s, for the move INTO that pose (set by the tuner)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")
 
 
@@ -64,11 +65,21 @@ def validate(pkt):
         act = it.get("action")
         if act not in ACTIONS:
             raise ValueError("action must be grab, release or null")
-        poses.append({"x": v[0], "y": v[1], "z": v[2], "angle": v[3], "action": act})
+        pose = {"x": v[0], "y": v[1], "z": v[2], "angle": v[3], "action": act}
+        sp = it.get("speed")
+        if sp is not None:
+            try:
+                sp = float(sp)
+            except (TypeError, ValueError):
+                raise ValueError("speed must be a number of degrees per second")
+            if not (SPEED_RANGE[0] <= sp <= SPEED_RANGE[1]):
+                raise ValueError("speed must be %g-%g deg/s" % SPEED_RANGE)
+            pose["speed"] = round(sp, 1)
+        poses.append(pose)
     name = str(pkt.get("name") or "")
     if name and not NAME_RE.match(name):
         raise ValueError("name: letters, digits, - and _ only")
-    return {"format": FORMAT, "version": VERSION, "name": name, "description": str(pkt.get("description") or "")[:400],
+    return {"format": FORMAT, "version": 3 if any("speed" in p for p in poses) else VERSION, "name": name, "description": str(pkt.get("description") or "")[:400],
             "requires": dict(pkt.get("requires") or {}), "ends": dict(pkt.get("ends") or {}), "count": len(poses), "poses": poses}
 
 
@@ -76,10 +87,33 @@ def reverse(seq):
     """The opposite task: poses backwards, grab and release swapped, start and end conditions swapped."""
     swap = {"grab": "release", "release": "grab", None: None}
     rev = [dict(p, action=swap[p["action"]]) for p in reversed(seq["poses"])]
+    sp = speeds_of(seq)                              # a speed belongs to the move INTO a pose, so going back it belongs to the move out of the same pose
+    n = len(sp)
+    for j, p in enumerate(rev):
+        p.pop("speed", None)
+        if j >= 1 and sp[n - j] is not None:
+            p["speed"] = sp[n - j]
     base = seq.get("name") or ""
     name = base[:-8] if base.endswith("_reverse") else (base + "_reverse" if base else "")
     return dict(seq, name=name, poses=rev, requires=dict(seq.get("ends") or {}), ends=dict(seq.get("requires") or {}),
                 description=("Reverse of: " + seq["description"]) if seq.get("description") else "")
+
+
+def speeds_of(seq):
+    """Per pose: the joint speed limit (deg/s) for the move into it, or None for the default damper."""
+    return [p.get("speed") for p in seq["poses"]]
+
+
+def with_speeds(seq, speeds):
+    """A copy of seq with these per-pose speeds (None or a missing entry clears that pose's speed)."""
+    poses = []
+    for i, p in enumerate(seq["poses"]):
+        q = {k: v for k, v in p.items() if k != "speed"}
+        sp = speeds[i] if speeds and i < len(speeds) else None
+        if sp is not None:
+            q["speed"] = round(float(sp), 1)
+        poses.append(q)
+    return validate(dict(seq, poses=poses))
 
 
 def to_saved(seq):

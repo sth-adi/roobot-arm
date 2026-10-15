@@ -916,6 +916,20 @@ class Hub:
 
     task = {"state": "idle"}
     last_run = None
+    chat = []                                       # the conversation shown on the Chat page: user / ai / robot / error messages
+    _chat_seq = 0
+
+    def chat_add(self, role, text, **extra):
+        """Append one message; ids only grow, so a page can ask for everything after the last id it has."""
+        Hub._chat_seq += 1
+        m = {"id": Hub._chat_seq, "t": round(time.time(), 2), "role": role, "text": str(text), **extra}
+        self.chat.append(m)
+        del self.chat[:-300]
+        return m
+
+    def chat_since(self, since=0):
+        return {"messages": [m for m in self.chat if m["id"] > since], "state": self.task.get("state", "idle"),
+                "ai": "groq" if AGENT.api_key() else "keywords"}
 
     def ask(self, request):
         """Start a task from plain language: make sure the arm is at home grip, pick a sequence, run it once."""
@@ -925,13 +939,16 @@ class Hub:
         if self.task.get("state") in ("working", "running"):
             raise RuntimeError("a task is already running")
         self.task = {"state": "working", "request": request, "log": [], "error": None, "warning": None}
+        self.chat_add("user", request)
         threading.Thread(target=self._do_task, args=(request,), daemon=True).start()
 
-    def _tlog(self, msg, state=None):
+    def _tlog(self, msg, state=None, chat=True):
         self.task["log"].append(msg)
         if state:
             self.task["state"] = state
         self.log("agent", msg)
+        if chat:
+            self.chat_add("robot", msg, state=self.task.get("state"))
 
     def _wait(self, cond, timeout):
         end = time.time() + timeout
@@ -944,21 +961,25 @@ class Hub:
     def _fail(self, e):
         """Stop the task with a structured error the dashboards can show: {code, title, detail, hint}."""
         self.task["error"] = e
-        self._tlog("%s%s" % (e["title"], (". " + e["hint"]) if e.get("hint") else ""), "failed")
+        self._tlog("%s%s" % (e["title"], (". " + e["hint"]) if e.get("hint") else ""), "failed", chat=False)
+        self.chat_add("error", e["title"], detail=e.get("detail"), hint=e.get("hint"), code=e.get("code"), state="failed")
 
     def _do_task(self, request):
         try:
             st = self.state_packet()
             library = LIBRARY.list()
+            self.chat_add("system", "Asking the AI: %d sequences in the library, arm state %s" % (len(library), json.dumps({k: st.get(k) for k in ("at_home", "holding", "last_run")})))
             plan = AGENT.choose(request, library, st)
             if plan.get("ai_error"):
                 self.task["warning"] = "Groq was not used: " + plan["ai_error"]
                 self._tlog("Groq was not used: " + plan["ai_error"])
+            self.chat_add("ai", plan.get("reason") or "", by=plan.get("by"), model=plan.get("model"), sequence=plan.get("sequence"), reverse=plan.get("reverse"),
+                          raw=plan.get("raw"), ms=plan.get("ms"), tokens=plan.get("tokens"))
             if not plan["sequence"]:
                 return self._fail(PRE.no_sequence(request, plan))
             seq = LIBRARY.get(plan["sequence"])
             self.task["plan"] = plan
-            self._tlog("Chose %s%s (%s, %s)" % (plan["sequence"], " reversed" if plan["reverse"] else "", plan["by"], plan["reason"]))
+            self._tlog("Chose %s%s (%s, %s)" % (plan["sequence"], " reversed" if plan["reverse"] else "", plan["by"], plan["reason"]), chat=False)
             if plan["reverse"]:
                 seq = SEQ.reverse(seq)
             problems = PRE.check(request, plan, seq, st)
@@ -987,7 +1008,9 @@ class Hub:
             if bad:
                 return self._fail(bad)
             self.last_run = {"name": plan["sequence"], "reverse": plan["reverse"]}
-            self._tlog("Done", "done")
+            fin = self.state_packet()
+            self._tlog("Done", "done", chat=False)
+            self.chat_add("robot", "Done", state="done", result={"at_home": fin.get("at_home"), "holding": fin.get("holding"), "magnet": fin.get("magnet"), "keys": fin.get("keys")})
         except Exception as e:                       # a task must never kill the hub
             self._fail(PRE.err("INTERNAL", "Something went wrong inside the hub", str(e)[:200], "Check the hub console."))
 
@@ -1186,6 +1209,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, HUB.current_sequence())
         if path == "/api/state":
             return self._json(200, HUB.state_packet())
+        if path == "/api/chat":
+            q = urllib.parse.parse_qs(self.path.partition("?")[2])
+            try:
+                since = int((q.get("since") or ["0"])[0])
+            except ValueError:
+                since = 0
+            return self._json(200, HUB.chat_since(since))
         if path == "/api/sequences":
             return self._json(200, {"sequences": LIBRARY.list()})
         if path.startswith("/api/sequences/"):

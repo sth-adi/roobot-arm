@@ -826,6 +826,56 @@ function mountAI(root) {
 }
 
 /* ===================================================================== pages: project */
+function mountChat(root) {
+  document.body.classList.add("fill");
+  root.innerHTML = `
+  <div class="chat">
+    <div class="chat-bar"><span id="ch-ai" class="st idle">AI</span><span id="ch-st" class="st idle">idle</span><span class="muted">Every message between you, the AI and the arm is shown here, including the AI's raw reply.</span></div>
+    <div id="ch-log" class="chat-log" role="log" aria-live="polite"></div>
+    <form id="ch-form" class="chat-in"><input id="ch-text" autocomplete="off" maxlength="500" placeholder="Tell the arm what to do, e.g. put the key from box 2 on the tray" aria-label="Message"><button class="btn" id="ch-send" type="submit">Send</button></form>
+  </div>`;
+  const $r = (q) => root.querySelector(q), log = $r("#ch-log");
+  let since = 0, dead = false;
+  const kv = (o) => Object.entries(o || {}).map(([k, v]) => `<span class="chip">${esc(k)}: <b>${esc(typeof v === "object" ? JSON.stringify(v) : v)}</b></span>`).join("");
+  const bubble = (m) => {
+    const t = new Date(m.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    let who = { user: "You", ai: "AI", robot: "Arm", error: "Error", system: "Hub" }[m.role] || m.role, body = "";
+    if (m.role === "ai") {
+      const pick = m.sequence ? `Running <b class="mono">${esc(m.sequence)}</b>${m.reverse ? " <b>reversed</b>" : ""}` : "No sequence fits that request";
+      body = `<div>${pick}</div>${m.text ? `<div class="muted">${esc(m.text)}</div>` : ""}<div class="meta">${kv({ by: m.by, model: m.model, ms: m.ms, tokens: m.tokens })}</div>`
+        + (m.raw ? `<details><summary>Raw AI reply</summary><pre class="mono">${esc(m.raw)}</pre></details>` : "");
+    } else if (m.role === "error") {
+      body = `<b>${esc(m.text)}</b>${m.detail ? `<div>${esc(m.detail)}</div>` : ""}${m.hint ? `<div class="muted">${esc(m.hint)}</div>` : ""}${m.code ? `<div class="muted mono">${esc(m.code)}</div>` : ""}`;
+    } else {
+      body = `<div>${esc(m.text)}</div>`;
+      if (m.result) body += `<div class="meta">${kv(m.result)}</div>`;
+    }
+    return `<div class="msg ${m.role}"><div class="who">${who}<span class="muted mono">${t}</span></div>${body}</div>`;
+  };
+  const poll = async () => {
+    if (dead || !document.body.contains(log)) return;
+    try {
+      const j = await (await fetch("/api/chat?since=" + since)).json();
+      const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+      if (j.messages.length) { if (!since) log.innerHTML = ""; log.insertAdjacentHTML("beforeend", j.messages.map(bubble).join("")); since = j.messages[j.messages.length - 1].id; if (stick) log.scrollTop = log.scrollHeight; }
+      else if (!since && !log.children.length) log.innerHTML = '<div class="empty muted">No messages yet. Ask the arm to do something below.</div>';
+      const ai = $r("#ch-ai"), st = $r("#ch-st"), busy = j.state === "working" || j.state === "running";
+      ai.className = "st " + (j.ai === "groq" ? "ok" : "bad"); ai.textContent = j.ai === "groq" ? "AI: Groq" : "AI: keywords only (no GROQ_API_KEY in .env)";
+      st.className = "st " + (busy ? "run" : j.state === "failed" ? "bad" : j.state === "done" ? "ok" : "idle"); st.textContent = j.state;
+      $r("#ch-send").disabled = busy;
+    } catch (e) { /* hub not reachable: try again */ }
+    setTimeout(poll, 800);
+  };
+  $r("#ch-form").addEventListener("submit", async (e) => {
+    e.preventDefault(); const inp = $r("#ch-text"), t = inp.value.trim(); if (!t) return;
+    const r = await api("/api/ask", { request: t });
+    if (!r.ok) return toast(r.error || "The hub is not reachable", "bad");
+    inp.value = "";
+  });
+  poll();
+  return { destroy() { dead = true; } };
+}
+
 function mountProject(root) {
   root.innerHTML = `<div id="p-body"><div class="skel" style="height:90px"></div></div>`;
   return {
@@ -1278,6 +1328,7 @@ function mountArm(root) {
 
 const PAGES = [
   { id: "arm", group: "", title: "Robot", sub: "The arm, live", icon: "robot", mount: mountArm },
+  { id: "chat", group: "", title: "Chat", sub: "Talk to the arm: what you asked, what the AI answered, what the arm did", icon: "chat", mount: mountChat },
   { id: "overview", group: "Monitor", title: "Overview", sub: "Everything at a glance", icon: "squares-four", mount: mountOverview },
   { id: "control", group: "", title: "Control", sub: "Drive from the browser and watch the virtual arm", icon: "game-controller", mount: mountControl },
   { id: "packets", group: "", title: "Packets", sub: "Every controller packet, exactly as sent", icon: "pulse", mount: mountPackets },

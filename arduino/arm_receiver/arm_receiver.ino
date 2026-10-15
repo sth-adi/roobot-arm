@@ -131,6 +131,12 @@ uint8_t jointMap[4] = {3, 2, 1, 0};   // joint 1..4 -> GPIO 32, 27, 26, 25: how 
 bool posMode = false;
 float posGoalUs[4] = {1500, 1500, 1500, 1500};   // goal pulse per PWM channel
 
+// ---- Go home in jog mode: B walks every output back to centre (1500 us = 90 degrees, the same home the hub's virtual arm uses) ----
+// It runs at the jog speed setting (!rate / !live), never above POS_MAX_DEG_S. Any stick movement, or input going stale, cancels it
+// and the outputs hold where they are. (In mirror mode the hub does the homing, because the virtual arm homes and the board follows.)
+bool homing = false;
+bool prevB = false;
+
 uint32_t usToDuty(uint16_t us) {
   return (uint32_t)us * ((1UL << PWM_BITS) - 1) / (1000000UL / PWM_FREQ_HZ);
 }
@@ -173,12 +179,19 @@ void tickPwm() {
   float usPerDeg = (PULSE_MAX_US - PULSE_MIN_US) / rangeDeg;
   float degPerS = maxRateDegS > 0 ? maxRateDegS : UNLIMITED_JOG_DEG_S;
   float step = degPerS * usPerDeg * (dtMs / 1000.0f);  // us moved at full stick this tick
-  if (posMode) {                                       // mirror: walk each channel toward the hub's goal, never faster than POS_MAX_DEG_S
-    float maxStep = POS_MAX_DEG_S * usPerDeg * (dtMs / 1000.0f);
+  if (posMode || homing) {                             // mirror / go home: walk each channel toward its goal, never faster than the cap
+    float capDegS = posMode ? POS_MAX_DEG_S : min(POS_MAX_DEG_S, degPerS);      // mirror: the hub sets the pace; homing: the jog speed setting
+    float maxStep = capDegS * usPerDeg * (dtMs / 1000.0f);
+    float farthest = 0;
     for (int n = 0; n < 4; n++) {
       curUs[n] += constrain(posGoalUs[n] - curUs[n], -maxStep, maxStep);
       tgtUs[n] = curUs[n];
+      farthest = max(farthest, fabsf(posGoalUs[n] - curUs[n]));
       ledcWrite(PWM_PINS[n], (uint32_t)(curUs[n] * ((1UL << PWM_BITS) - 1) / (1000000.0f / PWM_FREQ_HZ)));
+    }
+    if (homing && farthest < 1.0f) {
+      homing = false;
+      Serial.println("HOME: reached centre");
     }
     return;
   }
@@ -199,6 +212,17 @@ void setupPwm() {
 // Called only when the input changes: sets the stick VELOCITY commands. tickPwm() integrates
 // them into position, which then holds when the sticks return to 0.
 void applyToArm(const ArmInput &i, bool log) {
+  bool stickMoved = fabsf(i.lx) > 0.05f || fabsf(i.ly) > 0.05f || fabsf(i.rx) > 0.05f || fabsf(i.ry) > 0.05f;
+  if (i.b && !prevB && !posMode) {                     // B pressed: go home
+    for (int n = 0; n < 4; n++) posGoalUs[n] = PULSE_MID_US;
+    homing = true;
+    Serial.println("HOME: B pressed, moving every output to centre (1500 us)");
+  } else if (homing && stickMoved) {                   // a stick takes over from the homing move
+    homing = false;
+    for (int n = 0; n < 4; n++) tgtUs[n] = curUs[n];
+    Serial.println("HOME: cancelled by a stick");
+  }
+  prevB = i.b;
   axisCmd[0] = constrain(i.lx, -1.0f, 1.0f);
   axisCmd[1] = constrain(-i.ly, -1.0f, 1.0f);         // Y inverted: stick up = raise the pulse
   axisCmd[2] = constrain(i.rx, -1.0f, 1.0f);
@@ -254,6 +278,10 @@ void applyInput(bool ok, ArmInput in, uint32_t count) {
       applyToArm(in, log);
     } else {                                           // fail-safe: STOP moving, keep position
       holding = true;
+      if (homing) {
+        homing = false;
+        for (int n = 0; n < 4; n++) tgtUs[n] = curUs[n];
+      }
       for (int n = 0; n < 4; n++) axisCmd[n] = 0;
       if (log) Serial.println("HOLD no valid input: motion stopped, position kept");
     }

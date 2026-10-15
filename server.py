@@ -20,9 +20,10 @@ Arm side channel (same endpoints as the UWE-RArm backend, so its firmware and th
   GET  /mode         "Mode" response header (env ARM_MODE, default Normal); the firmware enters training when it is Training
 
 Sequences and arm state (our firmware; the stock firmware never asks for them):
-  POST /sequence   {"poses": [{"x","y","z","angle","action": null|"grab"|"release"}, ...]} (<= 20 poses; an empty list stops a run)
+  POST /sequence   {"poses": [{"x","y","z","angle","action": null|"grab"|"release", "speed": deg/s (optional)}, ...]} (<= 20 poses; an empty list stops a run)
                    queues ONE sequence and returns {"id": n}. The next /controller packet carries "seqId": n; the firmware then GETs it.
-  GET  /sequence   {"id": n, "poses": [[x, y, z, angle, action], ...]} with action 0 none, 1 grab (magnet on), 2 release (magnet off)
+  GET  /sequence   {"id": n, "poses": [[x, y, z, angle, action, speed], ...]} with action 0 none, 1 grab (magnet on), 2 release (magnet off);
+                   speed is the joint speed limit (deg/s) for the move into that pose, 0 = the normal limit (firmware that predates it reads five numbers and ignores it)
   POST /armstate   the firmware's own report: {"x","y","z","angle","magnet","mode","step","saved","seqId","seqDone","atHome"}
   GET  /armstate   the latest report plus its age in seconds
 
@@ -157,11 +158,12 @@ def _valid_sequence(d):
         try:
             v = [float(p[k]) for k in ("x", "y", "z", "angle")]
             act = ACTION_CODES[p.get("action")]
+            speed = float(p.get("speed") or 0.0)         # optional joint speed limit for the move into this pose, deg/s; 0 = the normal limit
         except (KeyError, TypeError, ValueError, AttributeError):
             return None
-        if not all(abs(c) < 1000 and c == c for c in v):
+        if not all(abs(c) < 1000 and c == c for c in v) or not (0.0 <= speed < 1000.0):
             return None
-        out.append(v + [act])
+        out.append(v + [act, round(speed, 1)])
     return out
 
 

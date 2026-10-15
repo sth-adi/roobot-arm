@@ -95,5 +95,57 @@ class TunerTest(unittest.TestCase):
             T.clean_limits({"slip_mm_s": 1})
 
 
+class FeedbackTest(unittest.TestCase):
+    SEEN = {"time": 9.0, "hold_mm_s": 150.0, "land_mm_s": 100.0}
+
+    def test_scaled_speeds_stay_inside_the_firmware_range(self):
+        self.assertEqual(T.scaled([30, 80, 4], 0.5), [15.0, 40.0, 3.0])
+        self.assertTrue(all(3.0 <= v <= 60.0 for v in T.scaled([1, 200, 30], 1.0)))
+        self.assertEqual(T.SPEED_MAX, 60.0)                      # the firmware's MaxJointDegPerSecondCap
+
+    def test_a_dropped_key_lowers_only_the_slip_limit(self):
+        lim, note = T.calibrate(T.DEFAULT_LIMITS, "dropped", self.SEEN)
+        self.assertEqual(lim["slip_mm_s"], 135.0)               # 0.9 x the 150 mm/s that was seen to drop it
+        self.assertEqual((lim["knock_mm_s"], lim["margin"]), (110.0, 0.85))
+        self.assertIn("135", note)
+
+    def test_a_missed_grab_lowers_only_the_knock_limit(self):
+        lim, _ = T.calibrate(T.DEFAULT_LIMITS, "missed", self.SEEN)
+        self.assertEqual((lim["knock_mm_s"], lim["slip_mm_s"]), (90.0, 220.0))
+
+    def test_rough_tightens_the_margin_and_ok_changes_nothing(self):
+        self.assertAlmostEqual(T.calibrate(T.DEFAULT_LIMITS, "rough", self.SEEN)[0]["margin"], 0.765)
+        self.assertEqual(T.calibrate(T.DEFAULT_LIMITS, "ok", self.SEEN)[0], T.clean_limits(T.DEFAULT_LIMITS))
+        with self.assertRaises(ValueError):
+            T.calibrate(T.DEFAULT_LIMITS, "great", self.SEEN)
+
+    def test_a_limit_never_goes_below_its_floor_or_up(self):
+        lim, _ = T.calibrate({"slip_mm_s": 50.0}, "dropped", {"hold_mm_s": 10.0, "land_mm_s": 0, "time": 1})
+        self.assertEqual(lim["slip_mm_s"], T.SLIP_FLOOR)
+        lim, _ = T.calibrate({"slip_mm_s": 100.0}, "dropped", {"hold_mm_s": 400.0, "land_mm_s": 0, "time": 1})
+        self.assertEqual(lim["slip_mm_s"], 100.0)               # a failure at a higher speed than the limit teaches nothing new
+
+    def test_the_ladder_opens_one_rung_at_a_time_and_resets_for_new_speeds(self):
+        import tempfile
+        cal = T.Calibration(tempfile.mkdtemp())
+        tuned = [30.0, 50.0, 40.0]
+        self.assertEqual(cal.allowed_scale("seq", tuned), 0.5)
+        cal.record("seq", tuned, 0.5, "ok", self.SEEN)
+        self.assertEqual(cal.allowed_scale("seq", tuned), 0.75)
+        cal.record("seq", tuned, 0.75, "dropped", self.SEEN)     # a failure does not open the next rung
+        self.assertEqual(cal.allowed_scale("seq", tuned), 0.75)
+        cal.record("seq", tuned, 0.75, "ok", self.SEEN)
+        self.assertEqual(cal.allowed_scale("seq", tuned), 1.0)
+        self.assertEqual(cal.allowed_scale("seq", [30.0, 45.0, 40.0]), 0.5)    # new speeds start again from the bottom
+        self.assertEqual(cal.load("seq")["limits"]["slip_mm_s"], 135.0)        # and the dropped verdict was kept
+        self.assertEqual(len(cal.load("seq")["trials"]), 3)
+
+    def test_observed_reports_what_the_speeds_ask_of_the_arm(self):
+        slow = T.observed(SEQ, T.scaled([40.0] * N, 0.5))
+        fast = T.observed(SEQ, T.scaled([40.0] * N, 1.0))
+        self.assertGreater(fast["hold_mm_s"], slow["hold_mm_s"])
+        self.assertGreater(slow["time"], fast["time"])
+
+
 if __name__ == "__main__":
     unittest.main()

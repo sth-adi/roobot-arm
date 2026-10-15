@@ -609,9 +609,9 @@ class Hub:
                     self.log(name, "stopped")
                 if action in ("start", "restart"):
                     flags = (subprocess.CREATE_NEW_PROCESS_GROUP if IS_WIN else 0)
-                    p = subprocess.Popen([sys.executable, str(ROOT / "controller_gui.py"), "--url", self.server + "/input"],
+                    p = subprocess.Popen([sys.executable, str(ROOT / "controller_gui.py"), "--url", self.server + "/input", "--no-serial"],
                                          cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
-                    self.log(name, f"started (pid {p.pid}). It holds the COM port while open, so the USB link here goes busy.")
+                    self.log(name, f"started (pid {p.pid}), sending sticks to the server only: the USB port stays with this hub, which sends to the board while ARMED (jog) or in mirror mode.")
         finally:
             self.cache["procs"] = self.scan_processes() or self.cache["procs"]
             time.sleep(0.5)

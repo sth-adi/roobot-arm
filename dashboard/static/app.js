@@ -974,7 +974,7 @@ function mountChat(root) {
   <div class="chat">
     <div class="chat-bar"><span id="ch-ai" class="st idle">AI</span><span id="ch-st" class="st idle">idle</span><span class="muted">Every message between you, the AI and the arm is shown here, including the AI's raw reply.</span></div>
     <div id="ch-log" class="chat-log" role="log" aria-live="polite"></div>
-    <form id="ch-form" class="chat-in"><input id="ch-text" autocomplete="off" maxlength="500" placeholder="Tell the arm what to do, e.g. put the key from box 2 on the tray" aria-label="Message"><button class="btn" id="ch-send" type="submit">Send</button></form>
+    <form id="ch-form" class="chat-in"><input id="ch-text" autocomplete="off" maxlength="500" placeholder="Tell the arm what to do, e.g. put the key from box 2 on the tray" aria-label="Message"><button class="btn" id="ch-mic" type="button" hidden title="Speak a request: it is typed into the box for you to check, then Send">Mic</button><button class="btn" id="ch-send" type="submit">Send</button></form>
   </div>`;
   const $r = (q) => root.querySelector(q), log = $r("#ch-log");
   let since = 0, dead = false;
@@ -1012,6 +1012,7 @@ function mountChat(root) {
       ai.className = "st " + (j.ai === "groq" ? "ok" : "bad"); ai.textContent = j.ai === "groq" ? "AI: Groq" : "AI: keywords only (no GROQ_API_KEY in .env)";
       st.className = "st " + (busy ? "run" : j.state === "failed" ? "bad" : j.state === "done" ? "ok" : "idle"); st.textContent = j.state;
       $r("#ch-send").disabled = busy;
+      $r("#ch-mic").hidden = !j.voice;
     } catch (e) { /* hub not reachable: try again */ }
     setTimeout(poll, 800);
   };
@@ -1021,8 +1022,51 @@ function mountChat(root) {
     if (!r.ok) return toast(r.error || "The hub is not reachable", "bad");
     inp.value = "";
   });
+  /* Voice: record from the microphone, make 16 kHz mono 16-bit audio here, and let the hub turn it into text with a local Whisper model.
+     The text only lands in the box. A plain "stop" is sent at once; anything else waits for Send, so a misheard word cannot move the arm. */
+  const mic = $r("#ch-mic"), inp = $r("#ch-text");
+  let rec = null;
+  const sendClip = async (chunks, rate) => {
+    const n = chunks.reduce((a, c) => a + c.length, 0), all = new Float32Array(n);
+    let o = 0; for (const c of chunks) { all.set(c, o); o += c.length; }
+    const ratio = rate / 16000, m = Math.floor(n / ratio), pcm = new Int16Array(m);
+    for (let i = 0; i < m; i++) {
+      const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio)); let s = 0;
+      for (let k = a; k < b && k < n; k++) s += all[k];
+      const v = Math.max(-1, Math.min(1, s / (b - a))); pcm[i] = v < 0 ? v * 32768 : v * 32767;
+    }
+    const ph = inp.placeholder; inp.placeholder = "Reading the recording (the first time this loads the speech model and can take a minute)..."; mic.disabled = true;
+    try {
+      const r = await fetch("/api/transcribe", { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Hub": "1" }, body: pcm.buffer });
+      const j = await r.json();
+      if (!r.ok) return toast(j.error || "Could not read that recording", "bad");
+      if (!j.text) return toast("Heard nothing. Try again, closer to the microphone.", "bad");
+      inp.value = j.text;
+      if (j.stop) $r("#ch-form").requestSubmit();
+      else { inp.focus(); toast("Heard: " + j.text + "  Press Send to run it, or edit it first."); }
+    } catch (e) { toast("The hub is not reachable", "bad"); }
+    finally { inp.placeholder = ph; mic.disabled = false; }
+  };
+  mic.addEventListener("click", async () => {
+    if (rec) return rec.finish();
+    if (!navigator.mediaDevices || !window.isSecureContext) return toast("The microphone only works at http://localhost:8765 on this PC; browsers block it on other addresses without HTTPS.", "bad");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+      const ctx = new (window.AudioContext || window.webkitAudioContext)(), src = ctx.createMediaStreamSource(stream), proc = ctx.createScriptProcessor(4096, 1, 1), chunks = [];
+      proc.onaudioprocess = (ev) => chunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+      src.connect(proc); proc.connect(ctx.destination);
+      const timer = setTimeout(() => rec && rec.finish(), 12000);
+      rec = { finish: () => {
+        clearTimeout(timer); rec = null; mic.classList.remove("rec"); mic.textContent = "Mic";
+        proc.disconnect(); src.disconnect(); stream.getTracks().forEach((t) => t.stop());
+        const rate = ctx.sampleRate; ctx.close();
+        return sendClip(chunks, rate);
+      } };
+      mic.classList.add("rec"); mic.textContent = "Stop mic";
+    } catch (e) { toast("Microphone: " + (e.message || e), "bad"); }
+  });
   poll();
-  return { destroy() { dead = true; } };
+  return { destroy() { dead = true; if (rec) rec.finish(); } };
 }
 
 function mountTune(root) {

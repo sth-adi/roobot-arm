@@ -350,3 +350,4 @@ body.fill #main { max-width: none; padding: 0; }
 .chat .empty { margin: auto; }
 .chat-in { display: flex; gap: 8px; padding: 10px 0 14px; }
 .chat-in input { flex: 1; min-width: 0; }
+.chat-in .btn.rec { background: var(--bad); color: #fff; }

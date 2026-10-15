@@ -53,6 +53,7 @@ import sim.tuner as TUNER  # noqa: E402
 import sim.servo_map as SERVOMAP  # noqa: E402
 import agent as AGENT  # noqa: E402
 import preflight as PRE  # noqa: E402
+import voice as VOICE  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
 CALIB = TUNER.Calibration(str(ROOT / "tuning"))        # limits learned from real-arm trials, per sequence (local to this PC)
 
@@ -1152,7 +1153,7 @@ class Hub:
 
     def chat_since(self, since=0):
         return {"messages": [m for m in self.chat if m["id"] > since], "state": self.task.get("state", "idle"),
-                "ai": "groq" if AGENT.api_key() else "keywords"}
+                "ai": "groq" if AGENT.api_key() else "keywords", "voice": VOICE.available()}
 
     def ask(self, request):
         """Start a task from plain language: make sure the arm is at home grip, pick a sequence, run it once."""
@@ -1794,9 +1795,30 @@ class Handler(BaseHTTPRequestHandler):
             HUB.remove_client(q)
 
     # ---- POST ----
+    def _transcribe(self):
+        """A recording from the Chat page's microphone button (raw 16 kHz mono 16-bit PCM) -> {"text", "stop", "ms"}. The text is only shown; asking is a separate step."""
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0 or n > VOICE.MAX_BYTES:
+            return self._json(400, {"error": "no recording, or one longer than %d seconds" % VOICE.MAX_SECONDS})
+        raw = self.rfile.read(n)
+        if not VOICE.available():
+            return self._json(501, {"error": "speech to text is not installed: pip install faster-whisper"})
+        try:
+            return self._json(200, VOICE.transcribe(raw))
+        except VOICE.VoiceError as e:
+            return self._json(400, {"error": str(e)})
+        except Exception as e:                         # model download failed, out of memory: say so, never take the hub down
+            HUB.log("voice", "transcription failed: %s: %s" % (type(e).__name__, str(e)[:160]))
+            return self._json(500, {"error": "the speech model could not run: %s" % str(e)[:120]})
+
     def do_POST(self):
         if not self._host_ok() or self.headers.get("X-Hub") != "1":
             return self._json(403, {"error": "forbidden"})
+        if self.path.split("?")[0] == "/api/transcribe":
+            return self._transcribe()
         path, d = self.path.split("?")[0], self._body()
         try:
             if path == "/api/arm":

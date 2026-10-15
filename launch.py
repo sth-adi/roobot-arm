@@ -57,9 +57,10 @@ def hub_build(hub_url):
 def hub_phone_url(hub_url):
     try:
         import json
-        return json.loads(urllib.request.urlopen(hub_url + "/api/status", timeout=1.5).read()).get("phone_url")
+        j = json.loads(urllib.request.urlopen(hub_url + "/api/status", timeout=1.5).read())
+        return j.get("phone_url"), j.get("phone_url_https")
     except Exception:
-        return None
+        return None, None
 
 
 def main():
@@ -123,13 +124,16 @@ def main():
                 time.sleep(0.2)
             else:
                 raise SystemExit("the hub did not start")
-        phone = hub_phone_url(hub_url)
+        phone, phone_https = hub_phone_url(hub_url)
         if phone:
-            bar = "=" * (len(phone) + 4)
-            print("\n" + bar + "\n  PHONE LINK (same WiFi):\n  " + phone + "\n" + bar + "\n")
+            shown = ["PHONE LINK (same WiFi):", phone]
+            if phone_https:
+                shown += ["", "PHONE LINK with the microphone (HTTPS: accept the certificate warning once):", phone_https]
+            bar = "=" * (max(len(l) for l in shown) + 4)
+            print("\n" + bar + "\n" + "\n".join("  " + l for l in shown) + "\n" + bar + "\n")
             try:
                 with open(os.path.join(ROOT, "phone_link.txt"), "w") as f:
-                    f.write(phone + "\n")
+                    f.write(phone + "\n" + ((phone_https + "\n") if phone_https else ""))
             except OSError:
                 pass
         if not a.no_open:

@@ -314,6 +314,15 @@ class ArmSim:
             out.append(180 - logical if self.limits[i][0] > self.limits[i][1] else logical)
         return out
 
+    def servo_degrees(self):
+        """servo_commands() without the rounding to whole degrees: what is streamed to a board that mirrors this arm."""
+        out = []
+        for i in range(4):
+            lo, hi = min(self.limits[i]), max(self.limits[i])
+            logical = max(0.0, min(180.0, max(lo, min(hi, math.degrees(self.angles[i])))))
+            out.append(round(180.0 - logical if self.limits[i][0] > self.limits[i][1] else logical, 2))
+        return out
+
     # ---- one control tick ---------------------------------------------------------------------------------------
     def _start_home(self):
         self._goal = self._home_angles()

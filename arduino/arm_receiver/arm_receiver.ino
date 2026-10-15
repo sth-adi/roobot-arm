@@ -121,6 +121,16 @@ float curUs[4]    = {PULSE_MID_US, PULSE_MID_US, PULSE_MID_US, PULSE_MID_US};   
 uint32_t lastSlewMs = 0;
 Preferences prefs;
 
+// ---- Mirror mode: absolute joint positions from the hub ------------------------------
+// The hub's virtual arm works out the inverse kinematics, home (B) and sequences. "@d1,d2,d3,d4,seq" sends its four joint angles
+// (servo degrees 0..180, 90 = centre) and the board follows them. Joint j drives PWM channel jointMap[j] (an index into PWM_PINS).
+// Safety: the pulse stays inside 1000..2000 us like the jog, the board never moves faster than POS_MAX_DEG_S whatever it is told,
+// the arm HOLDS where it is when the frames stop or a "$" stick frame arrives, and WiFi input is ignored while mirroring.
+const float POS_MAX_DEG_S = 60.0f;
+uint8_t jointMap[4] = {3, 2, 1, 0};   // joint 1..4 -> GPIO 32, 27, 26, 25: how the arm is wired for Sam's firmware. !map a,b,c,d changes it (saved)
+bool posMode = false;
+float posGoalUs[4] = {1500, 1500, 1500, 1500};   // goal pulse per PWM channel
+
 uint32_t usToDuty(uint16_t us) {
   return (uint32_t)us * ((1UL << PWM_BITS) - 1) / (1000000UL / PWM_FREQ_HZ);
 }
@@ -129,6 +139,16 @@ void loadSettings() {
   prefs.begin("arm", false);
   maxRateDegS = prefs.getFloat("rate", DEFAULT_MAX_RATE_DEG_S);
   rangeDeg    = prefs.getFloat("range", DEFAULT_RANGE_DEG);
+  String m = prefs.getString("map", "3210");          // joint -> channel digits, e.g. "3210"
+  if (m.length() == 4) {
+    bool ok = true;
+    uint8_t seen = 0;
+    for (int j = 0; j < 4; j++) {
+      int c = m[j] - '0';
+      if (c < 0 || c > 3 || (seen & (1 << c))) ok = false; else seen |= (1 << c);
+    }
+    if (ok) for (int j = 0; j < 4; j++) jointMap[j] = m[j] - '0';
+  }
 }
 
 void showSettings() {
@@ -136,6 +156,9 @@ void showSettings() {
   Serial.printf("settings: max speed at full stick %.2f deg/s%s, range %.0f deg (%.2f us/deg, %.1f us/s)\n",
                 maxRateDegS, maxRateDegS > 0 ? "" : " (no limit: capped at 180 deg/s)", rangeDeg, usPerDeg,
                 (maxRateDegS > 0 ? maxRateDegS : UNLIMITED_JOG_DEG_S) * usPerDeg);
+  Serial.printf("mirror: joint 1..4 -> GPIO %d %d %d %d (map %d%d%d%d), at most %.0f deg/s, %s\n",
+                PWM_PINS[jointMap[0]], PWM_PINS[jointMap[1]], PWM_PINS[jointMap[2]], PWM_PINS[jointMap[3]],
+                jointMap[0], jointMap[1], jointMap[2], jointMap[3], POS_MAX_DEG_S, posMode ? "following the hub" : "off");
 }
 
 // Jog integrator: position += stick * speed * dt, then HOLD. Called every loop pass so the
@@ -150,6 +173,15 @@ void tickPwm() {
   float usPerDeg = (PULSE_MAX_US - PULSE_MIN_US) / rangeDeg;
   float degPerS = maxRateDegS > 0 ? maxRateDegS : UNLIMITED_JOG_DEG_S;
   float step = degPerS * usPerDeg * (dtMs / 1000.0f);  // us moved at full stick this tick
+  if (posMode) {                                       // mirror: walk each channel toward the hub's goal, never faster than POS_MAX_DEG_S
+    float maxStep = POS_MAX_DEG_S * usPerDeg * (dtMs / 1000.0f);
+    for (int n = 0; n < 4; n++) {
+      curUs[n] += constrain(posGoalUs[n] - curUs[n], -maxStep, maxStep);
+      tgtUs[n] = curUs[n];
+      ledcWrite(PWM_PINS[n], (uint32_t)(curUs[n] * ((1UL << PWM_BITS) - 1) / (1000000.0f / PWM_FREQ_HZ)));
+    }
+    return;
+  }
   for (int n = 0; n < 4; n++) {
     tgtUs[n] = constrain(tgtUs[n] + axisCmd[n] * step, (float)PULSE_MIN_US, (float)PULSE_MAX_US);
     curUs[n] = tgtUs[n];
@@ -187,10 +219,21 @@ void handleCommand(const String &s) {
     maxRateDegS = v; prefs.putFloat("rate", v); showSettings();
   } else if (sscanf(s.c_str(), "!range %f", &v) == 1 && v >= 10 && v <= 720) {
     rangeDeg = v; prefs.putFloat("range", v); showSettings();
+  } else if (s.startsWith("!map")) {
+    int a, b, c, d;
+    if (sscanf(s.c_str(), "!map %d,%d,%d,%d", &a, &b, &c, &d) == 4 && a >= 0 && a <= 3 && b >= 0 && b <= 3 && c >= 0 && c <= 3 && d >= 0 && d <= 3
+        && a != b && a != c && a != d && b != c && b != d && c != d) {
+      jointMap[0] = a; jointMap[1] = b; jointMap[2] = c; jointMap[3] = d;
+      char buf[5] = {(char)('0' + a), (char)('0' + b), (char)('0' + c), (char)('0' + d), 0};
+      prefs.putString("map", buf);
+      showSettings();
+    } else {
+      Serial.println("!map needs four different channel numbers 0..3, e.g. !map 3,2,1,0");
+    }
   } else if (s.startsWith("!show")) {
     showSettings();
   } else {
-    Serial.println("commands: !rate <deg/s, 0=unlimited> (saved) | !live <deg/s> (not saved) | !range <deg> | !show");
+    Serial.println("commands: !rate <deg/s, 0=unlimited> (saved) | !live <deg/s> (not saved) | !range <deg> | !map a,b,c,d (joint -> channel, saved) | !show");
   }
 }
 
@@ -232,6 +275,24 @@ String serBuf;
 
 bool serialActive() { return lastSerialMs != 0 && millis() - lastSerialMs < SERIAL_FRESH_MS; }
 
+// Mirror: stop where the arm is now (used when the hub's frames stop or the stick frames take over).
+void holdPos() {
+  for (int n = 0; n < 4; n++) { posGoalUs[n] = curUs[n]; tgtUs[n] = curUs[n]; }
+}
+
+// "@d1,d2,d3,d4,seq": four joint angles in servo degrees. Anything out of range (or not a number) is refused whole.
+bool parsePosLine(const String &s) {
+  if (s.length() < 8 || s[0] != '@') return false;
+  float d[4];
+  if (sscanf(s.c_str() + 1, "%f,%f,%f,%f", &d[0], &d[1], &d[2], &d[3]) != 4) return false;
+  for (int j = 0; j < 4; j++) if (!(d[j] >= 0.0f && d[j] <= 180.0f)) return false;
+  float usPerDeg = (PULSE_MAX_US - PULSE_MIN_US) / rangeDeg;
+  for (int j = 0; j < 4; j++) {
+    posGoalUs[jointMap[j]] = constrain(PULSE_MID_US + (d[j] - 90.0f) * usPerDeg, (float)PULSE_MIN_US, (float)PULSE_MAX_US);
+  }
+  return true;
+}
+
 bool parseSerialLine(const String &s, ArmInput &o, uint32_t &count) {
   if (s.length() < 12 || s[0] != '$') return false;
   float lx, ly, rx, ry, lt, rt;
@@ -259,8 +320,28 @@ void pollSerial() {
       uint32_t count = 0;
       if (serBuf.length() && serBuf[0] == '!') {
         handleCommand(serBuf);
+      } else if (serBuf.length() && serBuf[0] == '@') {
+        if (parsePosLine(serBuf)) {
+          lastSerialMs = millis();
+          if (!posMode) {
+            posMode = true;
+            for (int n = 0; n < 4; n++) axisCmd[n] = 0;
+            Serial.println("mirror: following the hub's joint positions");
+          }
+          static uint32_t lastMirrorLog = 0;
+          if (millis() - lastMirrorLog >= 500) {
+            lastMirrorLog = millis();
+            Serial.printf("MIRROR goal(us) %.0f %.0f %.0f %.0f | pos(us) %.0f %.0f %.0f %.0f\n", posGoalUs[0], posGoalUs[1], posGoalUs[2], posGoalUs[3],
+                          curUs[0], curUs[1], curUs[2], curUs[3]);
+          }
+        }
       } else if (parseSerialLine(serBuf, in, count)) {
         lastSerialMs = millis();
+        if (posMode) {                                  // stick frames take over: stop mirroring and hold
+          posMode = false;
+          holdPos();
+          Serial.println("mirror: off (stick frames), holding position");
+        }
         applyInput(true, in, count);
       }
       serBuf = "";
@@ -271,8 +352,13 @@ void pollSerial() {
   bool active = serialActive();
   if (active && !serialWasActive) Serial.println("serial: direct USB input active");
   if (!active && serialWasActive) {
-    applyInput(false, ArmInput(), 0);                  // link went quiet: centre first
-    Serial.println("serial: input lost, falling back to WiFi");
+    applyInput(false, ArmInput(), 0);                  // link went quiet: stop first
+    if (posMode) {
+      holdPos();                                       // mirroring: hold, and do not let WiFi jog the arm away from the hub's pose
+      Serial.println("serial: frames stopped, holding position");
+    } else {
+      Serial.println("serial: input lost, falling back to WiFi");
+    }
   }
   serialWasActive = active;
   tickPwm();   // runs every loop pass in every mode: keeps the damped motion time-based
@@ -280,7 +366,7 @@ void pollSerial() {
 
 // WiFi paths (stream / HTTPS poll) feed in here; ignored while direct serial is active.
 void handleInput(bool ok, ArmInput in, uint32_t count) {
-  if (serialActive()) return;
+  if (serialActive() || posMode) return;
   applyInput(ok, in, count);
 }
 

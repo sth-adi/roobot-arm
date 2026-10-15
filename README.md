@@ -132,6 +132,17 @@ Because position is integrated on the board, a reset or power cycle returns ever
 
 The built app is committed in `dashboard/static/studio`, so you do not need Node to run it. To change it: `cd dashboard/studio && npm install && npm run build` (or `npm run dev` for live reload against a running hub).
 
+## Driving the real arm: jog or mirror (USB jog sketch)
+
+What the board does depends on the sketch on it (Firmware page shows which one is flashed). The **USB jog sketch** (`arduino/arm_receiver`) has two modes, and neither runs inverse kinematics on the board:
+
+- **Jog** (default): each thumbstick axis moves one joint's pulse directly (`JOG cmd ... pos(us) ...` in the board log). No home button, no sequences.
+- **Mirror** (Arm and board page, off until you switch it on): the hub's virtual arm does everything (sticks, `SticksToXYZ`, inverse kinematics, home on B, sequences and their per-pose speeds) and the hub streams its four joint angles as `@d1,d2,d3,d4,seq` over USB. The board follows them. Only while the output is ARMED. Safety is on the board: pulses stay inside 1000..2000 us, it never moves faster than 60 deg/s, it holds still if frames stop for 0.4 s or a stick frame arrives, and it ignores WiFi input while mirroring.
+
+Before trusting a sequence in mirror mode, use **Nudge joint 1..4** to see which part of the real arm each joint drives, and fix the joint to channel map (`!map 3,2,1,0` = joint 1 on GPIO32, 2 on 27, 3 on 26, 4 on 25, as wired for Sam's firmware) if they differ. Degrees map to pulses through the board's travel setting (`!range`, 1000..2000 us = that many degrees, 90 = centre). The virtual arm's tool length (`DEFAULT_TOOL_MM`, 63) differs from the stock firmware header (53): set it to the real distance from the wrist to the tip.
+
+Our firmware (the sequence, magnet and speed patches) is the other route. It fetches sequences over HTTPS from `HOST`, so that server needs `/sequence` and `/armstate`; the server in `.env` as `FORWARD_URL` may not have them.
+
 ## Dashboard (Arm Hub)
 
 One local web page to watch, control and launch everything. Start it from the repo folder (or double-click `Start Dashboard.bat`):

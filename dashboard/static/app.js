@@ -616,7 +616,14 @@ function mountBoard(root) {
         <button class="btn sm" id="b-show" type="button">Read settings</button></div>
       <div class="term tall" id="b-term" role="log" aria-live="off"></div></section>
     <div>
-      <section class="sec" style="border-top:0"><h2>USB link</h2>
+      <section class="sec" style="border-top:0"><h2>Mirror the virtual arm</h2>
+        <p class="lead">The real arm follows the virtual one: sticks, home (B), sequences and their speeds all run in the virtual arm with its inverse kinematics, and the hub streams the joint angles to the board over USB. It only moves while the output is ARMED, never faster than 60 deg/s, and it holds still if the stream stops. Off until you switch it on.</p>
+        <div class="inline" style="flex-wrap:wrap;gap:8px"><button class="btn" id="m-on" type="button">Mirror: off</button><span class="st idle" id="m-st">off</span></div>
+        <p class="note" style="margin-top:10px">Before trusting a sequence, find out which joint is which: arm the output with mirror on, press a joint, and watch which part of the real arm nudges (about 8 degrees, slowly). Joint 1 is the base, then shoulder, elbow, wrist. If the wrong part moves, change the map below.</p>
+        <div class="inline" style="flex-wrap:wrap;gap:8px" id="m-test">${[1, 2, 3, 4].map((j) => `<button class="btn sm" data-j="${j}" type="button">Nudge joint ${j}</button>`).join("")}</div>
+        <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:10px"><label class="muted">Joint to channel map <input id="m-map" value="3,2,1,0" style="width:90px" aria-label="Joint to channel map"></label><button class="btn sm" id="m-map-set" type="button">Send to board</button></div>
+        <p class="note">Channels are the board's outputs in the order of the pin map below (0 = OUT1 GPIO25 ... 3 = OUT4 GPIO32). The default 3,2,1,0 is how the arm is wired for Sam's firmware: joint 1 on GPIO32, 2 on GPIO27, 3 on GPIO26, 4 on GPIO25. The board remembers it.</p></section>
+      <section class="sec"><h2>USB link</h2>
         <p class="lead">The hub opens the board's COM port to read its log and send settings. Only one program can hold the port.</p>
         <div class="inline"><button class="btn" id="b-usb" type="button"></button><span class="note" id="b-usb-n"></span></div></section>
       <section class="sec"><h2>Outputs</h2><p class="lead">Last positions the board reported. They update when the input changes.</p><div id="b-outs"></div>
@@ -633,6 +640,19 @@ function mountBoard(root) {
   $r("#b-clear").addEventListener("click", () => { term.innerHTML = ""; });
   $r("#b-show").addEventListener("click", async () => { const r = await api("/api/board", { cmd: "!show" }); if (!r.ok) toast("The USB link is not open", "bad"); });
   $r("#b-usb").addEventListener("click", async () => { await api("/api/usb", { enabled: !(S.st && S.st.usb.enabled) }); });
+  $r("#m-on").addEventListener("click", async () => {
+    const on = !(S.st && S.st.mirror && S.st.mirror.on), r = await api("/api/mirror", { action: on ? "on" : "off" });
+    if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
+  });
+  $r("#m-test").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-j]"); if (!b) return;
+    const r = await api("/api/mirror", { action: "test", joint: Number(b.dataset.j) });
+    if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
+  });
+  $r("#m-map-set").addEventListener("click", async () => {
+    const r = await api("/api/mirror", { action: "map", map: $r("#m-map").value.split(",").map((v) => Number(v.trim())) });
+    if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); else toast("Map sent to the board", "ok");
+  });
   $r("#b-outs").innerHTML = OUTS.map((o, i) => `<div class="meter"><span>${o[0]}</span><div class="bar mid"><i id="b-o${i}" style="width:0"></i></div><span class="n" id="b-on${i}">-</span></div>`).join("");
   return {
     board(b) { if (!paused) termAppend(term, b.t, b.line, lineClass(b.line)); },
@@ -650,6 +670,11 @@ function mountBoard(root) {
         suspended: "The port is released while firmware uploads.", off: "The USB link is switched off, so the board is not being read." }[u.phase];
       $r("#b-msg").innerHTML = msg ? `<div class="err" style="margin-bottom:16px">${esc(msg)}</div>` : "";
       $r("#b-usb").textContent = u.enabled ? "Turn link off" : "Turn link on";
+      const mi = st.mirror || {};
+      $r("#m-on").textContent = mi.on ? "Mirror: on (press to switch off)" : "Mirror: off (press to switch on)";
+      $r("#m-st").className = "st " + (mi.active ? "run" : mi.on ? "warn" : "idle");
+      $r("#m-st").textContent = mi.testing ? "nudging joint " + mi.testing : mi.active ? "the real arm is following" : mi.on ? "on, waiting for ARM and the USB board" : "off";
+      root.querySelectorAll("#m-test button").forEach((b) => { b.disabled = !mi.active; });
       $r("#b-usb-n").textContent = u.enabled ? "On: opens the port when a board is plugged in." : "Off: the port is free for other tools.";
       const pos = st.board.pos;
       OUTS.forEach((o, i) => {
@@ -975,10 +1000,11 @@ function mountTune(root) {
     sec.hidden = !(haveSpeeds || tr.name);
     if (sec.hidden) return;
     const tick = (ok, yes, no) => `<div style="padding:3px 0"><span class="st ${ok ? "ok" : "bad"}">${ok ? yes : no}</span></div>`;
-    $r("#t-ready").innerHTML = tick(b.esp, "An ESP32 is reporting", "No ESP32 is reporting (plug it in, or start the emulated one on the Arm and board page)")
-      + tick(b.pose_speeds, "Its firmware reads a speed per pose", "Its firmware does not read a speed per pose: flash Our firmware on the Firmware page")
+    const carried = b.mirror || (b.esp && b.pose_speeds);
+    $r("#t-ready").innerHTML = tick(carried, b.mirror ? "Mirror mode is on: the real arm follows the virtual arm" : "Our firmware is reporting from the board",
+        "Nothing is carrying the run out on a real arm: switch mirror mode on (Arm and board page, board on USB), or run Our firmware")
       + tick(b.armed, "The output is armed", "The output is SAFE: arm it (top right) when you are ready for the arm to move");
-    const ready = b.esp && b.pose_speeds && b.armed && !busy && t.state !== "running", lad = t.ladder || { allowed: 0.5, rungs: [0.5, 0.75, 1] };
+    const ready = carried && b.armed && !busy && t.state !== "running", lad = t.ladder || { allowed: 0.5, rungs: [0.5, 0.75, 1] };
     $r("#t-rungs").innerHTML = lad.rungs.map((r) => `<button class="btn" data-scale="${r}" type="button" ${ready && r <= lad.allowed + 1e-9 ? "" : "disabled"}>Run at ${Math.round(r * 100)}%${r <= lad.allowed + 1e-9 ? "" : " (locked)"}</button>`).join("");
     const names = { homing: "Getting the arm to home grip", running: "Running on the arm", verdict: "Finished: how did it go?", done: "Done", failed: "Did not run", aborted: "Aborted" };
     $r("#t-tstate").innerHTML = tr.state && tr.state !== "idle" ? `<b>${names[tr.state] || tr.state}</b>${tr.scale ? ` at ${Math.round(tr.scale * 100)}%` : ""}${tr.error ? ` <span style="color:var(--bad)">${esc(tr.error)}</span>` : ""}`

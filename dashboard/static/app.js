@@ -1077,6 +1077,97 @@ function mountTune(root) {
   return { destroy() { dead = true; } };
 }
 
+function mountPoints(root) {
+  document.body.classList.add("fill");
+  const JOINTS = ["base", "shoulder", "elbow", "wrist"];
+  root.innerHTML = `<div class="armstage" style="grid-template-columns:minmax(0,1fr) 470px">
+    <section class="viewer" aria-label="Robot viewer">
+      <canvas id="v3d" role="img" aria-label="3D view of the robot arm. Drag to turn, pinch or scroll to zoom, double tap to reset."></canvas>
+      <div class="vhud tl"><div class="st idle" id="p-mode">-</div><div class="mono" id="p-xyz"></div><div class="mono" id="p-ang"></div></div>
+      <div class="vhud tr"><button class="btn sm" type="button" data-view="iso">3D</button><button class="btn sm" type="button" data-view="top">Top</button><button class="btn sm" type="button" data-view="side">Side</button><button class="btn sm" type="button" id="v-clr">Clear path</button></div>
+    </section>
+    <aside class="side" aria-label="Points" style="overflow-y:auto">
+      <p class="lead" style="margin-top:0">Pick two or three places for the tool tip, then move between them and watch the inverse kinematics work: the tip goes in a <b>straight line</b> while the four joints swing in curves to make it happen. The path in the viewer shows it.</p>
+      <div id="p-cards">${[0, 1, 2].map((i) => `
+        <div class="pcard" data-i="${i}" style="border-top:1px solid var(--line);padding:10px 0">
+          <div class="inline" style="gap:10px;align-items:center"><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" class="p-on" aria-label="Include this point"><b class="p-name"></b></label></div>
+          <div class="inline" style="flex-wrap:wrap;gap:8px;margin:6px 0">
+            ${[["x", "x mm"], ["y", "y mm"], ["z", "z mm"], ["angle", "tool angle"]].map(([k, l]) => `<label class="muted" style="font-size:12px">${l}<br><input class="p-f" data-k="${k}" type="number" step="5" style="width:78px"></label>`).join("")}
+          </div>
+          <div class="inline" style="gap:6px;flex-wrap:wrap"><button class="btn sm p-here" type="button">Use current position</button><button class="btn sm p-go" type="button">Go here</button></div>
+          <div class="p-ik" style="margin-top:8px;font-size:12px;line-height:1.5"></div>
+        </div>`).join("")}</div>
+      <div class="inline" style="flex-wrap:wrap;gap:8px;margin:12px 0 6px"><button class="btn" id="p-loop" type="button">Loop between the points</button><button class="btn" id="p-stop" type="button">Stop</button></div>
+      <div class="note" id="p-run" style="min-height:1.4em"></div>
+      <details class="sidesec" style="margin-top:10px"><summary>How to read the numbers</summary>
+        <p class="note">x is sideways, y is out from the base, z is up (mm, from the base). Tool angle is how the tool is tilted. <b>Base, shoulder, elbow and wrist</b> are the four joint angles the arm needs to put the tip there. There are usually two ways to bend the arm to reach a point, <b>elbow up</b> and <b>elbow down</b>; the arm takes the one that is within its joint limits and closest to where it is now. A point is refused when the two links cannot stretch that far, or every solution would push a joint past its limit. "Check" is the solution run forwards again: it should land on the point.</p>
+        <p class="note">Moves between points are the straight-line move from Sam's UWE-RArm repo (peak speed on the Control page). With mirror mode on and the output armed, the real arm follows the virtual one.</p></details>
+    </aside></div>`;
+  const $r = (q) => root.querySelector(q), cards = Array.from(root.querySelectorAll(".pcard"));
+  const viewer = makeViewer($r("#v3d"));
+  let dead = false, last = null;
+  const post = (body) => api("/api/points", body);
+  const apply = (r) => { if (r && r.points) { last = r; render(r); } };
+  const act = async (body) => { const r = await post(body); if (!r.ok && r.error) toast(r.error, "bad"); apply(r); };
+  const ikHtml = (r) => {
+    const fmt = (a) => JOINTS.map((n, i) => `${n} <b>${a[i].toFixed(1)}&deg;</b>`).join(", ");
+    const lines = [];
+    if (r.reachable) {
+      const ch = r.branches.find((b) => b.branch === r.chosen) || r.branches.find((b) => b.ok);
+      lines.push(`<div style="color:var(--ok)">Reachable. The arm takes <b>${ch.name}</b>: ${fmt(ch.angles)}.</div>`);
+      lines.push(`<div class="muted">Check: forward kinematics lands within ${r.fk_error_mm} mm of the point.</div>`);
+    } else lines.push('<div style="color:var(--bad)"><b>The arm cannot reach this point.</b></div>');
+    r.branches.filter((b) => !(r.reachable && b.branch === r.chosen)).forEach((b) => {
+      lines.push(`<div class="muted"><b>${b.name}</b>: ${b.ok ? `also possible: ${fmt(b.angles)}` : `not usable${b.why ? ": " + esc(b.why) : ""}${b.angles ? ` (${fmt(b.angles)})` : ""}`}</div>`);
+    });
+    return lines.join("");
+  };
+  const render = (st) => {
+    cards.forEach((c, i) => {
+      const p = st.points[i], ik = st.ik[i];
+      c.querySelector(".p-name").textContent = "Point " + p.name;
+      c.querySelector(".p-on").checked = !!p.on;
+      c.querySelectorAll(".p-f").forEach((inp) => { if (document.activeElement !== inp) inp.value = p[inp.dataset.k]; });
+      c.querySelector(".p-ik").innerHTML = ikHtml(ik);
+      c.querySelector(".p-go").disabled = !ik.reachable;
+    });
+    const a = st.arm, lin = a.linear;
+    $r("#p-loop").textContent = st.loop ? "Looping: press to stop" : "Loop between the points";
+    $r("#p-run").textContent = st.loop ? (lin ? `Looping. Moving to (${lin.to.slice(0, 3).map((v) => Math.round(v)).join(", ")}): ${Math.round(lin.progress * 100)}%` : "Looping. Waiting for the arm to settle.")
+      : lin ? `Moving to (${lin.to.slice(0, 3).map((v) => Math.round(v)).join(", ")}): ${Math.round(lin.progress * 100)}%` : "";
+  };
+  cards.forEach((c, i) => {
+    c.querySelector(".p-on").addEventListener("change", (e) => act({ action: "enable", index: i, on: e.target.checked }));
+    c.querySelectorAll(".p-f").forEach((inp) => inp.addEventListener("change", () => { if (inp.value !== "") act({ action: "set", index: i, [inp.dataset.k]: Number(inp.value) }); }));
+    c.querySelector(".p-here").addEventListener("click", () => act({ action: "here", index: i }));
+    c.querySelector(".p-go").addEventListener("click", () => act({ action: "go", index: i }));
+  });
+  $r("#p-loop").addEventListener("click", () => act({ action: "loop", on: !(last && last.loop) }));
+  $r("#p-stop").addEventListener("click", () => act({ action: "stop" }));
+  root.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", () => viewer.view(b.dataset.view)));
+  $r("#v-clr").addEventListener("click", () => viewer.clearTrail());
+  const poll = async () => {
+    if (dead || !document.body.contains($r("#p-loop"))) return;
+    try { apply(await (await fetch("/api/points")).json()); } catch (e) { /* hub not reachable */ }
+    setTimeout(poll, 700);
+  };
+  poll();
+  const upd = {
+    pose(p) {
+      if (!p || !p.points) return;
+      viewer.set(p);
+      const m = $r("#p-mode");
+      m.className = "st " + (p.attached ? "run" : "idle");
+      m.textContent = p.attached ? MODE_TEXT[p.mode] || p.mode : "servos released";
+      $r("#p-xyz").textContent = `tip x ${f1(p.xyz[0], 0)}  y ${f1(p.xyz[1], 0)}  z ${f1(p.xyz[2], 0)} mm`;
+      $r("#p-ang").textContent = p.angles ? JOINTS.map((n, i) => `${n[0]} ${f1(p.angles[i], 0)}`).join("  ") + " deg" : "";
+    },
+    destroy() { dead = true; viewer.destroy(); },
+  };
+  upd.pose(S.pose || (S.st && S.st.sim));
+  return upd;
+}
+
 function mountProject(root) {
   root.innerHTML = `<div id="p-body"><div class="skel" style="height:90px"></div></div>`;
   return {
@@ -1529,6 +1620,7 @@ function mountArm(root) {
 
 const PAGES = [
   { id: "arm", group: "", title: "Robot", sub: "The arm, live", icon: "robot", mount: mountArm },
+  { id: "points", group: "", title: "Points", sub: "Move between fixed points and watch the inverse kinematics solve them", icon: "pin", mount: mountPoints },
   { id: "chat", group: "", title: "Chat", sub: "Talk to the arm: what you asked, what the AI answered, what the arm did", icon: "chat", mount: mountChat },
   { id: "overview", group: "Monitor", title: "Overview", sub: "Everything at a glance", icon: "squares-four", mount: mountOverview },
   { id: "control", group: "", title: "Control", sub: "Drive from the browser and watch the virtual arm", icon: "game-controller", mount: mountControl },

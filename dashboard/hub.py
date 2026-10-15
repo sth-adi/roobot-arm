@@ -271,7 +271,7 @@ class Hub:
                         before = self.cell.magnet
                         if not esp:
                             self.cell.track_saved(self.sim.saved, self.sim.replaying, self.sim.replay_idx, snap["points"][4])
-                        if self._run_once and not self._esp_run and self.cell.run_finished(self._run_once):
+                        if self._run_once and not self._esp_run and self.cell.run_finished(self._run_once) and self.sim._lin is None:   # a straight-line move must finish first, or the last millimetres are cut off
                             self._run_once = None
                             self.sim.stop_replay()
                             self.log("hub", "sequence finished")
@@ -405,6 +405,114 @@ class Hub:
                     self.link.service(now)          # SAFE: keep the port open and read only
             except Exception as e:                  # never let the pump die
                 self.log("hub", f"serial pump error: {e}")
+
+    # ---- points: a few fixed places to move between, to watch the inverse kinematics and the straight-line move at work ----
+    POINTS_FILE = ROOT / "tuning" / "points.json"
+    DEFAULT_POINTS = [{"name": "A", "x": -100.0, "y": 200.0, "z": 100.0, "angle": 0.0, "on": True},
+                      {"name": "B", "x": 100.0, "y": 200.0, "z": 100.0, "angle": 0.0, "on": True},
+                      {"name": "C", "x": 0.0, "y": 200.0, "z": 250.0, "angle": 0.0, "on": False}]
+
+    def _points_load(self):
+        if self.points is None:
+            pts = [dict(p) for p in self.DEFAULT_POINTS]
+            try:
+                saved = json.loads(self.POINTS_FILE.read_text(encoding="utf-8"))
+                for i, p in enumerate(saved[:3]):
+                    pts[i].update({k: p[k] for k in ("name", "x", "y", "z", "angle", "on") if k in p})
+            except (OSError, ValueError, TypeError):
+                pass
+            self.points = pts
+        return self.points
+
+    def _points_save(self):
+        try:
+            self.POINTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self.POINTS_FILE.write_text(json.dumps(self.points, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def points_status(self):
+        pts = self._points_load()
+        with self.sim_lock:
+            ik = [self.sim.ik_report((p["x"], p["y"], p["z"], p["angle"])) for p in pts]
+            snap = self.sim.snapshot()
+        return {"points": [dict(p) for p in pts], "ik": ik, "loop": bool(self.points_loop), "arm": {"xyz": snap["xyz"], "tool_angle": snap["tool_angle"],
+                "angles": snap["angles"], "linear": snap.get("linear"), "mode": snap["mode"]}}
+
+    def _points_check_free(self):
+        if self.tune.get("state") == "running" or self.trial.get("state") in ("homing", "running") or self.task.get("state") in ("working", "running"):
+            raise RuntimeError("the arm is busy with something else: let it finish first")
+
+    def points_action(self, d):
+        a = d.get("action")
+        pts = self._points_load()
+        idx = int(d.get("index", -1)) if a in ("set", "here", "enable", "go") else -1
+        if a in ("set", "here", "enable", "go") and not (0 <= idx < len(pts)):
+            raise ValueError("index must be 0, 1 or 2")
+        if a == "set":
+            vals = {}
+            for k, lim in (("x", 1000.0), ("y", 1000.0), ("z", 1000.0), ("angle", 180.0)):
+                if k in d:
+                    v = float(d[k])
+                    if not (math.isfinite(v) and abs(v) <= lim):
+                        raise ValueError("%s must be a number between -%g and %g" % (k, lim, lim))
+                    vals[k] = round(v, 1)
+            pts[idx].update(vals)
+            self._points_save()
+        elif a == "here":
+            with self.sim_lock:
+                x, y, z, th = self.sim.pose()
+            pts[idx].update({"x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "angle": round(th, 1)})
+            self._points_save()
+        elif a == "enable":
+            pts[idx]["on"] = bool(d.get("on"))
+            self._points_save()
+        elif a == "go":
+            self._points_check_free()
+            if self.esp_state():
+                raise ValueError("this moves the virtual arm (and the real one in mirror mode); it is not sent to a board running Our firmware")
+            self.points_loop = False
+            p = pts[idx]
+            self.load_sequence(SEQ.validate({"format": SEQ.FORMAT, "poses": [{"x": p["x"], "y": p["y"], "z": p["z"], "angle": p["angle"], "action": None}]}), False, True)
+            self.log("hub", "points: moving to %s (%.0f, %.0f, %.0f, tool %.0f deg)" % (p["name"], p["x"], p["y"], p["z"], p["angle"]))
+        elif a == "loop":
+            if d.get("on"):
+                self._points_check_free()
+                if self.esp_state():
+                    raise ValueError("looping runs on the virtual arm (and the real one in mirror mode), not on a board running Our firmware")
+                chosen = [p for p in pts if p["on"]]
+                if len(chosen) < 2:
+                    raise ValueError("switch on at least two points to move between")
+                with self.sim_lock:
+                    bad = [p["name"] for p in chosen if not self.sim.ik_report((p["x"], p["y"], p["z"], p["angle"]))["reachable"]]
+                if bad:
+                    raise ValueError("the arm cannot reach point %s: see why under the point" % ", ".join(bad))
+                with self.sim_lock:
+                    self.sim.stop_replay()
+                    self.sim.saved[:] = [(p["x"], p["y"], p["z"], p["angle"]) for p in chosen]
+                    self.sim.saved_speed[:] = []
+                    self.cell.saved_magnet = [False] * len(chosen)
+                    self.cell.reset_keys_on_lap = False
+                    self.cell.last_applied = None
+                    self._run_once = None
+                    self.sim.start_replay(wait_arrival=True, once=False)
+                self.points_loop = True
+                self.log("hub", "points: moving between %s in a loop" % ", ".join(p["name"] for p in chosen))
+            else:
+                self._points_stop()
+        elif a == "stop":
+            self._points_stop()
+        else:
+            raise ValueError("unknown action")
+        return self.points_status()
+
+    def _points_stop(self):
+        if self.points_loop:
+            self.points_loop = False
+        with self.sim_lock:
+            self.sim.stop_replay()
+        self._run_once = None
+        self.log("hub", "points: stopped (the arm stays where it is)")
 
     # ---- mirror mode: the virtual arm does the inverse kinematics, home, sequences and speeds; the board follows its joint angles ----
     def _mirror_degrees(self):
@@ -971,6 +1079,8 @@ class Hub:
     last_run = None
     tune = {"state": "idle"}                        # the speed tuner (its own mode, simulation only): idle | running | done | cancelled | failed
     _tune_cancel = False
+    points = None                                   # three points of the user's choosing to move between (see points_action)
+    points_loop = False
     mirror = {"on": False}                          # mirror mode: the real arm (USB jog sketch) follows the virtual arm's joint angles; off until switched on
     _mirror_test = None                             # (joint index, start time) while one joint is being wiggled to find out which is which
     trial = {"state": "idle"}                       # a real-arm trial of tuned speeds: idle | homing | running | verdict | done | failed | aborted
@@ -1458,6 +1568,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, HUB.current_sequence())
         if path == "/api/state":
             return self._json(200, HUB.state_packet())
+        if path == "/api/points":
+            return self._json(200, HUB.points_status())
         if path == "/api/tune":
             q = urllib.parse.parse_qs(self.path.partition("?")[2])
             try:
@@ -1615,6 +1727,13 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     return self._json(400, {"error": str(e)})
                 return self._json(200, {"ok": True, "path": str(pth), "packet": pkt})
+            if path == "/api/points":           # points to move between: set | here | enable | go | loop | stop
+                try:
+                    return self._json(200, HUB.points_action(d))
+                except (ValueError, TypeError) as e:
+                    return self._json(400, {"error": str(e)})
+                except RuntimeError as e:
+                    return self._json(409, {"error": str(e)})
             if path == "/api/mirror":           # mirror mode: on | off | test (nudge one joint) | map (joint -> channel)
                 try:
                     return self._json(200, {"ok": True, "mirror": HUB.mirror_action(d)})

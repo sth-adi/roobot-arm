@@ -396,12 +396,61 @@ class Hub:
             now = time.time()
             try:
                 st = self.fresh_state()
-                if self.armed and st is not None:
+                if self.armed and self.mirror["on"]:
+                    self.link.update_positions(self._mirror_degrees(), now)     # the virtual arm's joint angles: the board follows them
+                elif self.armed and st is not None:
                     self.link.update(st, now)       # send input + read the board
                 else:
                     self.link.service(now)          # SAFE: keep the port open and read only
             except Exception as e:                  # never let the pump die
                 self.log("hub", f"serial pump error: {e}")
+
+    # ---- mirror mode: the virtual arm does the inverse kinematics, home, sequences and speeds; the board follows its joint angles ----
+    def _mirror_degrees(self):
+        with self.sim_lock:
+            degs = self.sim.servo_degrees()
+        t = self._mirror_test
+        if t:
+            joint, t0 = t
+            el = time.time() - t0
+            if el >= 6.0:
+                self._mirror_test = None
+            else:
+                degs[joint] = max(0.0, min(180.0, degs[joint] + 8.0 * math.sin(2 * math.pi * el / 6.0)))     # a slow +-8 degree nudge of ONE joint
+        return degs
+
+    def mirror_status(self):
+        return {"on": bool(self.mirror["on"]), "active": bool(self.mirror["on"] and self.armed and self.link.connected),
+                "testing": (self._mirror_test[0] + 1) if self._mirror_test else None}
+
+    def mirror_action(self, d):
+        a = d.get("action")
+        if a == "on":
+            self.mirror["on"] = True
+            self.log("hub", "mirror mode ON: the real arm will follow the virtual arm whenever the output is ARMED")
+        elif a == "off":
+            self.mirror["on"] = False
+            self._mirror_test = None
+            self.link.update(NEUTRAL)               # stick frame: the board stops mirroring and holds where it is
+            self.log("hub", "mirror mode off")
+        elif a == "test":
+            joint = int(d.get("joint") or 0)
+            if joint not in (1, 2, 3, 4):
+                raise ValueError("joint must be 1 to 4")
+            if not (self.mirror["on"] and self.armed and self.link.connected):
+                raise ValueError("switch mirror mode on, arm the output and have the board on USB first")
+            self._mirror_test = (joint - 1, time.time())
+            self.log("hub", "mirror test: nudging joint %d by +-8 degrees, watch which part of the arm moves" % joint)
+        elif a == "map":
+            m = [int(v) for v in (d.get("map") or [])]
+            if sorted(m) != [0, 1, 2, 3]:
+                raise ValueError("map is the four channel numbers 0 to 3, each once: joint 1..4 -> channel")
+            if not self.link.command("!map %d,%d,%d,%d" % tuple(m)):
+                raise ValueError("the USB link is not open")
+            self.log("hub", "joint -> channel map sent to the board: %s" % m)
+        else:
+            raise ValueError("unknown action")
+        return self.mirror_status()
 
     # ---- safety ----------------------------------------------------------------------------
     def set_armed(self, on):
@@ -833,6 +882,7 @@ class Hub:
         return {
             "t": round(time.time(), 2),
             "armed": self.armed, "armed_since": self.armed_since, "forward_control": self.forward_control,
+            "mirror": self.mirror_status(),
             "pps": self.pps(), "last_packet_age": age, "packet_count": self.latest_count,
             "server": {"health": srv.get("health", False), "stream": self.stream_ok, "mode": mode,
                        "forward_enabled": srv.get("forward_enabled"),
@@ -920,6 +970,8 @@ class Hub:
     last_run = None
     tune = {"state": "idle"}                        # the speed tuner (its own mode, simulation only): idle | running | done | cancelled | failed
     _tune_cancel = False
+    mirror = {"on": False}                          # mirror mode: the real arm (USB jog sketch) follows the virtual arm's joint angles; off until switched on
+    _mirror_test = None                             # (joint index, start time) while one joint is being wiggled to find out which is which
     trial = {"state": "idle"}                       # a real-arm trial of tuned speeds: idle | homing | running | verdict | done | failed | aborted
     chat = []                                       # the conversation shown on the Chat page: user / ai / robot / error messages
     _chat_seq = 0
@@ -1081,7 +1133,8 @@ class Hub:
         d["trial"] = dict(self.trial)
         n = name or self.tune.get("name") or self.trial.get("name")
         esp = self.esp_state()
-        d["board"] = {"esp": bool(esp), "pose_speeds": bool(esp and esp.get("poseSpeeds")), "armed": bool(self.armed or self.emu.running)}
+        d["board"] = {"esp": bool(esp), "pose_speeds": bool(esp and esp.get("poseSpeeds")), "armed": bool(self.armed or self.emu.running),
+                      "mirror": bool(self.mirror["on"] and self.link.connected)}
         if n:
             try:
                 c = CALIB.load(n)
@@ -1121,10 +1174,12 @@ class Hub:
         if not tuned:
             raise ValueError("tune %s first: there are no speeds to try yet" % name)
         esp = self.esp_state()
-        if not esp:
-            raise ValueError("no ESP32 is reporting: a trial runs on the arm itself (plug it in, flash Our firmware, arm the output)")
-        if not esp.get("poseSpeeds"):
-            raise ValueError("the firmware on the board does not read a speed per pose: flash Our firmware from the Firmware page first")
+        if esp:
+            if not esp.get("poseSpeeds"):
+                raise ValueError("the firmware on the board does not read a speed per pose: flash Our firmware from the Firmware page first")
+        elif not (self.mirror["on"] and self.link.connected):
+            raise ValueError("nothing is carrying the run out on a real arm: either switch mirror mode on (Arm and board page, board on USB) "
+                             "or run Our firmware so it reports from the board")
         if not (self.armed or self.emu.running):
             raise ValueError("the output is SAFE: arm it first, because a trial moves the real arm")
         allowed = CALIB.allowed_scale(name, tuned)
@@ -1555,6 +1610,11 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     return self._json(400, {"error": str(e)})
                 return self._json(200, {"ok": True, "path": str(pth), "packet": pkt})
+            if path == "/api/mirror":           # mirror mode: on | off | test (nudge one joint) | map (joint -> channel)
+                try:
+                    return self._json(200, {"ok": True, "mirror": HUB.mirror_action(d)})
+                except (ValueError, TypeError) as e:
+                    return self._json(400, {"error": str(e)})
             if path == "/api/tune":             # the speed tuner: start | cancel | apply | clear
                 try:
                     return self._json(200, HUB.tune_action(d))

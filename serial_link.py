@@ -7,6 +7,8 @@ port is missing nothing is sent and nothing blocks; it is re-checked about once 
 Wire format, one ASCII line per update (about 47 bytes, ~4 ms at 115200 baud):
     $lx,ly,rx,ry,lt,rt,buttonmask,dpadx,dpady,seq\\n
 buttonmask bits 0..9 = a b x y lb rb back start ls rs.
+Mirror mode sends absolute joint positions instead (the virtual arm's joint angles in servo degrees, 0..180):
+    @d1,d2,d3,d4,seq\\n
 
 Used by controller_gui.py (update() each frame) and by the dashboard hub (service() to keep the port open
 and read the board's output, update() only while the output is ARMED).
@@ -35,6 +37,10 @@ def encode(state, seq):
             f"{state['lt']:.3f},{state['rt']:.3f},{mask},{dx},{dy},{seq}\n").encode("ascii")
 
 
+def encode_pos(degs, seq):
+    return ("@%.2f,%.2f,%.2f,%.2f,%d\n" % (degs[0], degs[1], degs[2], degs[3], seq)).encode("ascii")
+
+
 class SerialLink:
     def __init__(self, port=None, baud=115200, enabled=True, commands=()):
         self.port_hint, self.baud = port, baud
@@ -47,6 +53,7 @@ class SerialLink:
         self.last_scan = 0.0
         self.last_sent = 0.0
         self.last_state = None
+        self.last_pos = None             # last joint angles sent in mirror mode
         self._rx = ""                    # partial line buffer
         self.on_line = None              # optional callable(str): every complete line the board prints
         self.board_rate = None           # last damper settings the board reported (deg/s, deg)
@@ -162,6 +169,25 @@ class SerialLink:
                 self.seq += 1
                 self.ser.write(encode(state, self.seq))
                 self.last_state, self.last_sent = state, now
+            except (OSError, serial.SerialException, serial.SerialTimeoutException):
+                self._drop("COM port lost (unplugged?), waiting")
+
+    def update_positions(self, degs, now=None):
+        """Mirror mode: send the four joint angles (servo degrees), at most about 25 times a second, repeated at least every 0.1 s so the
+        board knows the link is alive. Reads the board's output too. Never raises, never blocks for long."""
+        now = time.time() if now is None else now
+        degs = [float(v) for v in degs]
+        with self._lock:
+            if not self._ensure_open(now):
+                return
+            try:
+                self._drain()
+                moved = self.last_pos is None or max(abs(a - b) for a, b in zip(degs, self.last_pos)) >= 0.05
+                if not ((moved and now - self.last_sent >= 0.04) or now - self.last_sent >= HEARTBEAT_S):
+                    return
+                self.seq += 1
+                self.ser.write(encode_pos(degs, self.seq))
+                self.last_pos, self.last_sent, self.last_state = degs, now, None
             except (OSError, serial.SerialException, serial.SerialTimeoutException):
                 self._drop("COM port lost (unplugged?), waiting")
 

@@ -12,6 +12,48 @@ KEY_IDS = ("1", "2", "3")
 _TOPIC = re.compile(r"\b(keys?|box(es)?|tray|fetch|bring|return|put|take|move|pick|drop|give|hand)\b", re.I)
 
 
+ACTIONS = ("run_sequence", "go_home", "stop", "magnet", "status")   # the only things the AI can ask the arm to do besides running a taught sequence
+STOP_RE = re.compile(r"\b(stop|halt|abort|freeze|e-?stop|emergency|cancel)\b", re.I)
+_TOPIC_WORDS = {"key", "keys", "box", "boxes", "tray"}
+
+
+def is_stop(request):
+    """Stopping is safe even when the guess is wrong, so it is decided here, before any AI or network call."""
+    return bool(STOP_RE.search(request))
+
+
+def keyword_action(request):
+    """A plan for the quick commands (stop, home, magnet, status) found by words alone, or None. Used without Groq and as a double check."""
+    w = set(re.findall(r"[a-z]+", request.lower()))
+    if is_stop(request):
+        return {"action": "stop", "reason": "stop word"}
+    on, off = w & {"on", "enable", "activate", "engage", "grab"}, w & {"off", "disable", "deactivate", "release", "drop"}
+    if ("magnet" in w or w & {"release", "drop"}) and bool(on) != bool(off):
+        return {"action": "magnet", "on": bool(on), "reason": "magnet words"}
+    if w & {"home", "default", "rest"} and not w & _TOPIC_WORDS:
+        return {"action": "go_home", "reason": "home words"}
+    if (w & {"status", "where", "holding", "state"} or request.strip().endswith("?")) and not w & {"put", "move", "take", "bring", "fetch", "give", "return"}:
+        return {"action": "status", "reason": "question"}
+    return None
+
+
+def describe(state):
+    """One plain sentence about the arm, built only from the state packet (never from model text)."""
+    place = lambda v: ("on the " + v) if v == "tray" else ("in " + v) if str(v).startswith("box") else str(v)
+    keys = ", ".join("key %s %s" % (k, place(v)) for k, v in sorted((state.get("keys") or {}).items()))
+    return "%s, magnet %s, %s. %s%s" % ("At home" if state.get("at_home") else "Not at home", "on" if state.get("magnet") else "off",
+                                       "holding a key" if state.get("holding") else "not holding a key", keys.capitalize() + "." if keys else "",
+                                       " Running a sequence." if state.get("mode") == "running" else "")
+
+
+def check_action(plan, state, output_ok):
+    """Stop is always allowed; moving the real arm needs the output armed. None when fine."""
+    a = plan.get("action")
+    if a in ("go_home", "magnet") and not output_ok:
+        return err("OUTPUT_SAFE", "The output is SAFE", "This would move the real arm.", "Arm the output (Escape returns to SAFE), then ask again.")
+    return None
+
+
 def err(code, title, detail="", hint=""):
     return {"code": code, "title": title, "detail": detail, "hint": hint}
 

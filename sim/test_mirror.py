@@ -87,6 +87,24 @@ class ArmDegreesTest(unittest.TestCase):
     def test_home_is_the_centre_of_every_servo(self):
         self.assertEqual(A.ArmSim().servo_degrees(), [90.0] * 4)
 
+    def test_stick_speed_scales_the_jog_and_defaults_to_the_firmware_value(self):
+        def idle():
+            return {"LSX": 0, "LSY": 0, "RSX": 0, "RSY": 0, "A": False, "B": False, "X": False, "Y": False}
+
+        def moved(v):
+            sim = A.ArmSim(model="stock", patch=True, rate=60.0)
+            if v:
+                sim.set_stick_speed(v)
+            w = idle()
+            w["LSX"] = 1.0
+            for _ in range(100):
+                sim.step(w, 0.02)
+            return sim.pose()[0]
+        self.assertEqual(A.ArmSim().chord_sense, 20.0)                 # the firmware's ChordSense: unchanged unless asked
+        self.assertGreater(moved(80), moved(None) * 3)                 # the damper (60 deg/s) does not hold a faster stick back here
+        with self.assertRaises(ValueError):
+            A.ArmSim().set_stick_speed(1000)
+
 
 class SketchTest(unittest.TestCase):
     """The board's side, read from the source: the guards that make mirror mode safe must stay in the sketch."""

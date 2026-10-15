@@ -1557,6 +1557,8 @@ class Handler(BaseHTTPRequestHandler):
                     if "rate" in d:
                         push_rate = True
                         HUB.sim.set_rate(d["rate"])
+                    if "stick_speed" in d:
+                        HUB.sim.set_stick_speed(d["stick_speed"])
                     if "tool" in d:
                         HUB.sim.set_tool(d["tool"])
                     if "replay" in d:

@@ -1,0 +1,60 @@
+{
+  "format": "roobot-arm-sequence",
+  "version": 2,
+  "name": "pick_and_place",
+  "description": "Test fixture: takes the key from box 2 and puts it in the tray",
+  "requires": {},
+  "ends": {},
+  "count": 7,
+  "poses": [
+    {
+      "x": 0.0,
+      "y": 246.7,
+      "z": 219.95,
+      "angle": 0.0,
+      "action": null
+    },
+    {
+      "x": 0.0,
+      "y": 246.7,
+      "z": 11.53,
+      "angle": -88.76,
+      "action": null
+    },
+    {
+      "x": 0.0,
+      "y": 246.7,
+      "z": 11.53,
+      "angle": -88.76,
+      "action": "grab"
+    },
+    {
+      "x": 0.0,
+      "y": 246.7,
+      "z": 219.95,
+      "angle": 0.0,
+      "action": null
+    },
+    {
+      "x": 222.0,
+      "y": 80.0,
+      "z": 120.0,
+      "angle": 0.0,
+      "action": null
+    },
+    {
+      "x": 222.0,
+      "y": 80.0,
+      "z": 30.0,
+      "angle": 0.0,
+      "action": "release"
+    },
+    {
+      "x": 222.0,
+      "y": 80.0,
+      "z": 120.0,
+      "angle": 0.0,
+      "action": null
+    }
+  ]
+}

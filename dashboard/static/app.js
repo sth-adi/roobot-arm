@@ -651,6 +651,9 @@ function mountBoard(root) {
         <p class="note" style="margin-top:10px">Before trusting a sequence, find out which joint is which: arm the output with mirror on, press a joint, and watch which part of the real arm nudges (about 8 degrees, slowly). Joint 1 is the base, then shoulder, elbow, wrist. If the wrong part moves, change the map below.</p>
         <div class="inline" style="flex-wrap:wrap;gap:8px" id="m-test">${[1, 2, 3, 4].map((j) => `<button class="btn sm" data-j="${j}" type="button">Nudge joint ${j}</button>`).join("")}</div>
         <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:10px"><label class="muted">Joint to channel map <input id="m-map" value="3,2,1,0" style="width:90px" aria-label="Joint to channel map"></label><button class="btn sm" id="m-map-set" type="button">Send to board</button></div>
+        <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:10px"><label class="muted">Pulse range (us) <input id="m-pulse" value="500,2400" style="width:110px" aria-label="Pulse width at 0 and at 180 degrees"></label><button class="btn sm" id="m-pulse-set" type="button">Send to board</button></div>
+        <p class="note">Mirror mode uses Sam's servo mapping: 500 us at 0 degrees to 2400 us at 180 degrees, 90 degrees at 1450 us, because the model's joint angles and the trained limits and homes are in that convention. If your servos need a different span, change it here; the board remembers it.</p>
+        <p class="note" id="m-cal" style="color:var(--warn)" hidden>The joint limits are still the defaults (0 to 180 for every joint). Set what each joint can safely do on the Control page before the real arm moves: with the defaults the arm can be told to go to the very end of a servo's travel.</p>
         <p class="note">Channels are the board's outputs in the order of the pin map below (0 = OUT1 GPIO25 ... 3 = OUT4 GPIO32). The default 3,2,1,0 is how the arm is wired for Sam's firmware: joint 1 on GPIO32, 2 on GPIO27, 3 on GPIO26, 4 on GPIO25. The board remembers it.</p></section>
       <section class="sec"><h2>USB link</h2>
         <p class="lead">The hub opens the board's COM port to read its log and send settings. Only one program can hold the port.</p>
@@ -678,6 +681,11 @@ function mountBoard(root) {
     const r = await api("/api/mirror", { action: "test", joint: Number(b.dataset.j) });
     if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
   });
+  $r("#m-pulse-set").addEventListener("click", async () => {
+    const [lo, hi] = $r("#m-pulse").value.split(",").map((v) => Number(v.trim()));
+    const r = await api("/api/mirror", { action: "pulse", lo, hi });
+    if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); else toast("Pulse range sent to the board", "ok");
+  });
   $r("#m-map-set").addEventListener("click", async () => {
     const r = await api("/api/mirror", { action: "map", map: $r("#m-map").value.split(",").map((v) => Number(v.trim())) });
     if (!r.ok) toast(r.error || "The hub is not reachable", "bad"); else toast("Map sent to the board", "ok");
@@ -704,6 +712,8 @@ function mountBoard(root) {
       $r("#m-st").className = "st " + (mi.active ? "run" : mi.on ? "warn" : "idle");
       $r("#m-st").textContent = mi.testing ? "nudging joint " + mi.testing : mi.active ? "the real arm is following" : mi.on ? "on, waiting for ARM and the USB board" : "off";
       root.querySelectorAll("#m-test button").forEach((b) => { b.disabled = !mi.active; });
+      const lim = st.sim && st.sim.limits;
+      $r("#m-cal").hidden = !(mi.on && lim && lim.every((l) => l[0] === 0 && l[1] === 180));
       $r("#b-usb-n").textContent = u.enabled ? "On: opens the port when a board is plugged in." : "Off: the port is free for other tools.";
       const pos = st.board.pos;
       OUTS.forEach((o, i) => {
@@ -1087,8 +1097,8 @@ function mountPoints(root) {
       <div class="vhud tr"><button class="btn sm" type="button" data-view="iso">3D</button><button class="btn sm" type="button" data-view="top">Top</button><button class="btn sm" type="button" data-view="side">Side</button><button class="btn sm" type="button" id="v-clr">Clear path</button></div>
     </section>
     <aside class="side" aria-label="Points" style="overflow-y:auto">
-      <p class="lead" style="margin-top:0">Pick two or three places for the tool tip, then move between them and watch the inverse kinematics work: the tip goes in a <b>straight line</b> while the four joints swing in curves to make it happen. The path in the viewer shows it.</p>
-      <div id="p-cards">${[0, 1, 2].map((i) => `
+      <p class="lead" style="margin-top:0">Five places for the tool tip to start with: the test points from Sam's UWE-RArm demo, which visits them in this order. Change any, switch some off, then move between them and watch the inverse kinematics work: the tip goes in a <b>straight line</b> while the four joints swing in curves to make it happen. The path in the viewer shows it.</p>
+      <div id="p-cards">${[0, 1, 2, 3, 4].map((i) => `
         <div class="pcard" data-i="${i}" style="border-top:1px solid var(--line);padding:10px 0">
           <div class="inline" style="gap:10px;align-items:center"><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" class="p-on" aria-label="Include this point"><b class="p-name"></b></label></div>
           <div class="inline" style="flex-wrap:wrap;gap:8px;margin:6px 0">

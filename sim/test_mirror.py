@@ -116,7 +116,7 @@ class SketchTest(unittest.TestCase):
 
     def test_the_board_caps_its_own_speed_and_the_pulse_range(self):
         self.assertRegex(self.src, r"POS_MAX_DEG_S\s*=\s*60")
-        self.assertIn("constrain(PULSE_MID_US + (d[j] - 90.0f) * usPerDeg, (float)PULSE_MIN_US, (float)PULSE_MAX_US)", self.src)
+        self.assertIn("constrain(mirrorUsOf(d[j]), mirrorUsAt0, mirrorUsAt180)", self.src)
         self.assertIn("curUs[n] += constrain(posGoalUs[n] - curUs[n], -maxStep, maxStep)", self.src)
 
     def test_bad_frames_are_refused_whole(self):
@@ -131,10 +131,24 @@ class SketchTest(unittest.TestCase):
 
     def test_b_goes_home_in_jog_mode_and_a_stick_or_lost_input_cancels_it(self):
         self.assertIn("if (i.b && !prevB && !posMode) {", self.src)                       # rising edge of B, jog mode only
-        self.assertIn("for (int n = 0; n < 4; n++) posGoalUs[n] = PULSE_MID_US;", self.src)   # home = centre, 90 degrees, like the virtual arm
+        self.assertIn("for (int n = 0; n < 4; n++) posGoalUs[n] = mirrorUsOf(90.0f);", self.src)   # home = 90 degrees, like the virtual arm
         self.assertIn("} else if (homing && stickMoved) {", self.src)
         self.assertRegex(self.src, r"if \(homing\) \{\s*homing = false;")                  # fail-safe path stops homing too
         self.assertIn("min(POS_MAX_DEG_S, degPerS)", self.src)                              # homing never exceeds the cap or the jog speed setting
+
+    def test_mirror_pulses_follow_sams_servo_mapping(self):
+        self.assertIn("float mirrorUsAt0 = 500.0f, mirrorUsAt180 = 2400.0f;", self.src)       # ESP32Servo attach(pin, 500, 2400) in UWE-RArm
+        self.assertIn("float mirrorUsOf(float deg) { return mirrorUsAt0 + deg * (mirrorUsAt180 - mirrorUsAt0) / 180.0f; }", self.src)
+        us = lambda deg: 500.0 + deg * (2400.0 - 500.0) / 180.0                              # the same formula, as Sam writes it
+        self.assertEqual((us(0), us(180), round(us(90))), (500.0, 2400.0, 1450))
+        self.assertIn("!pulse needs lo,hi", self.src)                                         # and it can be changed without a reflash
+        self.assertIn("lo >= 400 && hi <= 2600 && hi - lo >= 600", self.src)
+
+    def test_mirror_speeds_use_the_mirror_scale(self):
+        self.assertIn("(posMode ? (mirrorUsAt180 - mirrorUsAt0) / 180.0f : usPerDeg)", self.src)
+
+    def test_leaving_mirror_mode_cannot_make_a_joint_jump_into_the_jog_window(self):
+        self.assertIn("min((float)PULSE_MIN_US, curUs[n]), max((float)PULSE_MAX_US, curUs[n])", self.src)
 
     def test_the_channel_map_is_validated(self):
         self.assertIn("a != b && a != c && a != d && b != c && b != d && c != d", self.src)

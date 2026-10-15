@@ -408,16 +408,16 @@ class Hub:
 
     # ---- points: a few fixed places to move between, to watch the inverse kinematics and the straight-line move at work ----
     POINTS_FILE = ROOT / "tuning" / "points.json"
-    DEFAULT_POINTS = [{"name": "A", "x": -100.0, "y": 200.0, "z": 100.0, "angle": 0.0, "on": True},
-                      {"name": "B", "x": 100.0, "y": 200.0, "z": 100.0, "angle": 0.0, "on": True},
-                      {"name": "C", "x": 0.0, "y": 200.0, "z": 250.0, "angle": 0.0, "on": False}]
+    # Sam's test points, in the order his demo loop (UWE-RArm main.cpp) visits them: the tool angle is 0 throughout
+    DEFAULT_POINTS = [{"name": n, "x": x, "y": 200.0, "z": z, "angle": 0.0, "on": True}
+                      for n, x, z in (("A", -100.0, 100.0), ("B", 0.0, 100.0), ("C", 0.0, 300.0), ("D", 0.0, 100.0), ("E", 100.0, 100.0))]
 
     def _points_load(self):
         if self.points is None:
             pts = [dict(p) for p in self.DEFAULT_POINTS]
             try:
                 saved = json.loads(self.POINTS_FILE.read_text(encoding="utf-8"))
-                for i, p in enumerate(saved[:3]):
+                for i, p in enumerate(saved[:len(pts)]):
                     pts[i].update({k: p[k] for k in ("name", "x", "y", "z", "angle", "on") if k in p})
             except (OSError, ValueError, TypeError):
                 pass
@@ -448,7 +448,7 @@ class Hub:
         pts = self._points_load()
         idx = int(d.get("index", -1)) if a in ("set", "here", "enable", "go") else -1
         if a in ("set", "here", "enable", "go") and not (0 <= idx < len(pts)):
-            raise ValueError("index must be 0, 1 or 2")
+            raise ValueError("index must be 0 to %d" % (len(pts) - 1))
         if a == "set":
             vals = {}
             for k, lim in (("x", 1000.0), ("y", 1000.0), ("z", 1000.0), ("angle", 180.0)):
@@ -550,6 +550,13 @@ class Hub:
                 raise ValueError("switch mirror mode on, arm the output and have the board on USB first")
             self._mirror_test = (joint - 1, time.time())
             self.log("hub", "mirror test: nudging joint %d by +-8 degrees, watch which part of the arm moves" % joint)
+        elif a == "pulse":
+            lo, hi = float(d.get("lo")), float(d.get("hi"))
+            if not (400 <= lo and hi <= 2600 and hi - lo >= 600):
+                raise ValueError("pulse range: 400 <= lo, hi <= 2600 and at least 600 us apart")
+            if not self.link.command("!pulse %d,%d" % (round(lo), round(hi))):
+                raise ValueError("the USB link is not open")
+            self.log("hub", "mirror pulse range sent to the board: %d to %d us" % (lo, hi))
         elif a == "map":
             m = [int(v) for v in (d.get("map") or [])]
             if sorted(m) != [0, 1, 2, 3]:

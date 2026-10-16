@@ -234,8 +234,8 @@ class SketchIkTest(unittest.TestCase):
             cls.src = f.read()
 
     def test_pose_frames_feed_the_same_follower_as_angle_frames(self):
-        self.assertIn("serBuf[0] == '@' || serBuf[0] == '#'", self.src)
-        self.assertIn("serBuf[0] == '@' ? parsePosLine(serBuf) : parsePoseLine(serBuf)", self.src)
+        self.assertIn("line[0] == '@' || line[0] == '#'", self.src)
+        self.assertIn("line[0] == '@' ? parsePosLine(line) : parsePoseLine(line)", self.src)
         self.assertRegex(self.src, r"posGoalUs\[jointMap\[j\]\] = constrain\(mirrorUsOf\(d\[j\]\), mirrorUsAt0, mirrorUsAt180\);")   # pulse clamp and joint map: unchanged
 
     def test_a_pose_it_cannot_use_is_refused_and_the_arm_keeps_its_goal(self):

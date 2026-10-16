@@ -56,6 +56,7 @@ import preflight as PRE  # noqa: E402
 import voice as VOICE  # noqa: E402
 import tls as TLS  # noqa: E402
 import endcal as ENDCAL  # noqa: E402
+import netlink as NETLINK  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
 CALIB = TUNER.Calibration(str(ROOT / "tuning"))        # limits learned from real-arm trials, per sequence (local to this PC)
 
@@ -136,6 +137,7 @@ class Hub:
         self._esp_run = None                    # id of the sequence the ESP is running for us
         self.phone_url = None                   # set by main() with --lan
         self.phone_url_https = None             # the same over HTTPS (port + 1), which the phone's microphone needs
+        self.board_listener = None              # the board's WiFi link (port + 2): the board connects out to this PC, see netlink.py
         self.cell = Workcell()                  # boxes, keys, tray and the electromagnet (sim/workcell.py)
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
         self.packets = collections.deque(maxlen=500)
@@ -958,8 +960,8 @@ class Hub:
             if action in ("upload", "swap"):
                 if self.armed:
                     return False, "switch the output to SAFE before flashing (the board resets)"
-                if not self.link.find_port() and not self.link.device:
-                    return False, "no ESP32 found on USB"
+                if not self.link.find_port():
+                    return False, "no ESP32 found on USB (flashing needs the cable: the WiFi link cannot flash)"
             self.fw.update(state="running", action=action, profile=profile, detail="", finished_t=None)
         self.publish("status", self.snapshot())
         threading.Thread(target=self._fw_run, args=(action, profile), daemon=True).start()
@@ -996,7 +998,9 @@ class Hub:
                 self.log("firmware", f"{prof['label']}: nothing changed since the last build, flashing the saved binary (no recompile)")
                 sketch, out_dir = (SKETCH if prof["kind"] is None else self.FWB / pid / pid), self.FWB / pid / "out"
             if rc == 0 and action in ("upload", "swap"):
-                port = self.link.device or self.link.find_port()
+                port = self.link.find_port()
+                if not port:
+                    raise RuntimeError("the USB cable was unplugged: flashing needs it")
                 self.link.suspend()                       # release the COM port for esptool
                 time.sleep(0.6)
                 cmd = [ARDUINO, "upload", "-p", port, "--fqbn", prof["fqbn"], "--input-dir", str(out_dir), str(sketch)]
@@ -1121,6 +1125,7 @@ class Hub:
             "services": services,
             "usb": {"enabled": link.enabled, "phase": link.phase, "port": link.device or link.find_port_cached(),
                     "status": link.status, "rate": link.board_rate, "range": link.board_range},
+            "board_wifi": self.board_listener.snapshot() if self.board_listener else {"listening": False},
             "board": dict(self.board, age=None if not self.board["last_line_t"] else round(time.time() - self.board["last_line_t"], 1)),
             "firmware": dict(self.fw, profiles=self.fw_profiles(), secrets_present=(SKETCH / "secrets.h").exists(),
                              age=None if not self.fw["finished_t"] else round(time.time() - self.fw["finished_t"], 1)),
@@ -1799,6 +1804,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, HUB.tune_status((q.get("name") or [None])[0]))
             except ValueError as e:
                 return self._json(400, {"error": str(e)})
+        if path == "/api/boardlink":
+            L = HUB.board_listener
+            if not L:
+                return self._json(404, {"error": "the board link is off: it needs the hub started with --lan (the launcher does that)"})
+            host = lan_ip()
+            snippet = '#define MIRROR_HOST "%s"\n#define MIRROR_PORT %d\n#define MIRROR_KEY "%s"\n' % (host, L.port, L.key)
+            return self._json(200, {"host": host, "port": L.port, "snippet": snippet})
         if path == "/api/chat":
             q = urllib.parse.parse_qs(self.path.partition("?")[2])
             try:
@@ -2051,6 +2063,25 @@ def lan_ip():
         return "127.0.0.1"
 
 
+def board_key():
+    """The key the board gives when it connects over WiFi: MIRROR_KEY in the environment, else one made once and kept in .hub_boardkey (git-ignored)."""
+    k = os.environ.get("MIRROR_KEY", "").strip()
+    if len(k) >= 8:
+        return k
+    f = ROOT / ".hub_boardkey"
+    try:
+        k = f.read_text().strip()
+    except OSError:
+        k = ""
+    if len(k) < 8:
+        k = secrets.token_urlsafe(12)
+        try:
+            f.write_text(k)
+        except OSError:
+            pass
+    return k
+
+
 def main():
     global HUB, HTTPD
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2059,6 +2090,7 @@ def main():
     ap.add_argument("--no-open", action="store_true", help="do not open the browser")
     ap.add_argument("--lan", action="store_true",
                     help="also serve other devices on the network (a phone), which need the key printed in the link; see launch.py")
+    ap.add_argument("--no-board-link", action="store_true", help="with --lan, do not listen for the board's WiFi connection on port+2")
     ap.add_argument("--no-https", action="store_true", help="with --lan, do not also serve HTTPS on port+1 (the phone's microphone needs it)")
     ap.add_argument("--send-speed", action="store_true",
                     help="also send the damper to the arm as maxSpeed (needs the modified firmware in firmware/rarm)")
@@ -2096,6 +2128,14 @@ def main():
         except Exception as e:                      # cryptography missing, port busy: the plain link still works, only the phone's microphone does not
             httpsd = None
             https_print = "HTTPS for the phone is off (%s: %s)" % (type(e).__name__, str(e)[:100])
+    board_print = ""
+    if args.lan and not args.no_board_link:
+        try:
+            HUB.board_listener = NETLINK.BoardListener(HUB.link, board_key(), port=args.port + 2, bind=bind, log=lambda t: HUB.log("hub", t))
+            board_print = "Board over WiFi (no USB cable): listening on port %d; the Arm and board page shows the lines for the board's secrets.h" % HUB.board_listener.start()
+        except Exception as e:                      # port busy: USB and everything else still work
+            HUB.board_listener = None
+            board_print = "Board over WiFi is off (%s: %s)" % (type(e).__name__, str(e)[:100])
     HUB.start()
     if httpsd:
         threading.Thread(target=httpsd.serve_forever, daemon=True).start()
@@ -2106,6 +2146,8 @@ def main():
         if HUB.phone_url_https:
             print(f"On your phone, HTTPS (needed for the microphone; accept the certificate warning once): {HUB.phone_url_https}", flush=True)
         print(https_print, flush=True)
+        if board_print:
+            print(board_print, flush=True)
     if not args.no_open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
@@ -2114,6 +2156,8 @@ def main():
         pass
     finally:
         HUB.shutdown()
+        if HUB.board_listener:
+            HUB.board_listener.close()
         httpd.server_close()
         if httpsd:
             httpsd.shutdown()

@@ -23,6 +23,42 @@
 #include "secrets.h"
 #include "ca_certs.h"   // root CAs used to verify the server's TLS certificate
 #include "arm_ik.h"     // Sam's inverse kinematics, for the "#x,y,z,angle" mirror frames
+#include "net_out.h"    // output queue for the optional WiFi mirror link
+
+// ---- Mirror over WiFi (optional): the board connects OUT to the hub on your PC and speaks the same lines as over USB ----------------
+// Define MIRROR_HOST (the PC's address or name), MIRROR_PORT (default 8767) and MIRROR_KEY in secrets.h; the Arm and board page of the hub
+// shows the exact lines. Without MIRROR_HOST none of this is compiled in. The board only ever connects to that one host, sends the key as
+// "HELLO <key>", and then everything it prints goes to the hub while "@", "#", "$" and "!" lines come back, exactly like the COM port. The
+// freshness rule is unchanged: if frames stop for 400 ms the arm holds. Output is queued (never blocks): see net_out.h.
+#ifdef MIRROR_HOST
+#ifndef MIRROR_PORT
+#define MIRROR_PORT 8767
+#endif
+#ifndef MIRROR_KEY
+#error "MIRROR_HOST needs MIRROR_KEY in secrets.h (the key shown on the hub's Arm and board page)"
+#endif
+WiFiClient mirrorNet;
+ByteQueue<2048> netOut;
+bool netLinkUp = false;
+
+class TeeSerial : public Print {
+ public:
+  void begin(unsigned long baud) { ::Serial.begin(baud); }
+  void setRxBufferSize(size_t n) { ::Serial.setRxBufferSize(n); }
+  int available() { return ::Serial.available(); }
+  int read() { return ::Serial.read(); }
+  size_t write(uint8_t c) override {
+    if (netLinkUp) netOut.push(c);
+    return ::Serial.write(c);
+  }
+  size_t write(const uint8_t *b, size_t n) override {
+    if (netLinkUp) for (size_t i = 0; i < n; i++) netOut.push(b[i]);
+    return ::Serial.write(b, n);
+  }
+};
+TeeSerial Out;
+#define Serial Out
+#endif
 
 const uint32_t POLL_MS = 50;       // ~20 Hz
 const float    STALE_S = 1.5;      // packet older than this = sender gone
@@ -333,6 +369,7 @@ void applyInput(bool ok, ArmInput in, uint32_t count) {
 // centred and WiFi takes over again.
 const uint32_t SERIAL_FRESH_MS = 400;
 uint32_t lastSerialMs = 0;
+uint32_t lastUsbMs = 0;            // when a line last came in over the COM port (the WiFi link does not try to connect while USB is busy)
 bool serialWasActive = false;
 String serBuf;
 
@@ -437,38 +474,98 @@ bool parseSerialLine(const String &s, ArmInput &o, uint32_t &count) {
   return true;
 }
 
+// One complete input line, from the COM port or the WiFi link: "!" settings, "@" joint angles, "#" tool-tip pose, "$" sticks.
+void handleLine(const String &line) {
+  ArmInput in;
+  uint32_t count = 0;
+  if (line.length() && line[0] == '!') {
+    handleCommand(line);
+  } else if (line.length() && (line[0] == '@' || line[0] == '#')) {
+    if (frameChecksumOk(line) && (line[0] == '@' ? parsePosLine(line) : parsePoseLine(line))) {
+      lastSerialMs = millis();
+      if (!posMode) {
+        posMode = true;
+        for (int n = 0; n < 4; n++) axisCmd[n] = 0;
+        Serial.println("mirror: following the hub's joint positions");
+      }
+      static uint32_t lastMirrorLog = 0;
+      if (millis() - lastMirrorLog >= 500) {
+        lastMirrorLog = millis();
+        Serial.printf("MIRROR goal(us) %.0f %.0f %.0f %.0f | pos(us) %.0f %.0f %.0f %.0f\n", posGoalUs[0], posGoalUs[1], posGoalUs[2], posGoalUs[3],
+                      curUs[0], curUs[1], curUs[2], curUs[3]);
+      }
+    }
+  } else if (parseSerialLine(line, in, count)) {
+    lastSerialMs = millis();
+    if (posMode) {                                  // stick frames take over: stop mirroring and hold
+      posMode = false;
+      holdPos();
+      Serial.println("mirror: off (stick frames), holding position");
+    }
+    applyInput(true, in, count);
+  }
+}
+
+#ifdef MIRROR_HOST
+String netBuf;
+uint32_t lastNetTry = 0, lastNetPing = 0, lastNetRx = 0;
+
+// Keeps the link to the hub up and moves bytes both ways without ever waiting: connection attempts are short and rare, and they are skipped
+// while USB is driving so they cannot make the motion stutter; output is sent only into free socket space.
+void pollNet() {
+  if (WiFi.status() != WL_CONNECTED) {
+    if (netLinkUp) { netLinkUp = false; mirrorNet.stop(); }
+    return;
+  }
+  uint32_t now = millis();
+  if (netLinkUp && (!mirrorNet.connected() || now - lastNetRx > 6000)) {      // the hub went away (it pings every second)
+    netLinkUp = false;
+    mirrorNet.stop();
+    netOut.clear();
+    Serial.println("net: link to the hub lost");
+  }
+  if (!netLinkUp) {
+    bool usbBusy = lastUsbMs != 0 && now - lastUsbMs < 2000;
+    if (usbBusy || now - lastNetTry < 1500) return;
+    lastNetTry = now;
+    if (!mirrorNet.connect(MIRROR_HOST, MIRROR_PORT, 300)) return;
+    mirrorNet.setNoDelay(true);
+    mirrorNet.print("HELLO " MIRROR_KEY "\n");
+    netLinkUp = true;
+    netOut.clear();
+    lastNetRx = lastNetPing = now;
+    Serial.println("net: connected to the hub");
+    showSettings();                                   // tells the hub what this sketch can do (it goes to the hub too)
+    return;
+  }
+  while (mirrorNet.available()) {
+    char c = mirrorNet.read();
+    lastNetRx = now;
+    if (c == '\n') { handleLine(netBuf); netBuf = ""; }
+    else if (c != '\r' && netBuf.length() < 120) netBuf += c;
+  }
+  int room = mirrorNet.availableForWrite();
+  if (room > 0) {
+    uint8_t tmp[128];
+    size_t n = netOut.take(tmp, min((size_t)room, sizeof(tmp)));
+    if (n) mirrorNet.write(tmp, n);
+  }
+  if (now - lastNetPing >= 1000) {
+    lastNetPing = now;
+    for (const char *q = "NET ping\n"; *q; q++) netOut.push((uint8_t)*q);
+  }
+}
+#endif
+
 void pollSerial() {
+#ifdef MIRROR_HOST
+  pollNet();
+#endif
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n') {
-      ArmInput in;
-      uint32_t count = 0;
-      if (serBuf.length() && serBuf[0] == '!') {
-        handleCommand(serBuf);
-      } else if (serBuf.length() && (serBuf[0] == '@' || serBuf[0] == '#')) {
-        if (frameChecksumOk(serBuf) && (serBuf[0] == '@' ? parsePosLine(serBuf) : parsePoseLine(serBuf))) {
-          lastSerialMs = millis();
-          if (!posMode) {
-            posMode = true;
-            for (int n = 0; n < 4; n++) axisCmd[n] = 0;
-            Serial.println("mirror: following the hub's joint positions");
-          }
-          static uint32_t lastMirrorLog = 0;
-          if (millis() - lastMirrorLog >= 500) {
-            lastMirrorLog = millis();
-            Serial.printf("MIRROR goal(us) %.0f %.0f %.0f %.0f | pos(us) %.0f %.0f %.0f %.0f\n", posGoalUs[0], posGoalUs[1], posGoalUs[2], posGoalUs[3],
-                          curUs[0], curUs[1], curUs[2], curUs[3]);
-          }
-        }
-      } else if (parseSerialLine(serBuf, in, count)) {
-        lastSerialMs = millis();
-        if (posMode) {                                  // stick frames take over: stop mirroring and hold
-          posMode = false;
-          holdPos();
-          Serial.println("mirror: off (stick frames), holding position");
-        }
-        applyInput(true, in, count);
-      }
+      lastUsbMs = millis();
+      handleLine(serBuf);
       serBuf = "";
     } else if (c != '\r' && serBuf.length() < 120) {
       serBuf += c;

@@ -22,6 +22,7 @@
 #include <Preferences.h>
 #include "secrets.h"
 #include "ca_certs.h"   // root CAs used to verify the server's TLS certificate
+#include "arm_ik.h"     // Sam's inverse kinematics, for the "#x,y,z,angle" mirror frames
 
 const uint32_t POLL_MS = 50;       // ~20 Hz
 const float    STALE_S = 1.5;      // packet older than this = sender gone
@@ -174,6 +175,8 @@ void showSettings() {
                 jointMap[0], jointMap[1], jointMap[2], jointMap[3], POS_MAX_DEG_S, posMode ? "following the hub" : "off");
   Serial.printf("mirror pulses: 0 deg = %.0f us, 180 deg = %.0f us, 90 deg = %.0f us (Sam's firmware: 500 / 2400)\n",
                 mirrorUsAt0, mirrorUsAt180, mirrorUsOf(90.0f));
+  Serial.printf("mirror ik: supported, calibration %s (the board runs Sam's inverse kinematics for \"#x,y,z,angle\" frames; tool 53 mm)\n",
+                mirrorIk.known ? "set" : "missing");
 }
 
 // Jog integrator: position += stick * speed * dt, then HOLD. Called every loop pass so the
@@ -273,6 +276,19 @@ void handleCommand(const String &s) {
     } else {
       Serial.println("!map needs four different channel numbers 0..3, e.g. !map 3,2,1,0");
     }
+  } else if (s.startsWith("!cal")) {
+    // !cal min1,max1,min2,max2,min3,max3,min4,max4,home1,home2,home3,home4  (whole servo degrees; a reversed pair marks an inverted joint)
+    int c[12];
+    if (posMode && serialActive()) {
+      Serial.println("!cal refused: the arm is following the hub; switch the output to SAFE first (a new calibration would move it)");
+    } else if (sscanf(s.c_str(), "!cal %d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", &c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6], &c[7], &c[8], &c[9], &c[10], &c[11]) == 12) {
+      const int lims[4][2] = {{c[0], c[1]}, {c[2], c[3]}, {c[4], c[5]}, {c[6], c[7]}};
+      const int homes[4] = {c[8], c[9], c[10], c[11]};
+      if (MirrorSetCalibration(lims, homes)) showSettings();
+      else Serial.println("!cal refused: limits and homes must be 0..180 and a joint's two limits must differ");
+    } else {
+      Serial.println("!cal needs 12 whole numbers: min1,max1,...,min4,max4,home1,...,home4");
+    }
   } else if (s.startsWith("!show")) {
     showSettings();
   } else {
@@ -339,6 +355,25 @@ bool parsePosLine(const String &s) {
   return true;
 }
 
+// "#x,y,z,angle,seq": the tool-tip pose in mm and degrees. The board runs the inverse kinematics (Sam's, with the calibration from !cal) and
+// follows the result exactly like an "@" frame. A pose it cannot use (no calibration, out of range, unreachable) is refused whole and the
+// arm keeps its last goal; the reason is printed at most twice a second.
+bool parsePoseLine(const String &s) {
+  static uint32_t lastWhy = 0;
+  auto why = [&](const char *msg) { if (millis() - lastWhy >= 500) { lastWhy = millis(); Serial.println(msg); } return false; };
+  if (s.length() < 8 || s[0] != '#') return false;
+  float x, y, z, a;
+  if (sscanf(s.c_str() + 1, "%f,%f,%f,%f", &x, &y, &z, &a) != 4) return false;
+  if (!(fabsf(x) <= 450.0f && fabsf(y) <= 450.0f && z >= -100.0f && z <= 500.0f && fabsf(a) <= 360.0f)) return why("IK: pose out of range, refused");
+  if (!mirrorIk.known) return why("IK: no calibration yet (send !cal), pose refused");
+  float d[4];
+  if (!MirrorPoseToServoDegrees(x, y, z, a, d)) return why("IK: that pose is outside the arm's reach or limits, refused");
+  for (int j = 0; j < 4; j++) {
+    posGoalUs[jointMap[j]] = constrain(mirrorUsOf(d[j]), mirrorUsAt0, mirrorUsAt180);
+  }
+  return true;
+}
+
 bool parseSerialLine(const String &s, ArmInput &o, uint32_t &count) {
   if (s.length() < 12 || s[0] != '$') return false;
   float lx, ly, rx, ry, lt, rt;
@@ -366,8 +401,8 @@ void pollSerial() {
       uint32_t count = 0;
       if (serBuf.length() && serBuf[0] == '!') {
         handleCommand(serBuf);
-      } else if (serBuf.length() && serBuf[0] == '@') {
-        if (parsePosLine(serBuf)) {
+      } else if (serBuf.length() && (serBuf[0] == '@' || serBuf[0] == '#')) {
+        if (serBuf[0] == '@' ? parsePosLine(serBuf) : parsePoseLine(serBuf)) {
           lastSerialMs = millis();
           if (!posMode) {
             posMode = true;

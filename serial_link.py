@@ -9,6 +9,10 @@ Wire format, one ASCII line per update (about 47 bytes, ~4 ms at 115200 baud):
 buttonmask bits 0..9 = a b x y lb rb back start ls rs.
 Mirror mode sends absolute joint positions instead (the virtual arm's joint angles in servo degrees, 0..180):
     @d1,d2,d3,d4,seq\\n
+or, when the board runs the inverse kinematics itself (the USB sketch says so: "mirror ik: supported"), the tool-tip pose in mm and degrees:
+    #x,y,z,angle,seq\\n
+The board needs the real arm's calibration for that, sent as  !cal min1,max1,...,min4,max4,home1,...,home4  (whole degrees; a reversed pair
+marks an inverted joint). It is sent every time the port opens and again if the board reports it has lost it.
 
 Used by controller_gui.py (update() each frame) and by the dashboard hub (service() to keep the port open
 and read the board's output, update() only while the output is ARMED).
@@ -28,6 +32,7 @@ ESP32_USB_IDS = {(0x10C4, 0xEA60), (0x1A86, 0x7523), (0x303A, 0x1001)}  # CP210x
 RESCAN_S = 1.0
 HEARTBEAT_S = 0.1   # resend unchanged state so the ESP32 knows the link is alive
 PULSES_RE = re.compile(r"mirror pulses: 0 deg = ([\d.]+) us, 180 deg = ([\d.]+) us")
+IK_RE = re.compile(r"mirror ik: supported, calibration (set|missing)")
 SETTINGS_RE = re.compile(r"settings: max (?:rate|speed at full stick) ([\d.]+) deg/s.*?range ([\d.]+) deg")
 
 
@@ -36,6 +41,15 @@ def encode(state, seq):
     dx, dy = state["dpad"]
     return (f"${state['lx']:.3f},{state['ly']:.3f},{state['rx']:.3f},{state['ry']:.3f},"
             f"{state['lt']:.3f},{state['rt']:.3f},{mask},{dx},{dy},{seq}\n").encode("ascii")
+
+
+def encode_pose(pose, seq):
+    return ("#%.2f,%.2f,%.2f,%.2f,%d\n" % (pose[0], pose[1], pose[2], pose[3], seq)).encode("ascii")
+
+
+def cal_line(limits, homes):
+    """The !cal line for the board: four [min, max] pairs then four homes (whole servo degrees)."""
+    return "!cal " + ",".join(str(int(v)) for p in limits for v in p) + "," + ",".join(str(int(h)) for h in homes)
 
 
 def encode_pos(degs, seq):
@@ -60,6 +74,9 @@ class SerialLink:
         self.board_rate = None           # last damper settings the board reported (deg/s, deg)
         self.board_range = None
         self.board_pulse = None          # (us at 0 degrees, us at 180 degrees) the board uses in mirror mode, once it has said
+        self.board_ik = None             # None: the board has not said (an older sketch); "missing" or "set": it runs the IK and does / does not have the calibration
+        self.cal_line = None             # the !cal line to give the board whenever it opens or says it lost the calibration
+        self.last_pose = None            # last tool-tip pose sent in mirror mode
         self.phase = "off" if not self.enabled else "waiting"   # off | waiting | open | busy | suspended
         self.status = "serial: off" if not self.enabled else "serial: waiting for COM port"
         self._lock = threading.RLock()
@@ -85,7 +102,8 @@ class SerialLink:
         s.port, s.baudrate, s.write_timeout = device, self.baud, 0.05
         s.dtr = s.rts = False          # set BEFORE open: avoids resetting the ESP32
         s.open()
-        for cmd in self.commands + ["!show"]:     # !show: board replies with its saved settings
+        self.board_ik = None
+        for cmd in self.commands + ([self.cal_line] if self.cal_line else []) + ["!show"]:     # !show: board replies with its saved settings
             s.write(cmd.encode("ascii") + b"\n")
         self.ser, self.device, self._rx = s, device, ""
         self.phase = "open"
@@ -143,6 +161,14 @@ class SerialLink:
             m = SETTINGS_RE.search(line)
             if m:
                 self.board_rate, self.board_range = float(m.group(1)), float(m.group(2))
+            mi = IK_RE.search(line)
+            if mi:
+                self.board_ik = mi.group(1)
+                if self.board_ik == "missing" and self.cal_line:          # a reset board has lost it: give it back (it refuses while following, which is right)
+                    try:
+                        self.ser.write(self.cal_line.encode("ascii") + b"\n")
+                    except (OSError, serial.SerialException, serial.SerialTimeoutException):
+                        pass
             if self.on_line:
                 try:
                     self.on_line(line)
@@ -192,9 +218,44 @@ class SerialLink:
                     return
                 self.seq += 1
                 self.ser.write(encode_pos(degs, self.seq))
-                self.last_pos, self.last_sent, self.last_state = degs, now, None
+                self.last_pos, self.last_sent, self.last_state, self.last_pose = degs, now, None, None
             except (OSError, serial.SerialException, serial.SerialTimeoutException):
                 self._drop("COM port lost (unplugged?), waiting")
+
+    def update_pose(self, pose, now=None):
+        """Mirror mode with the IK on the board: send the tool-tip pose (x, y, z mm, angle degrees), at most about 25 times a second, repeated at
+        least every 0.1 s as a heartbeat. Reads the board's output too. Never raises, never blocks for long."""
+        now = time.time() if now is None else now
+        pose = [float(v) for v in pose]
+        with self._lock:
+            if not self._ensure_open(now):
+                return
+            try:
+                self._drain()
+                moved = self.last_pose is None or max(abs(a - b) for a, b in zip(pose, self.last_pose)) >= 0.05
+                if not ((moved and now - self.last_sent >= 0.04) or now - self.last_sent >= HEARTBEAT_S):
+                    return
+                self.seq += 1
+                self.ser.write(encode_pose(pose, self.seq))
+                self.last_pose, self.last_sent, self.last_state, self.last_pos = pose, now, None, None
+            except (OSError, serial.SerialException, serial.SerialTimeoutException):
+                self._drop("COM port lost (unplugged?), waiting")
+
+    def set_calibration(self, limits, homes):
+        """Remember the real arm's calibration for the board and give it now if the port is open (the board refuses it while it is following the hub)."""
+        line = cal_line(limits, homes)
+        with self._lock:
+            self.cal_line = line
+            if self.ser is not None:
+                try:
+                    self.ser.write(line.encode("ascii") + b"\n")
+                except (OSError, serial.SerialException, serial.SerialTimeoutException):
+                    self._drop("COM port lost (unplugged?), waiting")
+
+    @property
+    def ik_ready(self):
+        """True when the board runs the inverse kinematics and has the calibration, so the hub may send poses instead of joint angles."""
+        return self.board_ik == "set"
 
     @property
     def connected(self):

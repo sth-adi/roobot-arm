@@ -509,6 +509,7 @@ void handleLine(const String &line) {
 #ifdef MIRROR_HOST
 String netBuf;
 uint32_t lastNetTry = 0, lastNetPing = 0, lastNetRx = 0;
+uint8_t netWriteFails = 0;
 
 // Keeps the link to the hub up and moves bytes both ways without ever waiting: connection attempts are short and rare, and they are skipped
 // while USB is driving so they cannot make the motion stutter; output is sent only into free socket space.
@@ -518,11 +519,14 @@ void pollNet() {
     return;
   }
   uint32_t now = millis();
-  if (netLinkUp && (!mirrorNet.connected() || now - lastNetRx > 6000)) {      // the hub went away (it pings every second)
+  // The hub pings once a second, so a link that has said nothing for 6 s is gone. WiFiClient::connected() is not used: it looks at errno, which the
+  // HTTPS polls leave set after every call, and it then reports a healthy connection as closed (the link dropped about 3 s after every connect).
+  if (netLinkUp && (now - lastNetRx > 6000 || netWriteFails >= 20)) {
+    Serial.printf("net: link to the hub lost (%s)\n", netWriteFails >= 20 ? "writes keep failing" : "silent for 6 s");
     netLinkUp = false;
     mirrorNet.stop();
     netOut.clear();
-    Serial.println("net: link to the hub lost");
+    netWriteFails = 0;
   }
   if (!netLinkUp) {
     bool usbBusy = lastUsbMs != 0 && now - lastUsbMs < 2000;
@@ -533,6 +537,7 @@ void pollNet() {
     mirrorNet.print("HELLO " MIRROR_KEY "\n");
     netLinkUp = true;
     netOut.clear();
+    netWriteFails = 0;
     lastNetRx = lastNetPing = now;
     Serial.println("net: connected to the hub");
     showSettings();                                   // tells the hub what this sketch can do (it goes to the hub too)
@@ -548,7 +553,10 @@ void pollNet() {
   if (room > 0) {
     uint8_t tmp[128];
     size_t n = netOut.take(tmp, min((size_t)room, sizeof(tmp)));
-    if (n) mirrorNet.write(tmp, n);
+    if (n) {
+      if (mirrorNet.write(tmp, n) == 0) { if (netWriteFails < 255) netWriteFails++; }
+      else netWriteFails = 0;
+    }
   }
   if (now - lastNetPing >= 1000) {
     lastNetPing = now;
@@ -705,6 +713,9 @@ void loop() {
 void loop() {
   pollSerial();
   if (serialActive()) { delay(2); return; }   // direct USB input is driving: skip slow HTTPS polls
+#ifdef MIRROR_HOST
+  if (netLinkUp) { delay(2); return; }        // the hub is connected and is the input (it sends "$" frames while ARMED): no HTTPS polls, which block for seconds
+#endif
   if (millis() - lastPoll < POLL_MS) return;
   lastPoll = millis();
   if (!wifiUp()) { handleInput(false, ArmInput(), 0); return; }

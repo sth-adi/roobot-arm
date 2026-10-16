@@ -82,10 +82,15 @@ class SketchWifiTest(unittest.TestCase):
 
     def test_a_silent_hub_is_noticed_and_the_arm_holds_like_it_does_for_usb(self):
         self.assertIn("now - lastNetRx > 6000", self.src)
+        self.assertNotIn("mirrorNet.connected()", self.src)             # it reads a stale errno left by the HTTPS polls and called a healthy link closed (a drop every ~3 s)
+        self.assertIn("netWriteFails >= 20", self.src)
         # frames from the WiFi link go through the same handler as USB, so the same freshness rule (400 ms) and the same checks apply
         self.assertIn("handleLine(netBuf)", self.src)
         self.assertIn("handleLine(serBuf)", self.src)
         self.assertEqual(self.src.count("void handleLine(const String &line) {"), 1)
+
+    def test_no_slow_https_polls_while_the_hub_is_connected(self):
+        self.assertIn("if (netLinkUp) { delay(2); return; }", self.src)
 
     def test_pollserial_pumps_the_link_in_every_loop_and_wait(self):
         i = self.src.index("void pollSerial() {")

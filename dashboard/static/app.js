@@ -646,8 +646,10 @@ function mountBoard(root) {
       <div class="term tall" id="b-term" role="log" aria-live="off"></div></section>
     <div>
       <section class="sec" style="border-top:0"><h2>Mirror the virtual arm</h2>
-        <p class="lead">The real arm follows the virtual one: sticks, home (B), sequences and their speeds all run in the virtual arm with its inverse kinematics, and the hub streams the joint angles to the board over USB. It only moves while the output is ARMED, never faster than 60 deg/s, and it holds still if the stream stops. Off until you switch it on.</p>
+        <p class="lead">The real arm follows the virtual one: sticks, home (B), sequences and their speeds all run in the virtual arm with its inverse kinematics, and the hub streams to the board over USB: the joint angles, or, with the current USB sketch, the tool position, so that the board runs Sam's inverse kinematics itself. It only moves while the output is ARMED, never faster than 60 deg/s, and it holds still if the stream stops. Off until you switch it on.</p>
         <div class="inline" style="flex-wrap:wrap;gap:8px"><button class="btn" id="m-on" type="button">Mirror: off</button><span class="st idle" id="m-st">off</span></div>
+        <div class="note" id="m-ik" style="margin-top:8px"></div>
+        <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:6px"><button class="btn sm" id="m-calend" type="button">Load the arm's calibration from the end server</button><span class="note" id="m-calsrc"></span></div>
         <p class="note" style="margin-top:10px">Before trusting a sequence, find out which joint is which: arm the output with mirror on, press a joint, and watch which part of the real arm nudges (about 8 degrees, slowly). Joint 1 is the base, then shoulder, elbow, wrist. If the wrong part moves, change the map below.</p>
         <div class="inline" style="flex-wrap:wrap;gap:8px" id="m-test">${[1, 2, 3, 4].map((j) => `<button class="btn sm" data-j="${j}" type="button">Nudge joint ${j}</button>`).join("")}</div>
         <div class="inline" style="flex-wrap:wrap;gap:8px;margin-top:10px"><label class="muted">Joint to channel map <input id="m-map" value="3,2,1,0" style="width:90px" aria-label="Joint to channel map"></label><button class="btn sm" id="m-map-set" type="button">Send to board</button></div>
@@ -697,6 +699,10 @@ function mountBoard(root) {
   $r("#m-on").addEventListener("click", async () => {
     const on = !(S.st && S.st.mirror && S.st.mirror.on), r = await api("/api/mirror", { action: on ? "on" : "off" });
     if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
+  });
+  $r("#m-calend").addEventListener("click", async () => {
+    const r = await api("/api/sim", { calibration_from: "end" });
+    toast(r.ok ? (r.message || "Calibration loaded") : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad");
   });
   $r("#m-test").addEventListener("click", async (e) => {
     const b = e.target.closest("[data-j]"); if (!b) return;
@@ -790,6 +796,13 @@ function mountBoard(root) {
       ["#m-c45", "#m-c135", "#m-pose-go"].forEach((id) => { $r(id).disabled = !mi.active; });
       if (mi.pulse && JSON.stringify(mi.pulse) !== predKey) loadPred(true);
       $r("#m-cstate").textContent = mi.angle ? `holding joint ${mi.angle.joint} at ${mi.angle.deg} servo degrees` : "";
+      const why = mi.board_ik == null ? "the sketch on the board is older: flash the USB jog sketch on the Firmware page"
+        : mi.board_ik === "missing" ? "the board has not got the calibration yet" : mi.tool !== mi.board_tool ? `the hub's tool length is ${mi.tool} mm and the board's is ${mi.board_tool} mm: load the calibration below`
+        : "a joint test is running";
+      $r("#m-ik").textContent = mi.ik === "board" ? "Inverse kinematics: on the board (Sam's code, with the arm's calibration). The hub sends the tool position."
+        : "Inverse kinematics: in the hub, which sends joint angles (" + why + ").";
+      $r("#m-calsrc").textContent = "Calibration now: " + ({ "end server": "from the end server", cache: "from the last one saved", "set by hand": "set by hand", default: "the defaults (no joint reversed)" }[mi.cal_source] || mi.cal_source || "-");
+      $r("#m-calend").disabled = !!(mi.on && st.armed);
       const lim = st.sim && st.sim.limits;
       $r("#m-cal").hidden = !(mi.on && lim && lim.every((l) => l[0] === 0 && l[1] === 180));
       $r("#b-usb-n").textContent = u.enabled ? "On: opens the port when a board is plugged in." : "Off: the port is free for other tools.";

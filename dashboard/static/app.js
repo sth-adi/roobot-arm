@@ -645,7 +645,13 @@ function mountBoard(root) {
         <button class="btn sm" id="b-show" type="button">Read settings</button></div>
       <div class="term tall" id="b-term" role="log" aria-live="off"></div></section>
     <div>
-      <section class="sec" style="border-top:0"><h2>Mirror the virtual arm</h2>
+      <section class="sec" style="border-top:0"><h2>Board over WiFi (no USB cable)</h2>
+        <p class="lead">The board can connect out to this PC and be driven exactly like over USB: mirror mode, the board log, the settings. Add three lines to the sketch's <span class="mono">secrets.h</span>, flash it once over USB, and from then on it connects by itself whenever it is on the same WiFi. Not encrypted, so only on a network you trust. USB wins when both are connected.</p>
+        <div class="inline" style="flex-wrap:wrap;gap:8px"><span class="st idle" id="w-st">-</span><button class="btn sm" id="w-show" type="button">Show the lines for secrets.h</button><button class="btn sm" id="w-copy" type="button" hidden>Copy</button></div>
+        <pre class="mono" id="w-snip" hidden></pre>
+        <p class="note" id="w-note"></p>
+      </section>
+      <section class="sec"><h2>Mirror the virtual arm</h2>
         <p class="lead">The real arm follows the virtual one: sticks, home (B), sequences and their speeds all run in the virtual arm with its inverse kinematics, and the hub streams to the board over USB: the joint angles, or, with the current USB sketch, the tool position, so that the board runs Sam's inverse kinematics itself. It only moves while the output is ARMED, never faster than 60 deg/s, and it holds still if the stream stops. Off until you switch it on.</p>
         <div class="inline" style="flex-wrap:wrap;gap:8px"><button class="btn" id="m-on" type="button">Mirror: off</button><span class="st idle" id="m-st">off</span></div>
         <div class="note" id="m-ik" style="margin-top:8px"></div>
@@ -700,6 +706,15 @@ function mountBoard(root) {
     const on = !(S.st && S.st.mirror && S.st.mirror.on), r = await api("/api/mirror", { action: on ? "on" : "off" });
     if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
   });
+  $r("#w-show").addEventListener("click", async () => {
+    let j = {};
+    try { j = await (await fetch("/api/boardlink")).json(); } catch (e) { /* hub not reachable */ }
+    const snip = $r("#w-snip");
+    if (!j.snippet) { toast(j.error || "The hub is not reachable", "bad"); return; }
+    snip.textContent = j.snippet; snip.hidden = false; $r("#w-copy").hidden = false;
+    $r("#w-note").textContent = "These are this PC's address and the hub's key for the board. If the PC's address changes (another network), change MIRROR_HOST and flash again, or give the PC a fixed address on your router.";
+  });
+  $r("#w-copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($r("#w-snip").textContent); toast("Lines copied", "ok"); } catch (e) { /* select by hand */ } });
   $r("#m-calend").addEventListener("click", async () => {
     const r = await api("/api/sim", { calibration_from: "end" });
     toast(r.ok ? (r.message || "Calibration loaded") : (r.error || "The hub is not reachable"), r.ok ? "ok" : "bad");
@@ -788,6 +803,9 @@ function mountBoard(root) {
         suspended: "The port is released while firmware uploads.", off: "The USB link is switched off, so the board is not being read." }[u.phase];
       $r("#b-msg").innerHTML = msg ? `<div class="err" style="margin-bottom:16px">${esc(msg)}</div>` : "";
       $r("#b-usb").textContent = u.enabled ? "Turn link off" : "Turn link on";
+      const bw = st.board_wifi || {};
+      $r("#w-st").className = "st " + (bw.connected ? "ok" : bw.listening ? "idle" : "bad");
+      $r("#w-st").textContent = bw.connected ? "the board is connected over WiFi (" + (bw.peer || "") + ")" : bw.listening ? "waiting for the board on port " + bw.port : "off (the hub was not started with --lan)";
       const mi = st.mirror || {};
       $r("#m-on").textContent = mi.on ? "Mirror: on (press to switch off)" : "Mirror: off (press to switch on)";
       $r("#m-st").className = "st " + (mi.active ? "run" : mi.on ? "warn" : "idle");

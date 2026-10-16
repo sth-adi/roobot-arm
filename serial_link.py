@@ -17,6 +17,9 @@ can still read as a valid but wrong number and swing the arm for a moment.
 The board needs the real arm's calibration for that, sent as  !cal min1,max1,...,min4,max4,home1,...,home4  (whole degrees; a reversed pair
 marks an inverted joint). It is sent every time the port opens and again if the board reports it has lost it.
 
+The same lines also travel over WiFi when the board connects out to the hub (dashboard/netlink.py): attach() gives the link that connection
+in place of a COM port, and everything else (mirror frames, !cal, the board's log) works unchanged.
+
 Used by controller_gui.py (update() each frame) and by the dashboard hub (service() to keep the port open
 and read the board's output, update() only while the output is ARMED).
 """
@@ -124,6 +127,27 @@ class SerialLink:
         self.phase = "open"
         self.status = f"serial: sending on {device}" + (f"  ({', '.join(self.commands)})" if self.commands else "")
 
+    def attach(self, port, name):
+        """Use a connected port-like object (the board's WiFi connection, see netlink.py) as the link, like a freshly opened COM port. False when the link
+        is not free: off, suspended for an upload, or a COM port is open (USB wins). A new connection from the board replaces an older WiFi one."""
+        with self._lock:
+            if not self.enabled or self.suspended:
+                return False
+            if self.ser is not None and not (self.device or "").startswith("wifi "):
+                return False
+            if self.ser is not None:
+                self._drop("replaced by a new connection from the board")
+            try:
+                for cmd in self.commands + ([self.cal_line] if self.cal_line else []) + ["!show"]:
+                    port.write(cmd.encode("ascii") + b"\n")
+            except (OSError, ValueError):
+                return False
+            self.board_ik = None
+            self.ser, self.device, self._rx = port, name, ""
+            self.phase = "open"
+            self.status = "serial: sending over WiFi to " + name.replace("wifi ", "", 1)
+            return True
+
     def _drop(self, why, phase="waiting"):
         try:
             if self.ser:
@@ -143,7 +167,10 @@ class SerialLink:
             self.phase, self.status = "suspended", "serial: released for upload"
             return False
         if self.ser is not None:
-            return True
+            if getattr(self.ser, "dead", False):             # a WiFi connection that has gone silent (the board pings every second)
+                self._drop("the board's WiFi link went quiet")
+            else:
+                return True
         if now - self.last_scan < RESCAN_S:
             return False
         self.last_scan = now
@@ -160,6 +187,9 @@ class SerialLink:
 
     def _drain(self):
         """Read whatever the board printed; deliver complete lines and pick up its settings reply."""
+        keepalive = getattr(self.ser, "keepalive", None)
+        if keepalive:
+            keepalive()                                       # a WiFi connection is pinged once a second so the board knows the hub is there
         n = self.ser.in_waiting
         if not n:
             return

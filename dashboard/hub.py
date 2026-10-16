@@ -55,6 +55,7 @@ import agent as AGENT  # noqa: E402
 import preflight as PRE  # noqa: E402
 import voice as VOICE  # noqa: E402
 import tls as TLS  # noqa: E402
+import endcal as ENDCAL  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
 CALIB = TUNER.Calibration(str(ROOT / "tuning"))        # limits learned from real-arm trials, per sequence (local to this PC)
 
@@ -327,6 +328,52 @@ class Hub:
         except Exception:
             return False
 
+    BOARD_TOOL_MM = 53.0                            # the tool length Sam's inverse kinematics has built in (the board's sketch uses his code)
+    cal_source = "default"                          # where the virtual arm's limits and homes came from: default | local server | end server | cache
+
+    def _link_cal(self):
+        """Give the board the virtual arm's limits and homes, so both run the inverse kinematics with the same numbers."""
+        with self.sim_lock:
+            limits, homes = [list(p) for p in self.sim.limits], list(self.sim.homes)
+        self.link.set_calibration(limits, homes)
+
+    def load_end_calibration(self):
+        """Read the real arm's calibration from the end server (read-only), and use it in the virtual arm, the local server and the board; the tool
+        length becomes the 53 mm the board's inverse kinematics has. Not while the real arm is following the virtual one: it would jump.
+        Returns (ok, message)."""
+        if self.armed and self.mirror["on"]:
+            return False, "switch the output to SAFE first: a new calibration would move the real arm"
+        src = "end server"
+        try:
+            limits, homes = ENDCAL.fetch(self.env_forward())
+            ENDCAL.save_cache(limits, homes)
+        except Exception as e:
+            try:
+                limits, homes = ENDCAL.load_cache()
+                src = "cache"
+                self.log("hub", "could not read the calibration from the end server (%s: %s): using the last one saved" % (type(e).__name__, str(e)[:80]))
+            except Exception:
+                return False, "could not read the calibration from the end server (%s: %s) and none is saved" % (type(e).__name__, str(e)[:80])
+        with self.sim_lock:
+            self.sim.set_calibration(limits, homes)
+            self.sim.set_tool(self.BOARD_TOOL_MM)
+        self.cal_source = src
+        self.push_calibration()
+        self._link_cal()
+        self.log("hub", "calibration from the %s: limits %s homes %s, tool %.0f mm (reversed limits mark an inverted joint)" % (src, limits, homes, self.BOARD_TOOL_MM))
+        return True, "calibration loaded from the %s" % src
+
+    def _boot_calibration(self):
+        """At start: wait for the local server's calibration sync (so it cannot overwrite this), then load the real one if FORWARD_URL is set."""
+        if not self.env_forward():
+            return
+        end = time.time() + 20
+        while time.time() < end and not self._cal_synced and not self.stop.is_set():
+            time.sleep(0.3)
+        ok, msg = self.load_end_calibration()
+        if not ok:
+            self.log("hub", "calibration: " + msg)
+
     def push_speed(self):
         """Send the damper to the server as "maxSpeed", which it adds to every packet for the real arm. The firmware
         accepts 1-60 deg/s, so 0 (no limit in the simulation) goes as the 60 deg/s ceiling.
@@ -357,6 +404,7 @@ class Hub:
                         self.sim.set_calibration(cal["jointLimits"], cal["jointHomes"])
                 if changed:
                     self.log("hub", "virtual arm: loaded calibration from the server")
+                    self._link_cal()
                 self._cal_synced = True
             except urllib.error.HTTPError as e:
                 if e.code == 404 and self.push_calibration():
@@ -402,7 +450,10 @@ class Hub:
             try:
                 st = self.fresh_state()
                 if self.armed and self.mirror["on"]:
-                    self.link.update_positions(self._mirror_degrees(), now)     # the virtual arm's joint angles: the board follows them
+                    if self._board_ik_active():
+                        self.link.update_pose(self._mirror_pose(), now)          # the virtual arm's tool-tip pose: the board runs the inverse kinematics
+                    else:
+                        self.link.update_positions(self._mirror_degrees(), now)  # the virtual arm's joint angles: the board follows them
                 elif self.armed and st is not None:
                     self.link.update(st, now)       # send input + read the board
                 else:
@@ -535,6 +586,17 @@ class Hub:
                 degs[joint] = max(0.0, min(180.0, degs[joint] + 8.0 * math.sin(2 * math.pi * el / 6.0)))     # a slow +-8 degree nudge of ONE joint
         return degs
 
+    def _board_ik_active(self):
+        """True when the board's sketch runs the inverse kinematics and has the calibration, and nothing needs single joints driven
+        (the nudge test and the servo-mapping check speak in joint angles) and the hub's tool length is the one the board's IK has."""
+        with self.sim_lock:
+            tool_ok = abs(self.sim.tool - self.BOARD_TOOL_MM) < 0.01
+        return bool(self.link.ik_ready and tool_ok and not self._mirror_test and not self._mirror_angle)
+
+    def _mirror_pose(self):
+        with self.sim_lock:
+            return list(self.sim.pose())
+
     def _mirror_prediction(self):
         """Where the tool tip should end up at the test pose under each candidate servo mapping, given the pulse range the board is using now."""
         board = tuple(self.link.board_pulse) if self.link.board_pulse else SERVOMAP.SAM
@@ -548,7 +610,9 @@ class Hub:
         return {"on": bool(self.mirror["on"]), "active": bool(self.mirror["on"] and self.armed and self.link.connected),
                 "testing": (self._mirror_test[0] + 1) if self._mirror_test else None,
                 "angle": ({"joint": self._mirror_angle[0] + 1, "deg": self._mirror_angle[1]} if self._mirror_angle else None),
-                "pulse": list(self.link.board_pulse) if self.link.board_pulse else None}
+                "pulse": list(self.link.board_pulse) if self.link.board_pulse else None,
+                "ik": "board" if self._board_ik_active() else "hub", "board_ik": self.link.board_ik, "cal_source": self.cal_source,
+                "tool": self.sim.tool, "board_tool": self.BOARD_TOOL_MM}
 
     def mirror_action(self, d):
         a = d.get("action")
@@ -1600,6 +1664,7 @@ class Hub:
         for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop):
             threading.Thread(target=fn, daemon=True).start()
         threading.Thread(target=self._ticker, daemon=True).start()
+        threading.Thread(target=self._boot_calibration, daemon=True).start()
         self.set_forward(False)                     # start SAFE: the server must not forward until ARMED
 
     def _ticker(self):
@@ -1845,6 +1910,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(502, {"sent": False, "reason": "local server unreachable"})
             if path == "/api/sim":              # the virtual arm: damper, tool length, calibration, home, saved positions
                 push = push_rate = False
+                if d.get("calibration_from") == "end":
+                    ok, msg = HUB.load_end_calibration()
+                    return self._json(200 if ok else 409, {"ok": ok, "error": None if ok else msg, "message": msg, "sim": HUB._sim_snapshot()})
+                if ("calibration" in d or "tool" in d) and HUB.armed and HUB.mirror["on"]:
+                    return self._json(409, {"error": "switch the output to SAFE first: changing the calibration or the tool length would move the real arm"})
                 with HUB.sim_lock:
                     if "rate" in d:
                         push_rate = True
@@ -1873,9 +1943,11 @@ class Handler(BaseHTTPRequestHandler):
                         if not isinstance(c, dict):
                             raise ValueError("calibration must be an object")
                         HUB.sim.set_calibration(c.get("jointLimits"), c.get("jointHomes"))
+                        HUB.cal_source = "set by hand"
                         push = True
                 if push:
                     HUB.push_calibration()
+                    HUB._link_cal()
                 if push_rate:
                     HUB.push_speed()
                 return self._json(200, {"ok": True, "sim": HUB._sim_snapshot()})

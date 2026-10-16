@@ -343,6 +343,27 @@ void holdPos() {
   for (int n = 0; n < 4; n++) { posGoalUs[n] = curUs[n]; tgtUs[n] = curUs[n]; }
 }
 
+// A position frame ("@..." or "#...") ends with "*HH": the XOR of every byte between its first character and the "*", in two hex digits
+// (serial_link.checksum). Without a matching one the frame is refused whole: a byte lost or garbled on the wire can still read as a valid
+// but wrong number ("246.70" -> "26.70") and would swing the arm until the next frame. Refusals are counted and printed at most twice a second.
+bool frameChecksumOk(const String &s) {
+  static uint32_t lastBad = 0, badCount = 0;
+  int star = s.indexOf('*');
+  bool ok = false;
+  if (star > 1 && (int)s.length() == star + 3) {
+    uint8_t x = 0;
+    for (int i = 1; i < star; i++) x ^= (uint8_t)s[i];
+    char want[3];
+    snprintf(want, sizeof(want), "%02X", x);
+    ok = s[star + 1] == want[0] && s[star + 2] == want[1];
+  }
+  if (!ok) {
+    badCount++;
+    if (millis() - lastBad >= 500) { lastBad = millis(); Serial.printf("mirror: refused a damaged frame (%lu so far)\n", (unsigned long)badCount); }
+  }
+  return ok;
+}
+
 // "@d1,d2,d3,d4,seq": four joint angles in servo degrees. Anything out of range (or not a number) is refused whole.
 bool parsePosLine(const String &s) {
   if (s.length() < 8 || s[0] != '@') return false;
@@ -366,8 +387,31 @@ bool parsePoseLine(const String &s) {
   if (sscanf(s.c_str() + 1, "%f,%f,%f,%f", &x, &y, &z, &a) != 4) return false;
   if (!(fabsf(x) <= 450.0f && fabsf(y) <= 450.0f && z >= -100.0f && z <= 500.0f && fabsf(a) <= 360.0f)) return why("IK: pose out of range, refused");
   if (!mirrorIk.known) return why("IK: no calibration yet (send !cal), pose refused");
+  // The hub's pose moves a few mm per frame. A pose far from the last one, arriving right after it, is refused once; it is accepted if the
+  // next frame agrees with it (a real jump, e.g. mirror just switched on or a go-home), so a stray frame cannot jerk the arm but a real move is
+  // only ever delayed by one frame. After a pause in the frames (300 ms) any pose is taken, as the arm holds meanwhile.
+  static float lastPose[4] = {0, 0, 0, 0}, pendPose[4] = {0, 0, 0, 0};
+  static uint32_t lastPoseMs = 0;
+  static bool havePose = false, havePend = false;
+  const float now4[4] = {x, y, z, a};
+  const float JUMP_MM = 30.0f, JUMP_DEG = 30.0f, AGREE_MM = 2.0f;
+  if (havePose && millis() - lastPoseMs < 300) {
+    float far = sqrtf((x - lastPose[0]) * (x - lastPose[0]) + (y - lastPose[1]) * (y - lastPose[1]) + (z - lastPose[2]) * (z - lastPose[2]));
+    if (far > JUMP_MM || fabsf(a - lastPose[3]) > JUMP_DEG) {
+      float apart = sqrtf((x - pendPose[0]) * (x - pendPose[0]) + (y - pendPose[1]) * (y - pendPose[1]) + (z - pendPose[2]) * (z - pendPose[2]));
+      if (!(havePend && apart <= AGREE_MM && fabsf(a - pendPose[3]) <= JUMP_DEG)) {
+        for (int k = 0; k < 4; k++) pendPose[k] = now4[k];
+        havePend = true;
+        return why("mirror: a pose far from the last one, waiting for the next frame to agree");
+      }
+    }
+  }
+  havePend = false;
   float d[4];
   if (!MirrorPoseToServoDegrees(x, y, z, a, d)) return why("IK: that pose is outside the arm's reach or limits, refused");
+  for (int k = 0; k < 4; k++) lastPose[k] = now4[k];
+  lastPoseMs = millis();
+  havePose = true;
   for (int j = 0; j < 4; j++) {
     posGoalUs[jointMap[j]] = constrain(mirrorUsOf(d[j]), mirrorUsAt0, mirrorUsAt180);
   }
@@ -402,7 +446,7 @@ void pollSerial() {
       if (serBuf.length() && serBuf[0] == '!') {
         handleCommand(serBuf);
       } else if (serBuf.length() && (serBuf[0] == '@' || serBuf[0] == '#')) {
-        if (serBuf[0] == '@' ? parsePosLine(serBuf) : parsePoseLine(serBuf)) {
+        if (frameChecksumOk(serBuf) && (serBuf[0] == '@' ? parsePosLine(serBuf) : parsePoseLine(serBuf))) {
           lastSerialMs = millis();
           if (!posMode) {
             posMode = true;

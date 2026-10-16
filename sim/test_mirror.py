@@ -40,7 +40,25 @@ def linked():
 
 class FramesTest(unittest.TestCase):
     def test_frame_format(self):
-        self.assertEqual(serial_link.encode_pos([90, 45.123, 10, 180], 7), b"@90.00,45.12,10.00,180.00,7\n")
+        self.assertEqual(serial_link.encode_pos([90, 45.123, 10, 180], 7), b"@90.00,45.12,10.00,180.00,7*" + self.xor("90.00,45.12,10.00,180.00,7") + b"\n")
+
+    @staticmethod
+    def xor(payload):
+        c = 0
+        for ch in payload.encode("ascii"):
+            c ^= ch
+        return ("%02X" % c).encode("ascii")
+
+    def test_a_damaged_frame_never_passes_the_checksum(self):
+        """The board refuses a frame whose checksum does not match, so a dropped or changed byte cannot read as a valid but wrong pose."""
+        line = serial_link.encode_pose([-40, 250, 200, 0], 17).decode("ascii").rstrip("\n")
+        body, _, ck = line[1:].partition("*")
+        self.assertEqual(serial_link.checksum(body), ck)
+        for i in range(len(body)):
+            self.assertNotEqual(serial_link.checksum(body[:i] + body[i + 1:]), ck, "dropping byte %d went unnoticed" % i)
+            for ch in "0123456789.-,":
+                if ch != body[i]:
+                    self.assertNotEqual(serial_link.checksum(body[:i] + ch + body[i + 1:]), ck, "changing byte %d went unnoticed" % i)
 
     def test_unchanged_positions_are_repeated_as_a_heartbeat_not_every_call(self):
         link = linked()
@@ -162,7 +180,7 @@ class PoseFramesTest(unittest.TestCase):
     CAL = "!cal 11,180,0,115,161,21,0,180,95,115,27,127\n"
 
     def test_frame_and_calibration_formats(self):
-        self.assertEqual(serial_link.encode_pose([0, 200, 100.5, 0], 3), b"#0.00,200.00,100.50,0.00,3\n")
+        self.assertEqual(serial_link.encode_pose([0, 200, 100.5, 0], 3), b"#0.00,200.00,100.50,0.00,3*" + FramesTest.xor("0.00,200.00,100.50,0.00,3") + b"\n")
         self.assertEqual(serial_link.cal_line(*self.REAL) + "\n", self.CAL)
 
     def test_poses_are_paced_like_angles(self):

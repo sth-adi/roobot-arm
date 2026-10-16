@@ -11,6 +11,9 @@ Mirror mode sends absolute joint positions instead (the virtual arm's joint angl
     @d1,d2,d3,d4,seq\\n
 or, when the board runs the inverse kinematics itself (the USB sketch says so: "mirror ik: supported"), the tool-tip pose in mm and degrees:
     #x,y,z,angle,seq\\n
+Both position frames end with a checksum "*HH" before the newline: the XOR of every byte between the first character and the "*", as two hex
+digits (e.g. #0.00,200.00,100.50,0.00,3*5A). The board refuses a frame without a matching checksum, because a byte lost or garbled on the wire
+can still read as a valid but wrong number and swing the arm for a moment.
 The board needs the real arm's calibration for that, sent as  !cal min1,max1,...,min4,max4,home1,...,home4  (whole degrees; a reversed pair
 marks an inverted joint). It is sent every time the port opens and again if the board reports it has lost it.
 
@@ -43,8 +46,20 @@ def encode(state, seq):
             f"{state['lt']:.3f},{state['rt']:.3f},{mask},{dx},{dy},{seq}\n").encode("ascii")
 
 
+def checksum(payload):
+    """XOR of the bytes of `payload` (the text after a frame's first character and before its "*"), as two upper-case hex digits."""
+    c = 0
+    for b in payload.encode("ascii"):
+        c ^= b
+    return "%02X" % c
+
+
+def _frame(kind, payload):
+    return ("%s%s*%s\n" % (kind, payload, checksum(payload))).encode("ascii")
+
+
 def encode_pose(pose, seq):
-    return ("#%.2f,%.2f,%.2f,%.2f,%d\n" % (pose[0], pose[1], pose[2], pose[3], seq)).encode("ascii")
+    return _frame("#", "%.2f,%.2f,%.2f,%.2f,%d" % (pose[0], pose[1], pose[2], pose[3], seq))
 
 
 def cal_line(limits, homes):
@@ -53,7 +68,7 @@ def cal_line(limits, homes):
 
 
 def encode_pos(degs, seq):
-    return ("@%.2f,%.2f,%.2f,%.2f,%d\n" % (degs[0], degs[1], degs[2], degs[3], seq)).encode("ascii")
+    return _frame("@", "%.2f,%.2f,%.2f,%.2f,%d" % (degs[0], degs[1], degs[2], degs[3], seq))
 
 
 class SerialLink:

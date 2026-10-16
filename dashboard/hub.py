@@ -146,6 +146,7 @@ class Hub:
         # board / serial link
         self.link = SerialLink()
         self.link.on_line = self._board_line
+        self.link.on_event = lambda text: self.log("hub", text)      # why a WiFi connection was dropped
         self.board = {"pos": None, "wifi": None, "source": None, "last_line_t": None}
         self.board_lines = collections.deque(maxlen=400)
         # services / logs

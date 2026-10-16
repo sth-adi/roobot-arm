@@ -168,12 +168,16 @@ class WifiLinkTest(unittest.TestCase):
         self.assertEqual(self.link.phase, "waiting")
 
     def test_a_board_that_goes_quiet_is_dropped_so_a_stale_connection_cannot_hold_the_link(self):
+        events = []
+        self.link.on_event = events.append
         self.board()
         self.assertTrue(self.attached())
         with mock.patch.object(netlink, "SILENT_S", 0.1):
             time.sleep(0.2)
             self.service()
         self.assertIsNone(self.link.device)
+        self.assertEqual(len(events), 1)                                       # and the hub says why, so a flapping link can be understood from its log
+        self.assertIn("went quiet", events[0])
 
     def test_the_hub_pings_once_a_second_so_the_board_can_tell_it_is_there(self):
         b = self.board()

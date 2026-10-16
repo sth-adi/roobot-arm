@@ -89,6 +89,7 @@ class SerialLink:
         self.last_pos = None             # last joint angles sent in mirror mode
         self._rx = ""                    # partial line buffer
         self.on_line = None              # optional callable(str): every complete line the board prints
+        self.on_event = None             # optional callable(str): why a WiFi connection was dropped (a COM port that vanishes needs no explanation)
         self.board_rate = None           # last damper settings the board reported (deg/s, deg)
         self.board_range = None
         self.board_pulse = None          # (us at 0 degrees, us at 180 degrees) the board uses in mirror mode, once it has said
@@ -148,7 +149,16 @@ class SerialLink:
             self.status = "serial: sending over WiFi to " + name.replace("wifi ", "", 1)
             return True
 
+    def _lost(self):
+        """The wording for a link that failed under us: a cable for a COM port, the connection for a WiFi board."""
+        return "board's WiFi connection lost, waiting" if (self.device or "").startswith("wifi ") else "COM port lost (unplugged?), waiting"
+
     def _drop(self, why, phase="waiting"):
+        if self.on_event and self.ser is not None and (self.device or "").startswith("wifi "):
+            try:
+                self.on_event("the board's WiFi link was dropped: " + why)
+            except Exception:
+                pass
         try:
             if self.ser:
                 self.ser.close()
@@ -230,7 +240,7 @@ class SerialLink:
             try:
                 self._drain()
             except (OSError, serial.SerialException):
-                self._drop("COM port lost (unplugged?), waiting")
+                self._drop(self._lost())
 
     def update(self, state, now=None):
         """Call every loop with the latest state: service + send. Never raises, never blocks for long."""
@@ -246,7 +256,7 @@ class SerialLink:
                 self.ser.write(encode(state, self.seq))
                 self.last_state, self.last_sent = state, now
             except (OSError, serial.SerialException, serial.SerialTimeoutException):
-                self._drop("COM port lost (unplugged?), waiting")
+                self._drop(self._lost())
 
     def update_positions(self, degs, now=None):
         """Mirror mode: send the four joint angles (servo degrees), at most about 25 times a second, repeated at least every 0.1 s so the
@@ -265,7 +275,7 @@ class SerialLink:
                 self.ser.write(encode_pos(degs, self.seq))
                 self.last_pos, self.last_sent, self.last_state, self.last_pose = degs, now, None, None
             except (OSError, serial.SerialException, serial.SerialTimeoutException):
-                self._drop("COM port lost (unplugged?), waiting")
+                self._drop(self._lost())
 
     def update_pose(self, pose, now=None):
         """Mirror mode with the IK on the board: send the tool-tip pose (x, y, z mm, angle degrees), at most about 25 times a second, repeated at
@@ -284,7 +294,7 @@ class SerialLink:
                 self.ser.write(encode_pose(pose, self.seq))
                 self.last_pose, self.last_sent, self.last_state, self.last_pos = pose, now, None, None
             except (OSError, serial.SerialException, serial.SerialTimeoutException):
-                self._drop("COM port lost (unplugged?), waiting")
+                self._drop(self._lost())
 
     def set_calibration(self, limits, homes):
         """Remember the real arm's calibration for the board and give it now if the port is open (the board refuses it while it is following the hub)."""
@@ -295,7 +305,7 @@ class SerialLink:
                 try:
                     self.ser.write(line.encode("ascii") + b"\n")
                 except (OSError, serial.SerialException, serial.SerialTimeoutException):
-                    self._drop("COM port lost (unplugged?), waiting")
+                    self._drop(self._lost())
 
     @property
     def ik_ready(self):
@@ -315,7 +325,7 @@ class SerialLink:
                 self.ser.write(text.encode("ascii") + b"\n")
                 return True
             except (OSError, serial.SerialException, serial.SerialTimeoutException):
-                self._drop("COM port lost (unplugged?), waiting")
+                self._drop(self._lost())
                 return False
 
     def set_enabled(self, on):

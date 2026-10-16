@@ -155,5 +155,85 @@ class SketchTest(unittest.TestCase):
         self.assertIsNotNone(re.search(r'jointMap\[4\] = \{3, 2, 1, 0\}', self.src))
 
 
+
+class PoseFramesTest(unittest.TestCase):
+    """Mirror mode with the inverse kinematics on the board: the hub sends the tool-tip pose and the real arm's calibration."""
+    REAL = ([[11, 180], [0, 115], [161, 21], [0, 180]], [95, 115, 27, 127])
+    CAL = "!cal 11,180,0,115,161,21,0,180,95,115,27,127\n"
+
+    def test_frame_and_calibration_formats(self):
+        self.assertEqual(serial_link.encode_pose([0, 200, 100.5, 0], 3), b"#0.00,200.00,100.50,0.00,3\n")
+        self.assertEqual(serial_link.cal_line(*self.REAL) + "\n", self.CAL)
+
+    def test_poses_are_paced_like_angles(self):
+        link = linked()
+        pose = [0, 200, 100, 0]
+        link.update_pose(pose, now=10.00)
+        link.update_pose(pose, now=10.02)                      # nothing changed, too soon
+        self.assertEqual(len(link.ser.out), 1)
+        link.update_pose([0, 200, 101, 0], now=10.03)          # moved but only 30 ms after the last frame
+        self.assertEqual(len(link.ser.out), 1)
+        link.update_pose([0, 200, 101, 0], now=10.05)
+        self.assertTrue(link.ser.out[-1].startswith("#0.00,200.00,101.00,0.00,"))
+        link.update_pose([0, 200, 101, 0], now=10.16)          # heartbeat
+        self.assertEqual(len(link.ser.out), 3)
+
+    def test_the_board_must_say_it_has_the_calibration_before_poses_are_used(self):
+        link = linked()
+        self.assertFalse(link.ik_ready)                        # an older sketch never says
+        link.ser.in_waiting = 1
+        link.ser.read = lambda n: b"mirror ik: supported, calibration missing (the board runs Sam's inverse kinematics)\n"
+        link.service(now=5.0)
+        self.assertEqual(link.board_ik, "missing")
+        self.assertFalse(link.ik_ready)
+        link.ser.read = lambda n: b"mirror ik: supported, calibration set (the board runs Sam's inverse kinematics)\n"
+        link.service(now=5.1)
+        self.assertTrue(link.ik_ready)
+
+    def test_a_board_that_lost_its_calibration_gets_it_again(self):
+        link = linked()
+        link.set_calibration(*self.REAL)
+        self.assertEqual(link.ser.out[-1], self.CAL)           # given at once when the port is open
+        link.ser.out.clear()
+        link.ser.in_waiting = 1
+        link.ser.read = lambda n: b"mirror ik: supported, calibration missing\n"                # e.g. the board reset
+        link.service(now=7.0)
+        self.assertEqual(link.ser.out, [self.CAL])
+
+    def test_without_a_calibration_nothing_is_sent_to_a_board_that_lost_it(self):
+        link = linked()
+        link.ser.in_waiting = 1
+        link.ser.read = lambda n: b"mirror ik: supported, calibration missing\n"
+        link.service(now=7.0)
+        self.assertEqual(link.ser.out, [])
+
+
+class SketchIkTest(unittest.TestCase):
+    """What the sketch does with pose frames (the maths itself is tested natively in test_ik_board.py)."""
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROOT, "arduino", "arm_receiver", "arm_receiver.ino"), encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_pose_frames_feed_the_same_follower_as_angle_frames(self):
+        self.assertIn("serBuf[0] == '@' || serBuf[0] == '#'", self.src)
+        self.assertIn("serBuf[0] == '@' ? parsePosLine(serBuf) : parsePoseLine(serBuf)", self.src)
+        self.assertRegex(self.src, r"posGoalUs\[jointMap\[j\]\] = constrain\(mirrorUsOf\(d\[j\]\), mirrorUsAt0, mirrorUsAt180\);")   # pulse clamp and joint map: unchanged
+
+    def test_a_pose_it_cannot_use_is_refused_and_the_arm_keeps_its_goal(self):
+        self.assertIn("pose out of range, refused", self.src)
+        self.assertIn("no calibration yet (send !cal), pose refused", self.src)
+        self.assertIn("outside the arm's reach or limits, refused", self.src)
+        self.assertIn("if (!mirrorIk.known) return why(", self.src)
+
+    def test_a_new_calibration_cannot_move_a_following_arm(self):
+        self.assertIn("if (posMode && serialActive()) {", self.src)
+        self.assertIn("!cal refused: the arm is following the hub", self.src)
+
+    def test_the_board_announces_that_it_can_do_this(self):
+        self.assertIn("mirror ik: supported, calibration %s", self.src)
+        self.assertIsNotNone(serial_link.IK_RE.search("mirror ik: supported, calibration set (the board runs Sam's inverse kinematics)"))
+
+
 if __name__ == "__main__":
     unittest.main()

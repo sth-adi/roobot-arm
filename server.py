@@ -94,7 +94,24 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
-        if self.path == "/stream":
+        if self.path == "/":
+            from pathlib import Path
+
+            page = Path(__file__).with_name("index.html")
+            content = page.read_bytes()
+
+            self.send_response(200)
+            self.send_header(
+                "Content-Type", "text/html; charset=utf-8"
+            )
+            self.send_header(
+                "Content-Length", str(len(content))
+            )
+            self.end_headers()
+            self.wfile.write(content)
+            return
+
+        elif self.path == "/stream":
             self._stream()
         elif self.path == "/health":
             self._send(200, {"status": "ok"})

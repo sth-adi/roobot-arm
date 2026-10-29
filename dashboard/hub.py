@@ -57,6 +57,7 @@ import voice as VOICE  # noqa: E402
 import tls as TLS  # noqa: E402
 import endcal as ENDCAL  # noqa: E402
 import netlink as NETLINK  # noqa: E402
+import backend_client as BC  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
 CALIB = TUNER.Calibration(str(ROOT / "tuning"))        # limits learned from real-arm trials, per sequence (local to this PC)
 
@@ -110,7 +111,7 @@ def describe(prev, cur):
 
 
 class Hub:
-    def __init__(self, server_url, send_speed=False):
+    def __init__(self, server_url, send_speed=False, backend_url=None, backend_speed=20.0, backend_ignore_magnet=False):
         self.server = server_url.rstrip("/")
         self.send_speed = send_speed            # off: packets reach the arm exactly as the stock UWE-RArm firmware expects
         self.stop = threading.Event()
@@ -138,6 +139,11 @@ class Hub:
         self.phone_url = None                   # set by main() with --lan
         self.phone_url_https = None             # the same over HTTPS (port + 1), which the phone's microphone needs
         self.board_listener = None              # the board's WiFi link (port + 2): the board connects out to this PC, see netlink.py
+        # the real arm through Sam's backend (--backend): the virtual arm stays the brain (keys, magnet, checks); when ARMED, the real arm follows the same poses
+        self.backend = BC.BackendClient(backend_url) if backend_url else None
+        self.backend_speed, self.backend_ignore_magnet = float(backend_speed), bool(backend_ignore_magnet)
+        self._be_thread, self._be_runner, self._be_error = None, None, None
+        self._be_info = {"online": None}
         self.cell = Workcell()                  # boxes, keys, tray and the electromagnet (sim/workcell.py)
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
         self.packets = collections.deque(maxlen=500)
@@ -694,6 +700,7 @@ class Hub:
         if not on:
             self._mirror_angle = self._mirror_test = None
             self.link.update(NEUTRAL)               # stop any motion immediately over USB
+            self._be_stop()                         # and tell the real arm's backend to stop wanting to go anywhere
         res = self.set_forward(on)
         self.log("hub", f"output {'ARMED' if on else 'SAFE'}"
                         + ("" if res else "  (warning: could not change forwarding on the local server)"))
@@ -1175,6 +1182,12 @@ class Hub:
 
     # ---- state packet and the task runner ------------------------------------------------------------------------
     def state_packet(self):
+        st = self._state_packet_core()
+        if self.backend:
+            st["backend"] = dict(self._be_info)
+        return st
+
+    def _state_packet_core(self):
         """What an AI needs to see before it decides: pose, home grip, magnet, what is running, where the keys are."""
         from sim.armsim import forward_kin
         esp = self.esp_state()
@@ -1277,6 +1290,7 @@ class Hub:
             self.chat_add("user", request)
         self._run_once = None
         self.last_move = None
+        self._be_stop()
         try:
             if self.esp_state():
                 self._http("/sequence", {"poses": []}, timeout=2.0)         # an empty list stops a run on the ESP32
@@ -1301,6 +1315,9 @@ class Hub:
                 if release:
                     self.cell.set_magnet(False)
                 self.sim.go_home()
+                hx, hy, hz, hth = forward_kin_home(self.sim)
+            if self.backend and self.armed and not self._be_busy():
+                self._be_start([{"x": hx, "y": hy, "z": hz, "angle": hth, "action": None}])
 
     def _do_action(self, act, plan, st, tid=0):
         """The quick commands the AI can ask for: status, go_home, magnet. Fixed menu: no coordinates, nothing the model wrote reaches the arm."""
@@ -1319,7 +1336,7 @@ class Hub:
                 return self._tlog("Already at home", "done")
             self._tlog("Going home", "running")
             self._send_home(st, release=False)
-            if not self._wait(lambda: self.state_packet()["at_home"], 30):
+            if not self._wait(lambda: self.state_packet()["at_home"] and not self._be_busy(), self._t(30)):
                 return self._fail(PRE.err("HOME_FAILED", "The arm could not get to its home position", "It did not reach home within 30 s.",
                                           "Check the arm is powered and armed, then try again."))
             return self._tlog("At home", "done")
@@ -1354,10 +1371,13 @@ class Hub:
         mm = sum(c * c for c in d) ** 0.5
         self._tlog("Moving %.0f mm (dx %+.0f, dy %+.0f, dz %+.0f)" % (mm, *d), "running")
         self.load_sequence(SEQ.make_sequence([target], [False], "nudge", "free movement"), False, True)   # no magnet action: a nudge leaves the magnet as it is
-        if not self._wait(lambda: self._run_once is None, 60):
-            return self._fail(PRE.err("RUN_TIMEOUT", "The move did not finish", "It was still running after 60 s.", "Say stop, then go home."))
+        if not self._wait(lambda: self._run_once is None and not self._be_busy(), self._t(60)):
+            return self._fail(PRE.err("RUN_TIMEOUT", "The move did not finish", "It was still running after %d s." % self._t(60), "Say stop, then go home."))
         if self._tid != tid:
             return
+        if self._be_error:
+            err, self._be_error = self._be_error, None
+            return self._fail(err)
         self.last_move = {"dx": d[0], "dy": d[1], "dz": d[2]}
         self._tlog("Moved", "done")
 
@@ -1367,7 +1387,7 @@ class Hub:
             return None
         (log or self._tlog)("Not at home grip: going home first")
         self._send_home(st, release=True)
-        if not self._wait(lambda: self.state_packet()["at_home"] and not self.state_packet()["magnet"], 30):
+        if not self._wait(lambda: self.state_packet()["at_home"] and not self.state_packet()["magnet"] and not self._be_busy(), self._t(30)):
             return PRE.err("HOME_FAILED", "The arm could not get to its home position", "It did not reach home grip within 30 s.",
                            "Check the arm is powered and armed, then try again.")
         return None
@@ -1399,6 +1419,10 @@ class Hub:
             problems = PRE.check(request, plan, seq, st)
             if problems:
                 return self._fail(problems[0])
+            if self.backend and self.armed:
+                bad = self._be_check(seq["poses"])
+                if bad:
+                    return self._fail(bad)
             bad = self._ensure_home(st)
             if self._tid != tid:                         # stopped while going home
                 return
@@ -1406,10 +1430,13 @@ class Hub:
                 return self._fail(bad)
             self._tlog("At home grip: running", "running")
             self.load_sequence(seq, False, True)
-            if not self._wait(lambda: self._run_once is None, 120):
-                return self._fail(PRE.err("RUN_TIMEOUT", "The sequence did not finish", "It was still running after 120 s.", "Press B to send the arm home."))
+            if not self._wait(lambda: self._run_once is None and not self._be_busy(), self._t(120)):
+                return self._fail(PRE.err("RUN_TIMEOUT", "The sequence did not finish", "It was still running after %d s." % self._t(120), "Press B to send the arm home."))
             if self._tid != tid:                         # stopped mid-run: _stop_now already told the person
                 return
+            if self._be_error:                           # the real arm refused or lost a pose: nothing after it was sent
+                err, self._be_error = self._be_error, None
+                return self._fail(err)
             time.sleep(1.5)                                  # let a released key finish falling before it is looked at
             bad = PRE.verify(seq, st, self.state_packet(), request, plan)
             if bad:
@@ -1617,6 +1644,10 @@ class Hub:
             self._run_once, self._esp_run = len(seq["poses"]), r["id"]
             self.log("hub", "sent sequence %s%s to the ESP32 (id %d)" % (seq["name"] or "(unnamed)", " (reversed)" if reverse else "", r["id"]))
             return seq
+        if run and self.backend and self.armed:
+            bad = self._be_check(seq["poses"])
+            if bad:
+                raise ValueError(bad["title"] + ". " + bad["hint"])
         saved, mag = SEQ.to_saved(seq)
         with self.sim_lock:
             self.sim.stop_replay()
@@ -1630,7 +1661,84 @@ class Hub:
                 self.sim.start_replay(wait_arrival=True, once=True)
         if run:
             self.log("hub", "running sequence %s%s once" % (seq["name"] or "(unnamed)", " (reversed)" if reverse else ""))
+            if self.backend and self.armed:
+                self._be_start(seq["poses"])
+            elif self.backend:
+                self.log("hub", "the output is SAFE: only the virtual arm moves")
         return seq
+
+    # ---- the real arm through Sam's backend ---------------------------------------------------------------------------------
+    def _be_busy(self):
+        t = self._be_thread
+        return bool(t and t.is_alive())
+
+    def _t(self, seconds):
+        """Waits are longer when a real arm is following: it moves slower than the virtual one."""
+        return seconds * 5 if self.backend else seconds
+
+    def _be_check(self, poses):
+        """A structured error for what the real arm could not do, else None. Checked before anything starts, so nothing moves halfway."""
+        if any(p.get("action") for p in poses) and not self.backend_ignore_magnet:
+            return PRE.err("MAGNET_UNSUPPORTED", "This sequence uses the magnet, but the real arm has no way to switch it",
+                           "Sam's firmware has no magnet switch.", "Use our firmware build, or start the hub with --backend-ignore-magnet to move the real arm without it.")
+        if self._be_busy():
+            return PRE.err("REAL_ARM_BUSY", "The real arm is still moving", "A run on the real arm has not finished.", "Wait for it, or say stop.")
+        return None
+
+    def _be_start(self, poses):
+        """Send poses to the real arm through the backend, in a thread. A problem ends up in self._be_error and ends the virtual run too."""
+        clean = [{"x": p["x"], "y": p["y"], "z": p["z"], "angle": p["angle"], "action": p.get("action")} for p in poses]       # the per-pose speeds are degrees per second for the virtual arm: not used here
+        noop = (lambda on: self.log("hub", "magnet %s (virtual only: no switch on this firmware)" % ("on" if on else "off"))) if self.backend_ignore_magnet else None
+        runner = BC.PoseRunner(self.backend, speed=self.backend_speed, magnet=noop)
+        self._be_error, self._be_runner = None, runner
+
+        def work():
+            try:
+                runner.run(clean)
+                self.log("hub", "real arm: finished %d poses" % len(clean))
+            except BC.BackendError as e:
+                self._be_error = e.as_dict()
+                self.log("hub", "real arm: %s (%s)" % (e.title, e.code))
+                if e.code != "STOPPED":
+                    with self.sim_lock:
+                        self.sim.stop_replay()
+                    self._run_once = None
+            except Exception as e:
+                self._be_error = PRE.err("INTERNAL", "Something went wrong sending the move to the real arm", str(e)[:200], "Check the hub console.")
+                with self.sim_lock:
+                    self.sim.stop_replay()
+                self._run_once = None
+            finally:
+                self._be_runner = None
+        self._be_thread = threading.Thread(target=work, daemon=True)
+        self._be_thread.start()
+        self.log("hub", "real arm: following %d poses through the backend" % len(clean))
+
+    def _be_stop(self):
+        """Stop the run on the real arm and make its target where it is now. A packet already being played still finishes."""
+        if not self.backend:
+            return
+        r = self._be_runner
+        if r:
+            r.stop()
+
+        def hold():                                 # in a thread: an unreachable backend must not delay a stop
+            try:
+                self.backend.hold()
+            except BC.BackendError as e:
+                self.log("hub", "could not tell the backend to hold: %s" % e.title)
+        threading.Thread(target=hold, daemon=True).start()
+
+    def _backend_loop(self):
+        while not self.stop.is_set():
+            time.sleep(1.0)
+            if not self.backend:
+                continue
+            try:
+                pos, mv = self.backend.position(), self.backend.movement()
+                self._be_info = {"online": True, "url": self.backend.base, "position": pos, "movement": mv.get("status"), "running": self._be_busy()}
+            except BC.BackendError as e:
+                self._be_info = {"online": False, "url": self.backend.base, "error": e.title, "running": self._be_busy()}
 
     def store_sequence(self, name="", description="", requires=None, ends=None):
         """Write the current sequence to sequences/ on this (host) machine."""
@@ -1667,7 +1775,7 @@ class Hub:
                 "logs": {k: list(v)[-80:] for k, v in self.logs.items()}}
 
     def start(self):
-        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop):
+        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop, self._backend_loop):
             threading.Thread(target=fn, daemon=True).start()
         threading.Thread(target=self._ticker, daemon=True).start()
         threading.Thread(target=self._boot_calibration, daemon=True).start()
@@ -1688,6 +1796,12 @@ class Hub:
         self.emu.stop()
         self.set_forward(True)                      # leave the server as it behaved before the hub existed
         self.link.close()
+
+
+def forward_kin_home(sim):
+    """(x, y, z, tool angle degrees) of the virtual arm's home pose."""
+    from sim.armsim import forward_kin
+    return forward_kin(sim._home_angles(), sim.tool)
 
 
 # a cached port lookup so snapshot() (every second) does not enumerate COM ports each time
@@ -2095,9 +2209,14 @@ def main():
     ap.add_argument("--no-https", action="store_true", help="with --lan, do not also serve HTTPS on port+1 (the phone's microphone needs it)")
     ap.add_argument("--send-speed", action="store_true",
                     help="also send the damper to the arm as maxSpeed (needs the modified firmware in firmware/rarm)")
+    ap.add_argument("--backend", default=os.environ.get("BACKEND_URL", ""),
+                    help="Sam's backend (our build, see firmware/ours), e.g. http://127.0.0.1:8000: when the output is ARMED the real arm follows the virtual one through it")
+    ap.add_argument("--backend-speed", type=float, default=20.0, help="tool speed for the real arm, mm/s (the backend allows up to 50)")
+    ap.add_argument("--backend-ignore-magnet", action="store_true",
+                    help="move the real arm through sequences that use the magnet, without switching it (its firmware has no switch): the virtual magnet still handles the keys")
     args = ap.parse_args()
     global LAN_TOKEN
-    HUB = Hub(args.server, send_speed=args.send_speed)
+    HUB = Hub(args.server, send_speed=args.send_speed, backend_url=args.backend or None, backend_speed=args.backend_speed, backend_ignore_magnet=args.backend_ignore_magnet)
     bind = "127.0.0.1"
     if args.lan:
         tf = ROOT / ".hub_token"

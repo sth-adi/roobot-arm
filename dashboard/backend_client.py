@@ -37,8 +37,6 @@ class BackendClient:
                 raise BackendError("REFUSED", reason or "The backend refused that move", "The backend checked the move and said no.", "Pick a different point.")
             if e.code == 400:
                 raise BackendError("BAD_REQUEST", reason or "The backend did not accept that", "", "")
-            if e.code == 404 and path == "/position":
-                return 404, b""
             raise BackendError("BACKEND_ERROR", "The backend answered %d %s" % (e.code, reason), "", "Check the backend window for the reason.")
         except (urllib.error.URLError, OSError) as e:
             raise BackendError("BACKEND_OFFLINE", "Cannot reach the arm's backend", "%s: %s" % (self.base, getattr(e, "reason", e)),
@@ -60,7 +58,7 @@ class BackendClient:
     def position(self):
         """{x, y, z, a, age_s}, or None when the arm has not reported yet."""
         code, body = self._call("GET", "/position")
-        return json.loads(body) if code == 200 else None
+        return json.loads(body) if code == 200 and body else None
 
 
 class PoseRunner:

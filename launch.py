@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""One tap: starts the input server and the dashboard hub, then opens the robot viewer.
+"""One tap: starts the input server, Sam's backend (our checked build) and the dashboard hub, then opens the robot viewer.
 
-    python launch.py              # server + hub, opens the browser, phone link printed
+    python launch.py              # server + backend + hub, opens the browser, phone link printed
+    python launch.py --no-backend # without the real-arm backend (virtual arm only)
     python launch.py --local-only # do not let other devices (a phone) connect
     python launch.py --no-open    # do not open a browser
 
@@ -11,6 +12,7 @@ The first time, Windows asks to allow Python through the firewall: allow it on p
 Output always starts SAFE; nothing moves the real arm until you press ARM in the dashboard.
 """
 import argparse
+import importlib.util
 import os
 import subprocess
 import sys
@@ -63,12 +65,46 @@ def hub_phone_url(hub_url):
         return None, None
 
 
+def load_build_backend():
+    spec = importlib.util.spec_from_file_location("build_backend", os.path.join(ROOT, "firmware", "ours", "build_backend.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def start_backend(py, port, lan, kids):
+    """Sam's backend with our checks, built into .backend/ (again whenever its sources change) and run on its own port. Returns its URL, or None if it could not start."""
+    url = "http://127.0.0.1:%d" % port
+    if up(url + "/mode"):
+        print("backend already running on :%d (left as it is)" % port)
+        return url
+    try:
+        out = load_build_backend().ensure(os.path.join(ROOT, ".backend"))
+    except (SystemExit, Exception) as e:
+        print("could not build the backend, continuing without it: %s" % e)
+        return None
+    env = dict(os.environ, BACKEND_PORT=str(port), BACKEND_HOST="0.0.0.0" if lan else "127.0.0.1", PYTHONUNBUFFERED="1")
+    kids.append(subprocess.Popen([py, "main.py"], cwd=str(out), env=env))
+    for _ in range(30):
+        if up(url + "/mode"):
+            print("backend running on :%d%s" % (port, " (reachable from the network, no password: only for a trusted network)" if lan else " (this computer only)"))
+            return url
+        time.sleep(0.2)
+    print("the backend did not start, continuing without it")
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--local-only", action="store_true", help="do not accept connections from other devices")
     ap.add_argument("--no-open", action="store_true")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--server-port", type=int, default=8000)
+    ap.add_argument("--no-backend", action="store_true", help="do not start Sam's backend: the virtual arm only")
+    ap.add_argument("--backend-port", type=int, default=8001)
+    ap.add_argument("--backend-lan", action="store_true", help="let the ESP32 reach the backend over the network (it has no password)")
+    ap.add_argument("--backend-speed", type=float, default=20.0, help="tool speed for the real arm, mm/s (up to 50)")
+    ap.add_argument("--backend-ignore-magnet", action="store_true", help="move the real arm through sequences that use the magnet, without switching it (its firmware cannot)")
     a = ap.parse_args()
     py = sys.executable
     kids = []
@@ -97,6 +133,7 @@ def main():
                 if up(server_url + "/health"):
                     break
                 time.sleep(0.2)
+        backend_url = None if a.no_backend else start_backend(py, a.backend_port, a.backend_lan, kids)
         old = hub_build(hub_url)
         if old is not None and old != code_stamp():
             print("an older hub is running (build %s, files are %s): replacing it" % (old, code_stamp()))
@@ -117,6 +154,10 @@ def main():
             cmd = [py, os.path.join(ROOT, "dashboard", "hub.py"), "--no-open", "--port", str(a.port), "--server", server_url]
             if not a.local_only:
                 cmd.append("--lan")
+            if backend_url:
+                cmd += ["--backend", backend_url, "--backend-speed", str(a.backend_speed)]
+                if a.backend_ignore_magnet:
+                    cmd.append("--backend-ignore-magnet")
             kids.append(subprocess.Popen(cmd, cwd=ROOT))
             for _ in range(50):
                 if up(hub_url + "/api/status"):

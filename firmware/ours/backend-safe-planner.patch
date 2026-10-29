@@ -1,9 +1,15 @@
 diff -ruN a/GlobalVariables.py b/GlobalVariables.py
 --- a/GlobalVariables.py	2026-10-29 14:10:20.293160465 +0000
-+++ b/GlobalVariables.py	2026-10-29 14:12:40.095280903 +0000
-@@ -10,7 +10,9 @@
- SERVER_HOST = "0.0.0.0"
- SERVER_PORT = 8000
++++ b/GlobalVariables.py	2026-10-29 14:38:08.907200028 +0000
+@@ -7,10 +7,13 @@
+ 
+ from models.robot import Coordinates
+ 
+-SERVER_HOST = "0.0.0.0"
+-SERVER_PORT = 8000
++# Our build listens on this computer only unless told otherwise: it has no password, and whoever can reach it can set the arm's target.
++SERVER_HOST = os.getenv("BACKEND_HOST", "127.0.0.1")
++SERVER_PORT = int(os.getenv("BACKEND_PORT", "8000"))
  MAX_SPEED = 50.0  # Configured command limit; tune for the physical arm.
 -STEPS_PER_MM = 5
 +STEPS_PER_MM = 5  # Only used by the original planner; the checked planner (motion/safe_planner.py) updates at PLAN_RATE_HZ.
@@ -12,7 +18,7 @@ diff -ruN a/GlobalVariables.py b/GlobalVariables.py
  
  controller_state = {}
  arm_status = ""
-@@ -25,6 +27,8 @@
+@@ -25,6 +28,8 @@
  arm_mode = os.getenv("ARM_MODE", "Normal")
  
  TargetCords = Coordinates(0, 250, 250 , 0)
@@ -23,7 +29,7 @@ diff -ruN a/GlobalVariables.py b/GlobalVariables.py
  movement_state = {"id": None, "status": "idle", "target": None}
 diff -ruN a/api/handlers.py b/api/handlers.py
 --- a/api/handlers.py	2026-10-29 14:10:20.293227769 +0000
-+++ b/api/handlers.py	2026-10-29 14:12:40.095720423 +0000
++++ b/api/handlers.py	2026-10-29 14:39:27.998965759 +0000
 @@ -1,5 +1,6 @@
  import json
  import math
@@ -31,14 +37,28 @@ diff -ruN a/api/handlers.py b/api/handlers.py
  import GlobalVariables as state
  import uuid
  from http.server import BaseHTTPRequestHandler
-@@ -36,6 +37,19 @@
+@@ -11,6 +12,12 @@
+ 
+ class Handler(BaseHTTPRequestHandler):
+ 
++    def log_message(self, format, *args):
++        # The dashboard asks these two every second: leave them out of the console so real events stay visible.
++        if self.command == "GET" and self.path in ("/position", "/movement"):
++            return
++        super().log_message(format, *args)
++
+     def do_GET(self):
+ 
+         if self.path == "/mode":
+@@ -36,6 +43,20 @@
              self.end_headers()
              self.wfile.write(response)
  
 +        elif self.path == "/position":
 +            # Where the arm last said it was (worked out from its reported joint angles, not measured), and how long ago.
 +            if state.current_cords is None:
-+                self.send_error(404, "The arm has not reported a position yet")
++                self.send_response(204)          # nothing known yet (not an error: the dashboard asks every second)
++                self.end_headers()
 +                return
 +            response = json.dumps({"x": state.current_cords.X, "y": state.current_cords.Y, "z": state.current_cords.Z,
 +                                   "a": math.degrees(state.current_cords.A), "age_s": round(time.time() - state.current_cords_time, 3)}).encode("utf-8")
@@ -51,7 +71,7 @@ diff -ruN a/api/handlers.py b/api/handlers.py
          elif self.path == "/status":
              response = state.arm_status.encode("utf-8")
              self.send_response(200)
-@@ -64,6 +78,8 @@
+@@ -64,6 +85,8 @@
                  if not all(math.isfinite(value) and 0 <= value <= 180 for value in degrees):
                      raise ValueError("Invalid joint angle")
                  current_cords = ForwardKim(Angles(*(math.radians(value) for value in degrees)))
@@ -60,7 +80,7 @@ diff -ruN a/api/handlers.py b/api/handlers.py
              except (KeyError, IndexError, TypeError, ValueError):
                  self.send_error(400, "s1, s2, s3 and s4 must be finite joint degrees in 0-180")
                  return
-@@ -80,8 +96,11 @@
+@@ -80,8 +103,11 @@
  
              try:
                  angle_packet = CompileAnglePacket(current_cords, state.TargetCords, state.TargetSpeed, state.STEPS_PER_MM)
@@ -74,7 +94,7 @@ diff -ruN a/api/handlers.py b/api/handlers.py
                  return
  
              # One timestamped servo command per line.  Keeping this in the
-@@ -121,8 +140,15 @@
+@@ -121,8 +147,15 @@
                  if math.hypot(x, y) - 63.0 * math.cos(candidate.A) < 0:
                      raise ValueError("Wrist behind base")
                  InverseKim(candidate)
@@ -92,7 +112,7 @@ diff -ruN a/api/handlers.py b/api/handlers.py
                  return
              state.TargetCords = candidate
              state.TargetSpeed = speed
-@@ -130,6 +156,16 @@
+@@ -130,6 +163,16 @@
              self.send_response(204)
              self.end_headers()
              return

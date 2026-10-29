@@ -161,7 +161,7 @@ python dashboard/hub.py        # opens http://127.0.0.1:8765
 | Control | Drive from the browser (browser gamepad, virtual sticks, demo wave) or just watch the server stream. A **preview arm** mirrors the firmware's jog logic, so the whole front end can be tested with no hardware. Speed and servo-travel settings. |
 | Packets | Every controller packet, exactly as sent (raw HTTP and JSON), with filter, pause and a packets-per-second graph. |
 | Arm and board | The ESP32 over USB: live board log, settings, last output positions, USB link on/off. |
-| Firmware | Swap what is on the ESP32: Sam's firmware, ours (Sam's plus both patches) or the USB jog sketch. Each is built once with arduino-cli and cached, so swapping back is just an upload; the page shows which one is on the board. WiFi name comes from `arduino/arm_receiver/secrets.h`, the host from `FORWARD_URL` in `.env`. Port released and retaken automatically. |
+| Firmware | Swap what is on the ESP32: Sam's 29 Oct firmware talking to our backend, or the USB jog sketch. Each is built once with arduino-cli and cached, so swapping back is just an upload; the page shows which one is on the board. WiFi name comes from `arduino/arm_receiver/secrets.h`, the backend address from this computer's LAN address. Port released and retaken automatically. (The 12 Oct firmware is no longer offered here; it stays in `firmware/stock` for the simulation and emulator.) |
 | Services | Start/stop Docker Desktop, the local server (Docker or Python) and the controller window; config checks; logs. |
 | AI and jobs | Placeholder for the AI assistant and JSON instruction packets (draft packet composer, dry run only; nothing is sent). |
 | Project | Git branch, uncommitted/unpushed counts, recent commits. |

@@ -860,10 +860,6 @@ class Hub:
     # ---- firmware ----------------------------------------------------------------------------------
     # firmware profiles: what can be flashed onto the board from the dashboard
     FW_PROFILES = {
-        "sam": {"label": "Sam's firmware", "kind": "stock", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
-                "desc": "The UWE-RArm firmware exactly as shipped (firmware/stock/src, untouched). Polls the end server itself."},
-        "ours": {"label": "Our firmware", "kind": "ours", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
-                 "desc": "Sam's firmware plus our three patches: damper and failsafes, sequences and magnet, a speed per sequence pose."},
         "local": {"label": "Sam's 29 Oct firmware, our backend", "kind": "local", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
                   "desc": "His latest firmware (firmware/sam/firmware) with one change: it asks this computer's backend (http, port 8001) for each move. The hub sends the targets, so the dashboard (Ask box, sequences, nudges, training) drives the arm. Start the launcher with --backend-lan so the board can reach it."},
         "usb": {"label": "USB jog sketch", "kind": None, "fqbn": FQBN, "libs": ["ArduinoJson"],
@@ -882,23 +878,19 @@ class Hub:
         (self.FWB / "state.json").write_text(json.dumps(st), encoding="utf-8")
 
     def _fw_secrets(self, kind=None):
-        """(ssid, password, host) for the stock-based firmwares, taken from secrets.h and .env. Never sent to the browser.
-        For kind "local" the host is this computer's address and the backend's port (no .env needed)."""
+        """(ssid, password, host) for the local-backend firmware, from secrets.h and this computer's address. Never sent to the browser.
+        The host is this computer's LAN address and the backend's port, so the board can reach the backend."""
         txt = (SKETCH / "secrets.h").read_text(encoding="utf-8", errors="replace") if (SKETCH / "secrets.h").exists() else ""
 
         def g(k):
             m = re.search(r'#define\s+%s\s+"([^"]*)"' % k, txt)
             return m.group(1) if m else ""
         from urllib.parse import urlparse
-        ssid, pw, host = g("WIFI_SSID"), g("WIFI_PASS"), urlparse(self.env_forward()).hostname or ""
-        if kind == "local":
-            if not ssid:
-                raise ValueError("needs WIFI_SSID (and WIFI_PASS) in arduino/arm_receiver/secrets.h; WIFI_USER too for a WPA2 Enterprise network")
-            port = urlparse(self.backend.base).port if self.backend else 8001
-            return ssid, pw, "%s:%s" % (lan_ip(), port or 8001)
-        if not (ssid and host):
-            raise ValueError("needs WIFI_SSID in arduino/arm_receiver/secrets.h and FORWARD_URL in .env (its host is the end server the firmware polls)")
-        return ssid, pw, host
+        ssid, pw = g("WIFI_SSID"), g("WIFI_PASS")
+        if not ssid:
+            raise ValueError("needs WIFI_SSID (and WIFI_PASS) in arduino/arm_receiver/secrets.h; WIFI_USER too for a WPA2 Enterprise network")
+        port = urlparse(self.backend.base).port if self.backend else 8001
+        return ssid, pw, "%s:%s" % (lan_ip(), port or 8001)
 
     def _fw_wifi_user(self):
         """Optional WIFI_USER in secrets.h: the board then joins a WPA2 Enterprise network (as Sam's firmware does)."""
@@ -910,9 +902,7 @@ class Hub:
         import hashlib
         h = hashlib.sha1()
         prof = self.FW_PROFILES[pid]
-        roots = [SKETCH] if prof["kind"] is None else [ROOT / "firmware" / "stock" / "src", ROOT / "firmware" / "stock" / "patches"]
-        if prof["kind"] == "local":
-            roots = [ROOT / "firmware" / "sam" / "firmware" / "src", ROOT / "firmware" / "ours"]
+        roots = [SKETCH] if prof["kind"] is None else [ROOT / "firmware" / "sam" / "firmware" / "src", ROOT / "firmware" / "ours"]
         for r in roots:
             for f in sorted(r.rglob("*")):
                 if f.is_file():
@@ -951,7 +941,6 @@ class Hub:
         if prof["kind"] is None:
             return SKETCH, out_dir
         import tempfile
-        import emu_runner
         ssid, pw, host = self._fw_secrets(prof["kind"])
         sk = self.FWB / pid / pid
         shutil.rmtree(sk, ignore_errors=True)
@@ -967,14 +956,6 @@ class Hub:
                 shutil.copytree(built / "src", sk, dirs_exist_ok=True)
             (sk / (pid + ".ino")).write_text("// Entry point only: the firmware is main.cpp in this folder.\n", encoding="utf-8")
             return sk, out_dir
-        with tempfile.TemporaryDirectory() as td:                    # patched trees are built outside the repo
-            src = emu_runner.emu_mod.firmware_src(prof["kind"], td)
-            for f in os.listdir(src):
-                if f != "SecretsExample.h":
-                    shutil.copy2(os.path.join(src, f), sk / f)
-        (sk / (pid + ".ino")).write_text("// Entry point only: the firmware is main.cpp in this folder.\n", encoding="utf-8")
-        (sk / "Secrets.h").write_text('const char* WIFI_SSID = "%s";\nconst char* WIFI_PASSWORD = "%s";\nconst char* HOST = "%s";\n' % (ssid, pw, host), encoding="utf-8")
-        return sk, out_dir
 
     def firmware_job(self, action, profile="usb"):
         if action not in ("compile", "upload", "swap") or profile not in self.FW_PROFILES:

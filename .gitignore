@@ -23,3 +23,6 @@ dashboard/studio/node_modules/
 # firmware swap cache (built binaries, generated secrets)
 .fwbuild/
 tuning/
+
+# our build of Sam's backend, made by launch.py
+.backend/

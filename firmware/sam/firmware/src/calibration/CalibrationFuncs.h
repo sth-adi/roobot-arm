@@ -1,6 +1,7 @@
 #pragma once
 
-#include "WifiFunctions.h"
+#include "../network/BackendConnection.h"
+#include "../config/RobotCharacteristics.h"
 
 inline bool ReadNextCalibrationValue(const char*& cursor, int& value)
 {
@@ -25,6 +26,7 @@ inline bool ReadNextCalibrationValue(const char*& cursor, int& value)
 inline bool LoadCalibration()
 {
     if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[ERROR][Calibration] WiFi disconnected");
         return false;
     }
 
@@ -33,11 +35,14 @@ inline bool LoadCalibration()
     HTTPClient http;
     const String calibrationUrl = "https://" + String(HOST) + "/calibration";
     if (!http.begin(client, calibrationUrl)) {
+        Serial.println("[ERROR][Calibration] Cannot initialise HTTP request");
         return false;
     }
 
     const int statusCode = http.GET();
     if (statusCode != HTTP_CODE_OK) {
+        Serial.printf("[ERROR][Calibration] GET failed: %d (%s)\n", statusCode,
+            statusCode < 0 ? HTTPClient::errorToString(statusCode).c_str() : "HTTP response");
         http.end();
         return false;
     }
@@ -50,11 +55,13 @@ inline bool LoadCalibration()
         homesKey = calibration.indexOf("\"joint0s\"");
     }
     if (limitsKey < 0 || homesKey < 0) {
+        Serial.println("[ERROR][Calibration] Missing jointLimits or jointHomes");
         return false;
     }
 
     const int limitsArrayStart = calibration.indexOf('[', limitsKey);
     if (limitsArrayStart < 0) {
+        Serial.println("[ERROR][Calibration] Missing jointLimits array");
         return false;
     }
 
@@ -62,18 +69,21 @@ inline bool LoadCalibration()
     for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
         if (!ReadNextCalibrationValue(cursor, JointLims[jointIndex][0])
             || !ReadNextCalibrationValue(cursor, JointLims[jointIndex][1])) {
+            Serial.printf("[ERROR][Calibration] Joint %d limits missing or outside 0-180\n", jointIndex + 1);
             return false;
         }
     }
 
     const int homesArrayStart = calibration.indexOf('[', homesKey);
     if (homesArrayStart < 0) {
+        Serial.println("[ERROR][Calibration] Missing jointHomes array");
         return false;
     }
 
     cursor = calibration.c_str() + homesArrayStart;
     for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
         if (!ReadNextCalibrationValue(cursor, JointHomes[jointIndex])) {
+            Serial.printf("[ERROR][Calibration] Joint %d home missing or outside 0-180\n", jointIndex + 1);
             return false;
         }
     }
@@ -83,6 +93,7 @@ inline bool LoadCalibration()
 inline bool SaveCalibration()
 {
     if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[ERROR][Calibration] WiFi disconnected");
         return false;
     }
 
@@ -114,11 +125,16 @@ inline bool SaveCalibration()
     HTTPClient http;
     const String calibrationUrl = "https://" + String(HOST) + "/calibration";
     if (!http.begin(client, calibrationUrl)) {
+        Serial.println("[ERROR][Calibration] Cannot initialise HTTP request");
         return false;
     }
 
     http.addHeader("Content-Type", "application/json");
     const int statusCode = http.POST(payload);
+    if (statusCode != HTTP_CODE_NO_CONTENT) {
+        Serial.printf("[ERROR][Calibration] Save failed: %d (%s)\n", statusCode,
+            statusCode < 0 ? HTTPClient::errorToString(statusCode).c_str() : "HTTP response");
+    }
     http.end();
     return statusCode == HTTP_CODE_NO_CONTENT;
 }

@@ -144,6 +144,7 @@ class Hub:
         self.backend_speed, self.backend_ignore_magnet = float(backend_speed), bool(backend_ignore_magnet)
         self._be_thread, self._be_runner, self._be_error = None, None, None
         self._be_info = {"online": None}
+        self._be_follow = False
         self.cell = Workcell()                  # boxes, keys, tray and the electromagnet (sim/workcell.py)
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
         self.packets = collections.deque(maxlen=500)
@@ -1148,6 +1149,7 @@ class Hub:
             "config": {"env_present": (ROOT / ".env").exists(), "forward_url_set": bool(self.env_forward())},
             "project": self.cache["git"],
             "sim": self._sim_snapshot(),
+            "backend": self._be_summary() if self.backend else None,
             "emu": self.emu.snapshot(),
             "phone_url": self.phone_url,
             "phone_url_https": self.phone_url_https,
@@ -1192,7 +1194,7 @@ class Hub:
     def state_packet(self):
         st = self._state_packet_core()
         if self.backend:
-            st["backend"] = dict(self._be_info)
+            st["backend"] = self._be_summary()
         return st
 
     def _state_packet_core(self):
@@ -1737,6 +1739,48 @@ class Hub:
                 self.log("hub", "could not tell the backend to hold: %s" % e.title)
         threading.Thread(target=hold, daemon=True).start()
 
+    BACKEND_MAX_SPEED = 50.0                         # his backend refuses a Speed above its MAX_SPEED (GlobalVariables.py)
+    FOLLOW_HZ, FOLLOW_MM, FOLLOW_DEG = 8.0, 1.0, 1.5     # how often the real arm is told where the virtual one is, and how much it must have moved first
+
+    def _be_summary(self):
+        return dict(self._be_info, speed=self.backend_speed, max_speed=self.BACKEND_MAX_SPEED, follow=self._be_follow)
+
+    def set_backend_speed(self, mm_s):
+        """Tool speed the real arm moves at through the backend (mm/s). Used for the controller, the Home button, the Ask box and sequences."""
+        v = float(mm_s)
+        if not (5.0 <= v <= self.BACKEND_MAX_SPEED):
+            raise ValueError("real arm speed must be 5-%d mm/s (his backend's limit)" % self.BACKEND_MAX_SPEED)
+        self.backend_speed = v
+        self.log("hub", "real arm speed set to %g mm/s" % v)
+
+    def _follow_loop(self):
+        """Live follow. His backend only moves the arm toward the last target it was given, so while ARMED (and no run owns the real arm) the virtual arm's
+        position is posted as that target whenever it has moved: the sticks, the Home button and anything else that moves the virtual arm then move the
+        real one too. Nothing is sent when arming, only once the virtual arm moves; the backend's own checks and speed limit apply to every target."""
+        last, last_err = None, 0.0
+        while not self.stop.is_set():
+            time.sleep(1.0 / self.FOLLOW_HZ)
+            if not self.backend or not self.armed or self._be_busy() or self.mirror["on"]:
+                last, self._be_follow = None, False
+                continue
+            try:
+                with self.sim_lock:
+                    pose = tuple(self.sim.pose())
+                if last is None:
+                    last = pose
+                    continue
+                if math.dist(pose[:3], last[:3]) < self.FOLLOW_MM and abs(pose[3] - last[3]) < self.FOLLOW_DEG:
+                    continue
+                last = pose
+                self.backend.set_target(pose[0], pose[1], pose[2], pose[3], self.backend_speed)
+                self._be_follow = True
+            except BC.BackendError as e:                # a refused or unreachable target must not stop the loop; say so at most every 5 s
+                if time.time() - last_err > 5.0:
+                    last_err = time.time()
+                    self.log("hub", "real arm: %s %s" % (e.title, e.detail or ""))
+            except Exception as e:
+                self.log("hub", "real arm follow error: %s" % e)
+
     def _backend_loop(self):
         while not self.stop.is_set():
             time.sleep(1.0)
@@ -1783,7 +1827,7 @@ class Hub:
                 "logs": {k: list(v)[-80:] for k, v in self.logs.items()}}
 
     def start(self):
-        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop, self._backend_loop):
+        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop, self._backend_loop, self._follow_loop):
             threading.Thread(target=fn, daemon=True).start()
         threading.Thread(target=self._ticker, daemon=True).start()
         threading.Thread(target=self._boot_calibration, daemon=True).start()
@@ -2120,6 +2164,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": str(e)})
                 except RuntimeError as e:
                     return self._json(409, {"error": str(e)})
+            if path == "/api/backend":          # the real arm's speed through the backend: {"speed": mm/s}
+                if not HUB.backend:
+                    return self._json(409, {"error": "the hub was started without --backend"})
+                try:
+                    HUB.set_backend_speed(d.get("speed"))
+                    return self._json(200, {"ok": True, "speed": HUB.backend_speed})
+                except (ValueError, TypeError) as e:
+                    return self._json(400, {"error": str(e)})
             if path == "/api/mirror":           # mirror mode: on | off | test (nudge one joint) | map (joint -> channel)
                 try:
                     return self._json(200, {"ok": True, "mirror": HUB.mirror_action(d)})
@@ -2219,7 +2271,7 @@ def main():
                     help="also send the damper to the arm as maxSpeed (needs the modified firmware in firmware/rarm)")
     ap.add_argument("--backend", default=os.environ.get("BACKEND_URL", ""),
                     help="Sam's backend (our build, see firmware/ours), e.g. http://127.0.0.1:8000: when the output is ARMED the real arm follows the virtual one through it")
-    ap.add_argument("--backend-speed", type=float, default=20.0, help="tool speed for the real arm, mm/s (the backend allows up to 50)")
+    ap.add_argument("--backend-speed", type=float, default=35.0, help="tool speed for the real arm, mm/s (the backend allows up to 50; change it live on the Control page)")
     ap.add_argument("--backend-ignore-magnet", action="store_true",
                     help="move the real arm through sequences that use the magnet, without switching it (its firmware has no switch): the virtual magnet still handles the keys")
     args = ap.parse_args()

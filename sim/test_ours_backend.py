@@ -1,0 +1,75 @@
+"""Sam's backend (firmware/sam/backend) + our patch and planner (firmware/ours): built into a temp folder, then run over HTTP."""
+import math
+import os
+import subprocess
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+from backend_harness import BackendTestCase, parse  # noqa: E402
+
+
+class OursBackendTest(BackendTestCase):
+    def test_his_own_tests_pass_on_the_built_backend(self):
+        r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests"], cwd=self.dir, capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+
+    def test_planner_copy_is_the_dashboards(self):
+        with open(os.path.join(self.dir, "motion", "safe_planner.py"), "rb") as f1, open(os.path.join(ROOT, "dashboard", "planner.py"), "rb") as f2:
+            self.assertEqual(f1.read(), f2.read())
+
+    def test_packet_is_checked_smooth_and_joint_speed_limited(self):
+        self.target(0, 250, 250, 0, speed=50)                  # reaching it from the start below is a 100 mm move at 50 mm/s
+        code, _, headers, body = self.report((0, 250, 150, 0))
+        self.assertEqual(code, 200)
+        self.assertTrue(headers["Movement-ID"])
+        rows = parse(body)
+        start = self.IK(self.C(0, 250, 150, 0))
+        self.assertAlmostEqual(rows[0][1], math.degrees(start.S1), places=2)
+        self.assertAlmostEqual(rows[0][2], math.degrees(start.S2), places=2)
+        gaps = {round(b[0] - a[0]) for a, b in zip(rows, rows[1:])}
+        self.assertTrue(gaps <= {19, 20, 21}, gaps)             # a fixed 50 Hz
+        for a, b in zip(rows, rows[1:]):
+            for j in range(1, 5):
+                self.assertLessEqual(abs(b[j] - a[j]) / ((b[0] - a[0]) / 1000.0), self.state.MAX_JOINT_DPS * 1.07 + 1.0)
+        end = self.IK(self.C(0, 250, 250, 0))
+        self.assertAlmostEqual(rows[-1][2], math.degrees(end.S2), places=2)
+
+    def test_pitch_only_move_is_no_longer_ignored(self):
+        self.target(0, 250, 250, 20)
+        code, _, _, body = self.report((0, 250, 250, 0))
+        self.assertEqual(code, 200)
+        self.assertGreater(len(parse(body)), 3)
+
+    def test_target_the_arm_could_not_reach_from_here_is_refused_with_a_reason(self):
+        self.report((0, 250, 250, 0))                           # the arm says where it is
+        before = self.state.TargetCords
+        self.assertEqual(self.target(0, 5, 150)[0], 422)        # his own check (wrist behind the base) still applies
+        self.assertIs(self.state.TargetCords, before)
+        code, reason, _, _ = self.target(-30, 60, 150)          # passes his checks, but a joint would leave its calibrated range
+        self.assertEqual(code, 422)
+        self.assertIn("joint", reason.lower())
+        self.assertIs(self.state.TargetCords, before)
+        self.assertEqual(self.target(60, 250, 200)[0], 204)     # a sensible one still goes through
+
+    def test_hold(self):
+        self.assertEqual(self.req("POST", "/hold")[0], 409)     # nothing reported yet
+        self.report((0, 250, 150, 0))
+        self.target(60, 250, 150)
+        self.assertEqual(self.req("POST", "/hold")[0], 204)
+        self.assertAlmostEqual(self.state.TargetCords.X, 0.0, places=3)
+        self.assertEqual(self.report((0, 250, 150, 0))[0], 204)  # nothing left to do
+
+    def test_a_move_that_goes_wrong_midway_is_refused_whole(self):
+        self.report((0, 250, 250, 0))
+        self.state.TargetCords = self.C(0, 5, 150, 0)            # set around the /target checks, as a stale target would be
+        code, reason, _, body = self.report((0, 250, 250, 0))
+        self.assertEqual(code, 422)
+        self.assertIn("base axis", reason)
+        self.assertNotRegex(body, rb"\d+/-?\d+\.\d+/")             # an error page, no part of a packet
+
+
+if __name__ == "__main__":
+    unittest.main()

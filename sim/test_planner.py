@@ -1,5 +1,4 @@
 """dashboard/planner.py: Sam's inverse kinematics and packet format, checked before anything moves."""
-import importlib.util
 import math
 import os
 import random
@@ -10,9 +9,27 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "dashboard"))
 import planner as PL  # noqa: E402
 
-_spec = importlib.util.spec_from_file_location("sam_apc", os.path.join(ROOT, "firmware", "sam", "backend", "AnglePacketCompilation.py"))
-SAM = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(SAM)
+
+
+def _load_sam():
+    """Sam's kinematics and packet code (firmware/sam/backend), imported under a temporary path so its package names (models, motion) do not linger."""
+    import types
+    path = os.path.join(ROOT, "firmware", "sam", "backend")
+    saved = {k: sys.modules.pop(k) for k in list(sys.modules) if k.split(".")[0] in ("models", "motion", "GlobalVariables")}
+    sys.path.insert(0, path)
+    try:
+        from models.robot import Coordinates
+        from motion.kinematics import InverseKim
+        from motion.packets import CompileAnglePacket
+    finally:
+        sys.path.remove(path)
+        for k in [k for k in sys.modules if k.split(".")[0] in ("models", "motion", "GlobalVariables")]:
+            del sys.modules[k]
+        sys.modules.update(saved)
+    return types.SimpleNamespace(Coordinates=Coordinates, InverseKim=InverseKim, CompileAnglePacket=CompileAnglePacket)
+
+
+SAM = _load_sam()
 
 HOME = (0.0, 250.0, 250.0, 0.0)
 
@@ -112,27 +129,6 @@ class PlanQuality(unittest.TestCase):
 
     def test_no_movement(self):
         self.assertEqual(PL.plan(HOME, HOME)["lines"], [])
-
-
-class FirmwareReportsADifferentTool(unittest.TestCase):
-    """His firmware says where the arm is with a 53 mm tool; his backend plans with 63 mm."""
-    def test_an_arm_on_target_reports_10mm_short(self):
-        for tgt in ((0.0, 250.0, 250.0, 0.0), (60.0, 250.0, 150.0, 0.0), (-80.0, 230.0, 90.0, 0.0)):
-            reported = fk(PL.inverse_kim(*tgt), 53.0)
-            self.assertAlmostEqual(math.dist(reported[:3], tgt[:3]), 10.0, places=6)                 # the problem is real, in his own constants
-            self.assertFalse(PL.at_target(reported, tgt))                                           # so a plain comparison says "not there yet"
-            fixed = PL.tool_tip(*reported)
-            self.assertLess(math.dist(fixed, tgt[:3]), 1e-6)                                         # corrected: exactly the target
-            self.assertTrue(PL.at_target(fixed, tgt))
-
-    def test_with_a_tilted_tool(self):
-        tgt = (40.0, 240.0, 120.0, math.radians(-30))
-        reported = fk(PL.inverse_kim(*tgt), 53.0)
-        self.assertLess(math.dist(PL.tool_tip(*reported[:3], reported[3]), tgt[:3]), 1e-6)
-
-    def test_tolerance(self):
-        self.assertTrue(PL.at_target((0, 250, 150, 0), (0.4, 250.4, 150, 0)))
-        self.assertFalse(PL.at_target((0, 250, 150, 0), (0, 252, 150, 0)))
 
 
 class Refusals(unittest.TestCase):

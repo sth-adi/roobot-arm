@@ -1,4 +1,4 @@
-"""A safer move planner for the arm: the same inverse kinematics as Sam's backend (firmware/sam/backend/AnglePacketCompilation.py), the same
+"""A safer move planner for the arm: the same inverse kinematics as Sam's backend (firmware/sam/backend/motion/kinematics.py), the same
 straight line, the same packet format ("time_ms/j1/j2/j3/j4", degrees), but checked before anything moves.
 
 What it adds to Sam's CompileAnglePacket:
@@ -7,7 +7,7 @@ What it adds to Sam's CompileAnglePacket:
   * a fixed update rate (default 50 Hz, what a hobby servo can follow) instead of 5 steps per mm
   * smooth start and stop (quintic easing) so the arm does not lurch
   * the whole move is stretched in time, never one joint clipped, so that no joint exceeds max_joint_dps: the path stays a straight line, just slower
-Pure Python with no dependencies, so it can run in the hub, in Sam's backend, or in a test.
+Pure Python with no dependencies. firmware/ours/build_backend.py copies it into Sam's backend as motion/safe_planner.py.
 """
 import math
 
@@ -23,7 +23,7 @@ AXIS_MIN_MM = 10.0                                              # closer to the 
 PEAK_EASE = 1.875                                               # peak speed of a quintic ease, relative to the average
 
 
-class PlanError(Exception):
+class PlanError(ValueError):
     """A refused move. Carries the same fields as the hub's structured errors: code, title, detail, hint."""
     def __init__(self, code, title, detail="", hint=""):
         super().__init__(title)
@@ -53,24 +53,6 @@ def inverse_kim(x, y, z, a):
     s3 = math.atan2(-ez + wz + SHOULDER_Z, -er + wr) - s2 + math.pi
     s4 = -s2 - s3 + a + 1.5 * math.pi
     return [math.degrees(v) for v in (s1, s2, s3, s4)]
-
-
-def tool_tip(x, y, z, pitch_deg, fw_tool=53.0):
-    """Sam's firmware reports the tool position using a 53 mm tool (ForwardKinTransform.h) while his backend solves for 63 mm, so a arm sitting exactly
-    on its target reports a point TOOL - 53 = 10 mm short of it. This moves the reported point out along the tool by the difference, so it can be
-    compared with a target. pitch_deg is the angle the firmware sends (degrees)."""
-    a = math.radians(pitch_deg)
-    reach = math.hypot(x, y)
-    if reach < 1e-9:
-        return x, y, z + (TOOL - fw_tool) * math.sin(a)
-    extra = TOOL - fw_tool
-    k = (reach + extra * math.cos(a)) / reach
-    return x * k, y * k, z + extra * math.sin(a)
-
-
-def at_target(pos, target, tol_mm=1.0):
-    """True when two (x, y, z, ...) points are within tol_mm of each other. Exact equality never holds for positions that went through float32 and text."""
-    return math.dist(pos[:3], target[:3]) <= tol_mm
 
 
 def _bounds(limits):

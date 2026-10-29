@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 SAM = ROOT / "firmware" / "sam" / "backend"
 PATCH = ROOT / "firmware" / "ours" / "backend-safe-planner.patch"
+PATCH_LIVE = ROOT / "firmware" / "ours" / "backend-live-packets.patch"      # applied after PATCH: short constant-speed packets while targets stream in, one open connection
 PLANNER = ROOT / "dashboard" / "planner.py"
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
@@ -98,7 +99,7 @@ def source_hash():
     for p in sorted(SAM.rglob("*")):
         if p.is_file() and "__pycache__" not in p.parts:
             h.update(p.relative_to(SAM).as_posix().encode() + p.read_bytes())
-    h.update(PATCH.read_bytes() + PLANNER.read_bytes() + Path(__file__).read_bytes())
+    h.update(PATCH.read_bytes() + PATCH_LIVE.read_bytes() + PLANNER.read_bytes() + Path(__file__).read_bytes())
     return h.hexdigest()[:12]
 
 
@@ -109,6 +110,7 @@ def build(out):
     shutil.copytree(SAM, out, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     try:
         apply_patch(out, PATCH.read_text(encoding="utf-8"))
+        apply_patch(out, PATCH_LIVE.read_text(encoding="utf-8"))
     except PatchError as e:
         shutil.rmtree(out, ignore_errors=True)
         raise SystemExit("could not apply the patch to Sam's backend: %s" % e)

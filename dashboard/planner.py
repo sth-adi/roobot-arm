@@ -67,13 +67,21 @@ def _check_limits(q, bounds, where):
                             "Pick a different point, or re-run the calibration if the limits are wrong.")
 
 
+def _linear(t):
+    return t
+
+
 def _quintic(t):
     return t * t * t * (10.0 - 15.0 * t + 6.0 * t * t)
 
 
-def plan(start, end, limits=None, speed_mm_s=30.0, max_joint_dps=30.0, rate_hz=50.0, max_step_deg=3.0):
+def plan(start, end, limits=None, speed_mm_s=30.0, max_joint_dps=30.0, rate_hz=50.0, max_step_deg=3.0, live=False, chunk_s=0.25):
     """start, end: (x, y, z, pitch_radians) in mm. Returns {"lines": [...], "duration": s, "peak_joint_dps": float, "steps": n}.
-    No movement (start == end) returns lines == []. Raises PlanError for anything unsafe. Every number it uses is checked first."""
+    No movement (start == end) returns lines == []. Raises PlanError for anything unsafe. Every number it uses is checked first.
+
+    live=True is for a target that keeps moving (the dashboard following the controller): a packet cannot be changed once the board has it, so only the
+    first chunk_s seconds of the way to the target are planned, at a constant speed (an ease in and out of every short packet would make the arm pulse).
+    The board asks again from where it ended, so it always chases a target at most about chunk_s old. "end" in the result is where the packet stops."""
     for name, v in (("speed_mm_s", speed_mm_s), ("max_joint_dps", max_joint_dps), ("rate_hz", rate_hz), ("max_step_deg", max_step_deg)):
         if not (isinstance(v, (int, float)) and math.isfinite(v) and v > 0):
             raise PlanError("BAD_SETTING", "Bad planner setting", "%s must be a positive number." % name, "")
@@ -85,6 +93,11 @@ def plan(start, end, limits=None, speed_mm_s=30.0, max_joint_dps=30.0, rate_hz=5
     dpitch = abs(end[3] - start[3])
     if dist < 1e-9 and dpitch < 1e-9:
         return {"lines": [], "duration": 0.0, "peak_joint_dps": 0.0, "steps": 0}
+    if live and dist > speed_mm_s * chunk_s:           # only the first chunk of the line: the rest is planned by the next packet
+        f = speed_mm_s * chunk_s / dist
+        end = tuple(a + (b - a) * f for a, b in zip(start, end))
+        dist, dpitch = dist * f, dpitch * f
+    ease, peak_ease = (_linear, 1.0) if live else (_quintic, PEAK_EASE)
 
     def at(s):
         return tuple(a + (b - a) * s for a, b in zip(start, end))
@@ -112,8 +125,8 @@ def plan(start, end, limits=None, speed_mm_s=30.0, max_joint_dps=30.0, rate_hz=5
     # 2. how fast does each joint move per unit of path? the worst place sets the minimum time
     worst = max(abs(q2[j] - q1[j]) * n_scan for q1, q2 in zip(path, path[1:]) for j in range(4))     # degrees per unit s, at the steepest scan interval
     t_cart = max(dist / speed_mm_s, 0.0)
-    t_joint = PEAK_EASE * worst / max_joint_dps
-    t_pitch = PEAK_EASE * math.degrees(dpitch) / max_joint_dps
+    t_joint = peak_ease * worst / max_joint_dps
+    t_pitch = peak_ease * math.degrees(dpitch) / max_joint_dps
     duration = max(t_cart, t_joint, t_pitch, 2.0 / rate_hz)
 
     # 3. sample at a fixed rate with a quintic ease, and make sure no step is a jump
@@ -121,7 +134,7 @@ def plan(start, end, limits=None, speed_mm_s=30.0, max_joint_dps=30.0, rate_hz=5
     lines, prev, peak = [], None, 0.0
     for i in range(steps + 1):
         tau = i / steps
-        x, y, z, a = at(_quintic(tau))
+        x, y, z, a = at(ease(tau))
         q = inverse_kim(x, y, z, a)
         if prev is not None:
             for j in range(4):
@@ -138,4 +151,4 @@ def plan(start, end, limits=None, speed_mm_s=30.0, max_joint_dps=30.0, rate_hz=5
         _check_limits(q, bounds, "step %d" % i)
         lines.append("%d/%.3f/%.3f/%.3f/%.3f" % (round(tau * duration * 1000.0), q[0], q[1], q[2], q[3]))
         prev = q
-    return {"lines": lines, "duration": duration, "peak_joint_dps": peak, "steps": steps}
+    return {"lines": lines, "duration": duration, "peak_joint_dps": peak, "steps": steps, "end": end}

@@ -2,25 +2,8 @@
 
 #include <Arduino.h>
 
-#include "RobotCharacteristics.h"
-
-struct StickInput {
-    float leftX;
-    float leftY;
-    float rightX;
-    float rightY;
-    int aButton;
-    int bButton;
-    int xButton;
-    int yButton;
-};
-
-struct RobotPosition {
-    float x;
-    float y;
-    float z;
-    float angle;
-};
+#include "../config/RobotCharacteristics.h"
+#include "../core/RobotTypes.h"
 
 inline float ApplyStickDeadzone(float value) {
     return abs(value) < 0.2f ? 0.0f : value;

@@ -1,9 +1,11 @@
 #pragma once
 
 #include <Arduino.h>
+#include <math.h>
+#include <limits.h>
 #include <ESP32Servo.h>
-#include "SticksToXYZ.h"
-#include "ForwardKinTransform.h"
+#include "../config/RobotCharacteristics.h"
+#include "../core/RobotTypes.h"
 
 
 Servo jointServos[4];
@@ -38,12 +40,14 @@ int ServoCommandAngle(int jointIndex, int logicalAngle)
 
 inline bool ExecuteMovementPacket(const String& packet, RobotAngles& currentAngles)
 {
+    int lineNumber = 0;
     int cursor = 0;
     unsigned long previousTimestamp = 0;
     const unsigned long movementStartTime = millis();
     bool executedCommand = false;
 
     while (cursor < packet.length()) {
+        ++lineNumber;
         const int lineEnd = packet.indexOf('\n', cursor);
         const String line = packet.substring(cursor, lineEnd < 0 ? packet.length() : lineEnd);
         cursor = lineEnd < 0 ? packet.length() : lineEnd + 1;
@@ -56,6 +60,7 @@ inline bool ExecuteMovementPacket(const String& packet, RobotAngles& currentAngl
         for (int valueIndex = 0; valueIndex < 5; ++valueIndex) {
             const int valueEnd = line.indexOf('/', valueStart);
             if ((valueIndex < 4 && valueEnd < 0) || (valueIndex == 4 && valueEnd >= 0)) {
+                Serial.printf("[ERROR][Playback] Line %d: expected timestamp and four angles\n", lineNumber);
                 return false;
             }
             const String value = line.substring(
@@ -63,14 +68,27 @@ inline bool ExecuteMovementPacket(const String& packet, RobotAngles& currentAngl
             );
             char* valueEndPointer = nullptr;
             values[valueIndex] = strtof(value.c_str(), &valueEndPointer);
-            if (valueEndPointer == value.c_str() || *valueEndPointer != '\0') {
+            if (valueEndPointer == value.c_str() || *valueEndPointer != '\0'
+                || !isfinite(values[valueIndex])) {
+                Serial.printf("[ERROR][Playback] Line %d field %d: invalid number\n", lineNumber, valueIndex + 1);
                 return false;
             }
             valueStart = valueEnd + 1;
         }
 
+        if (values[0] < 0 || static_cast<double>(values[0]) > ULONG_MAX) {
+            Serial.printf("[ERROR][Playback] Line %d: timestamp out of range\n", lineNumber);
+            return false;
+        }
+        for (int jointIndex = 1; jointIndex < 5; ++jointIndex) {
+            if (values[jointIndex] < 0 || values[jointIndex] > 180) {
+                Serial.printf("[ERROR][Playback] Line %d joint %d: angle outside 0-180\n", lineNumber, jointIndex);
+                return false;
+            }
+        }
         const unsigned long timestamp = static_cast<unsigned long>(values[0]);
         if (timestamp < previousTimestamp) {
+            Serial.printf("[ERROR][Playback] Line %d: timestamps run backwards\n", lineNumber);
             return false;
         }
 
@@ -90,6 +108,9 @@ inline bool ExecuteMovementPacket(const String& packet, RobotAngles& currentAngl
             radians(values[1]), radians(values[2]), radians(values[3]), radians(values[4])
         };
         executedCommand = true;
+    }
+    if (!executedCommand) {
+        Serial.println("[ERROR][Playback] Packet contains no commands");
     }
     return executedCommand;
 }

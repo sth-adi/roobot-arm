@@ -1,20 +1,25 @@
+#pragma once
+
 #include <Arduino.h>
-#include "WifiFunctions.h"
-#include "SticksToXYZ.h"
-#include "CalibrationFuncs.h"
-#include "RobotMovement.h"
+
+#include "../network/WifiConnection.h"
+#include "../network/ControllerClient.h"
+#include "../network/StatusClient.h"
+#include "../control/SticksToXYZ.h"
+#include "../calibration/CalibrationFuncs.h"
+#include "../motion/RobotMovement.h"
 
 static unsigned long lastPositionUpdateTime = 0;
 static unsigned long lastPositionPrintTime = 0;
 StickInput controllerInput = {0, 0, 0, 0, 0, 0, 0, 0};
 
 // State used only during the startup/calibration workflow.
-String ArmMode = "";
 static unsigned long lastTrainingAnglePrintTime = 0;
 
 void StartupProcess(){   
 
     Serial.begin(9600);
+    Serial.println("[Startup] Initialising servos and network");
 
     for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
         jointServos[jointIndex].setPeriodHertz(50);
@@ -31,15 +36,15 @@ void StartupProcess(){
         } else {
             SendArmStatus("Latency test failed");
         }
+    } else {
+        Serial.println("[ERROR][Startup] WiFi connection failed; calibration and controller unavailable");
     }
-    
-    ArmMode = CheckControllerMode();
 
     const bool calibrationLoaded = LoadCalibration();
     const bool trainingRequestedAtStartup = GetControllerState(controllerInput)
         && controllerInput.aButton == 1;
 
-    if (ArmMode == "Training" || !calibrationLoaded || trainingRequestedAtStartup) {
+    if (!calibrationLoaded || trainingRequestedAtStartup) {
         if (trainingRequestedAtStartup) {
             SendArmStatus("Training requested: release A to begin");
             while (controllerInput.aButton == 1) {
@@ -49,7 +54,7 @@ void StartupProcess(){
         }
 
         if (!calibrationLoaded){
-            SendArmStatus("No Trianing Config Found ...");
+            SendArmStatus("[ERROR][Startup] Calibration unavailable or invalid; entering training");
         };
 
         SendArmStatus("Training Angles");
@@ -67,7 +72,7 @@ void StartupProcess(){
         }
 
         for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
-            int angleOutputs[4] = {0, 0, 0, 0};
+            int angleOutputs[3] = {0, 0, 0};
 
             if (!jointServos[jointIndex].attached()) {
                 jointServos[jointIndex].setPeriodHertz(50);
@@ -168,15 +173,9 @@ void StartupProcess(){
 
     }
 
-    // Start Cartesian control at the trained home pose, rather than at an
-    // arbitrary coordinate which may not be reachable.
+    // Track the trained home joint angles for backend movement requests.
     targetAngles = HomeJointAngles();
-    targetPosition = ForwardKinTransform(targetAngles);
     for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
-        if (!jointServos[jointIndex].attached()) {
-            jointServos[jointIndex].setPeriodHertz(50);
-            jointServos[jointIndex].attach(JointPins[jointIndex], 500, 2400);
-        }
         jointServos[jointIndex].write(
             ServoCommandAngle(jointIndex, JointHomes[jointIndex])
         );
@@ -193,12 +192,7 @@ void StartupProcess(){
         );
     }
     Serial.printf(
-        "Home XYZ: %.2f, %.2f, %.2f | Wrist: %.2f deg"
-        " | Output angles: S1=%.2f, S2=%.2f, S3=%.2f, S4=%.2f deg\n",
-        targetPosition.x,
-        targetPosition.y,
-        targetPosition.z,
-        targetPosition.angle,
+        "Output angles: S1=%.2f, S2=%.2f, S3=%.2f, S4=%.2f deg\n",
         degrees(targetAngles.s1),
         degrees(targetAngles.s2),
         degrees(targetAngles.s3),

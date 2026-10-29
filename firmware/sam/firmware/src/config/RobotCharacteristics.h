@@ -1,3 +1,5 @@
+#pragma once
+
 float HomeChordsX = 0;
 float HomeChordsY = 0;
 float HomeChordsZ = 0;

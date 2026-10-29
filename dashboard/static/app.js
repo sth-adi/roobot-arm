@@ -840,7 +840,7 @@ function mountFirmware(root) {
   <div class="cols">
     <div>
       <section class="sec" style="border-top:0;padding-top:0"><h2>Swap the firmware on the board</h2>
-        <p class="lead">Flash Sam's firmware, ours, or the USB jog sketch onto the ESP32. Each one is built once and kept, so swapping back is just an upload. Sam's and ours poll the end server over WiFi themselves; the USB sketch does not.</p>
+        <p class="lead">Flash Sam's 29 Oct firmware (asking our backend over WiFi, so the dashboard sends the moves) or the USB jog sketch onto the ESP32. Each one is built once and kept, so swapping back is just an upload.</p>
         <div class="rows" id="f-profiles"></div>
         <p class="note" id="f-pnote" style="margin-top:8px"></p></section>
       <section class="sec"><h2>ESP32 sketch (USB jog)</h2>

@@ -27,6 +27,9 @@ MAX_BODY = 64 * 1024
 
 _lock = threading.Lock()
 _state = {"data": None, "received_at": None, "count": 0}
+_cmd = {"command": None, "received_at": None, "count": 0}  # latest dashboard command (POST /controller)
+COMMANDS = {"collect_keys", "return_keys", "home", "stop"}
+FRESH_S = 2.0  # controller input newer than this counts as "controller" mode
 _cond = threading.Condition(_lock)  # wakes /stream clients the moment a new state arrives
 
 # Forwarding: only the newest state matters, so a worker sends whatever is latest.
@@ -71,6 +74,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_text(self, code, text, headers=None):
+        body = text.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _mode(self):
+        with _lock:
+            rec = _state["received_at"]
+        return "controller" if rec is not None and time.time() - rec < FRESH_S else "idle"
+
     def _stream(self):
         """Hold the connection open and push one JSON line per new state (plus a 0.5 s heartbeat)."""
         self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -113,6 +131,16 @@ class Handler(BaseHTTPRequestHandler):
 
         elif self.path == "/stream":
             self._stream()
+        elif self.path == "/controller":     # latest controller state, for the page's connection check
+            with _lock:
+                self._send(200, {"state": _state["data"], "count": _state["count"]})
+        elif self.path == "/status":         # plain text: last command, or "idle"
+            with _lock:
+                cmd = _cmd["command"]
+            self._send_text(200, f"last command: {cmd}" if cmd else "idle")
+        elif self.path == "/mode":           # mode is reported in the Mode response header
+            mode = self._mode()
+            self._send_text(200, mode, {"Mode": mode})
         elif self.path == "/health":
             self._send(200, {"status": "ok"})
         elif self.path == "/state":
@@ -127,7 +155,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path not in ("/input", "/control"):
+        if self.path not in ("/input", "/control", "/controller"):
             return self._send(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -141,6 +169,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "invalid JSON"})
         if not isinstance(data, dict):
             return self._send(400, {"error": "expected a JSON object"})
+        if self.path == "/controller":   # {"command": one of COMMANDS} from the dashboard buttons
+            if data.get("command") not in COMMANDS:
+                return self._send(400, {"error": f"command must be one of {sorted(COMMANDS)}"})
+            with _lock:
+                _cmd.update(command=data["command"], received_at=time.time(), count=_cmd["count"] + 1)
+            print(f"[command] {data['command']}", flush=True)
+            return self._send(200, {"ok": True, "command": data["command"]})
         if self.path == "/control":      # {"forward": true|false} pauses/resumes forwarding to the next server
             if not isinstance(data.get("forward"), bool):
                 return self._send(400, {"error": "expected {\"forward\": true|false}"})

@@ -53,6 +53,22 @@ class LocalFirmwareTest(unittest.TestCase):
         sam = os.path.join(ROOT, "firmware", "sam", "firmware", "src", "network", "MovementClient.h")
         self.assertIn('"https://" + String(HOST)', read(sam))
 
+    def test_the_loop_is_faster_and_the_connection_is_kept(self):
+        main = read(os.path.join(self.src, "main.cpp"))
+        self.assertNotIn("delay(100)", main)                               # the original waited 100 ms after every move
+        self.assertIn("BACKEND_IDLE_MS", main)
+        moves = read(os.path.join(self.src, "network", "MovementClient.h"))
+        self.assertEqual(moves.count("BackendSharedClient()"), 2)          # the packet request and the acknowledgement share one connection
+        self.assertNotIn("HTTPClient http;", moves)
+        self.assertEqual(moves.count("client.stop()"), 4)                  # a failed request drops it so the next one reconnects
+
+    def test_servos_are_written_in_fractions_of_a_degree(self):
+        mv = read(os.path.join(self.src, "motion", "RobotMovement.h"))
+        self.assertIn("writeMicroseconds(", mv)
+        self.assertIn("500.0f + (2400.0f - 500.0f)", mv)                   # the same range as attach(pin, 500, 2400) in StartupProcess.h
+        packet_part = mv[mv.index("inline bool ExecuteMovementPacket("):]
+        self.assertNotIn("lroundf(values[", packet_part)                   # no rounding to whole degrees any more
+
     def test_latency_check_drops_the_port(self):
         self.assertIn("pingHost.indexOf(':')", read(os.path.join(self.src, "network", "WifiConnection.h")))
 

@@ -86,6 +86,18 @@ class PlanQuality(unittest.TestCase):
         self.assertTrue(all(b[0] >= a[0] for a, b in zip(rows, rows[1:])))
         self.assertEqual(rows[-1][0], round(out["duration"] * 1000))
 
+    def test_live_packets_are_short_and_constant_speed_and_say_where_they_end(self):
+        goal = (100.0, 250.0, 250.0, 0.0)
+        out = PL.plan(HOME, goal, speed_mm_s=35, live=True, chunk_s=0.25)
+        self.assertAlmostEqual(out["duration"], 0.25, places=2)
+        self.assertAlmostEqual(math.dist(HOME[:3], out["end"][:3]), 35 * 0.25, places=3)      # a quarter of a second of the way, on the straight line
+        steps = [b[1] - a[1] for a, b in zip(parse(out["lines"]), parse(out["lines"])[1:])]
+        self.assertLess(max(steps) - min(steps), 0.2 * (sum(steps) / len(steps)))           # no ease in or out
+        whole = PL.plan(HOME, goal, speed_mm_s=35)
+        self.assertGreater(whole["duration"], 2.0)                                           # the default is unchanged
+        near = PL.plan(HOME, (3.0, 250.0, 250.0, 0.0), speed_mm_s=35, live=True)
+        self.assertEqual(near["end"], (3.0, 250.0, 250.0, 0.0))                              # a target closer than a chunk is reached in one packet
+
     def test_fixed_update_rate(self):
         out = PL.plan(HOME, (0.0, 250.0, 150.0, 0.0), rate_hz=50)
         gaps = {round(b[0] - a[0]) for a, b in zip(parse(out["lines"]), parse(out["lines"])[1:])}

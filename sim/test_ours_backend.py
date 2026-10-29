@@ -1,8 +1,10 @@
 """Sam's backend (firmware/sam/backend) + our patch and planner (firmware/ours): built into a temp folder, then run over HTTP."""
+import http.client
 import math
 import os
 import subprocess
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +17,52 @@ class OursBackendTest(BackendTestCase):
     def test_his_own_tests_pass_on_the_built_backend(self):
         r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests"], cwd=self.dir, capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+
+    def test_a_stream_of_targets_makes_short_constant_speed_packets(self):
+        for i in range(4):                                                 # the dashboard following a controller: a new target every moment
+            self.target(60 + i, 250, 250, 0, speed=35)
+        code, _, headers, body = self.report((0, 250, 250, 0))
+        self.assertEqual(code, 200)
+        rows = parse(body)
+        self.assertLessEqual(rows[-1][0], 520)                             # half a second of the 1.7 s way, not all of it
+        steps = [b[1] - a[1] for a, b in zip(rows, rows[1:])]
+        self.assertLess(max(steps) - min(steps), 0.3 * (sum(steps) / len(steps)))         # constant speed: no ease in or out of each little packet
+        self.assertGreater(self.state.TargetCords.X, 59)                   # the target itself is unchanged
+        # asked again from where that packet ended, it carries on toward the target
+        end = rows[-1]
+        code2, _, _, body2 = self.req("GET", "/UpdateMovement?s1=%.3f&s2=%.3f&s3=%.3f&s4=%.3f" % tuple(end[1:]))
+        self.assertEqual(code2, 200)
+        self.assertGreater(parse(body2)[-1][1], end[1])
+
+    def test_a_single_target_is_still_one_long_eased_packet(self):
+        self.assertEqual(self.target(60, 250, 250, 0, speed=35)[0], 204)
+        code, _, _, body = self.report((0, 250, 250, 0))
+        rows = parse(body)
+        self.assertGreater(rows[-1][0], 1500)                              # all of the 60 mm at 35 mm/s
+        self.assertLess(abs(rows[1][1] - rows[0][1]), 0.3 * abs(rows[len(rows) // 2][1] - rows[len(rows) // 2 - 1][1]) + 0.01)    # starts gently
+
+    def test_when_the_targets_stop_the_last_packet_finishes_the_move(self):
+        for i in range(4):
+            self.target(60 + i, 250, 250, 0, speed=35)
+        time.sleep(self.state.LIVE_WINDOW_S + 0.2)
+        code, _, _, body = self.report((0, 250, 250, 0))
+        self.assertGreater(parse(body)[-1][0], 1500)
+
+    def test_the_boards_connection_stays_open_and_does_not_block_others(self):
+        board = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        try:
+            for _ in range(3):                                             # three requests on one connection
+                board.request("GET", "/movement")
+                r = board.getresponse()
+                self.assertEqual(r.status, 200)
+                r.read()
+            self.assertEqual(self.req("GET", "/movement")[0], 200)         # while that connection is still open, another client is served at once
+            board.request("GET", "/UpdateMovement?s1=90&s2=90&s3=90&s4=90")
+            r = board.getresponse()
+            self.assertIn(r.status, (200, 204, 422))
+            r.read()
+        finally:
+            board.close()
 
     def test_planner_copy_is_the_dashboards(self):
         with open(os.path.join(self.dir, "motion", "safe_planner.py"), "rb") as f1, open(os.path.join(ROOT, "dashboard", "planner.py"), "rb") as f2:

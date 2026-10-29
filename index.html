@@ -76,6 +76,15 @@
             color: #64748b;
             font-size: 14px;
         }
+
+        .KeyDropdown {
+            width: 90%;
+            padding: 12px;
+            margin: 8px 0;
+            border-radius: 10px;
+            border: 1px solid #cbd5e1;
+            font-size: 16px;
+        }
     </style>
 </head>
 
@@ -106,38 +115,49 @@
         </button>
     </section>
 
-    <section class="panel">
-        <h2>Key Management</h2>
+    <section class="panel" id="KeyRequest">
+        <h2>Request Key</h2>
 
-        <button class="collect"
-                onclick="sendCommand('collect_keys')">
-            Collect Keys
+        <label for="KeySelect">Choose a car:</label>
+
+        <select name="KeySelect" id="KeySelect" class="KeyDropdown">
+            <option value="volvo">PLACEHOLDER Need to change so these options are gottEn from the server</option>
+            <option value="saab">Saab</option>
+            <option value="mercedes">Mercedes</option>
+            <option value="audi">Audi</option>
+        </select>
+
+        <button
+            class="collect"
+            onclick="sendCommand('request_key')">
+            Request Key
         </button>
-
-        <button class="return"
-                onclick="sendCommand('return_keys')">
-            Return Keys
-        </button>
-
-        <button class="home"
-                onclick="sendCommand('home')">
-            Return to Home
-        </button>
-
-        <button class="stop"
-                onclick="sendCommand('stop')">
-            Stop / Cancel
-        </button>
-
-        <p id="message" role="status" aria-live="polite">
-            Ready to connect.
-        </p>
-
-        <p class="muted">
-            Example commands must be agreed with the robot
-            control team before use.
-        </p>
     </section>
+
+    <section class="panel" id="KeyReturn">
+        <h2>Return Key</h2>
+
+        <label for="KeyReturn">Choose a car:</label>
+
+        <select name="KeyReturn" id="KeyReturn" class="KeyDropdown">
+            <option value="volvo">PLACEHOLDER Need to change so these options are gottEn from the server</option>
+            <option value="saab">Saab</option>
+            <option value="mercedes">Mercedes</option>
+            <option value="audi">Audi</option>
+        </select>
+
+        <button
+            class="return"
+            onclick="sendCommand('return_key')">
+            Return Key
+        </button>
+    </section>
+
+    <p id="message" role="status" aria-live="polite">
+        Ready to connect.
+    </p>
+
+
 </main>
 
 <script>

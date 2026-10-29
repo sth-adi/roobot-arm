@@ -1,0 +1,139 @@
+diff -ruN a/src/calibration/CalibrationFuncs.h b/src/calibration/CalibrationFuncs.h
+--- a/src/calibration/CalibrationFuncs.h
++++ b/src/calibration/CalibrationFuncs.h
+@@ -30,10 +30,10 @@
+         return false;
+     }
+ 
+-    WiFiClientSecure client;
+-    client.setInsecure();
++    BackendClient client;
++    BackendTrust(client);
+     HTTPClient http;
+-    const String calibrationUrl = "https://" + String(HOST) + "/calibration";
++    const String calibrationUrl = BACKEND_SCHEME + String(HOST) + "/calibration";
+     if (!http.begin(client, calibrationUrl)) {
+         Serial.println("[ERROR][Calibration] Cannot initialise HTTP request");
+         return false;
+@@ -120,10 +120,10 @@
+     }
+     payload += "]}";
+ 
+-    WiFiClientSecure client;
+-    client.setInsecure();
++    BackendClient client;
++    BackendTrust(client);
+     HTTPClient http;
+-    const String calibrationUrl = "https://" + String(HOST) + "/calibration";
++    const String calibrationUrl = BACKEND_SCHEME + String(HOST) + "/calibration";
+     if (!http.begin(client, calibrationUrl)) {
+         Serial.println("[ERROR][Calibration] Cannot initialise HTTP request");
+         return false;
+diff -ruN a/src/network/BackendConnection.h b/src/network/BackendConnection.h
+--- a/src/network/BackendConnection.h
++++ b/src/network/BackendConnection.h
+@@ -5,3 +5,15 @@
+ #include <HTTPClient.h>
+ #include <WiFiClientSecure.h>
+ #include "../config/Secrets.h"
++
++// Ours: with BACKEND_PLAIN_HTTP (set in the generated Secrets.h) the backend is a plain-http server on the local network and HOST
++// is "address:port" (e.g. "192.168.1.20:8001"). Without it the original behaviour is kept: https on port 443, certificate not checked.
++#ifdef BACKEND_PLAIN_HTTP
++typedef WiFiClient BackendClient;
++#define BACKEND_SCHEME "http://"
++inline void BackendTrust(WiFiClient&) {}
++#else
++typedef WiFiClientSecure BackendClient;
++#define BACKEND_SCHEME "https://"
++inline void BackendTrust(WiFiClientSecure& c) { c.setInsecure(); }
++#endif
+diff -ruN a/src/network/ControllerClient.h b/src/network/ControllerClient.h
+--- a/src/network/ControllerClient.h
++++ b/src/network/ControllerClient.h
+@@ -5,7 +5,7 @@
+ 
+ bool GetControllerState(StickInput& input)
+ {
+-    static WiFiClientSecure client;
++    static BackendClient client;
+     static HTTPClient http;
+     static bool requestInitialised = false;
+     static unsigned long lastRequestTime = 0;
+@@ -26,10 +26,10 @@
+     lastRequestTime = millis();
+ 
+     if (!requestInitialised) {
+-        client.setInsecure();
++        BackendTrust(client);
+         http.setReuse(true);
+ 
+-        const String controllerUrl = "https://" + String(HOST) + "/controller";
++        const String controllerUrl = BACKEND_SCHEME + String(HOST) + "/controller";
+         if (!http.begin(client, controllerUrl)) {
+             Serial.println("Failed to initialise controller request");
+             return false;
+diff -ruN a/src/network/MovementClient.h b/src/network/MovementClient.h
+--- a/src/network/MovementClient.h
++++ b/src/network/MovementClient.h
+@@ -19,11 +19,11 @@
+         return false;
+     }
+ 
+-    WiFiClientSecure client;
+-    client.setInsecure();
++    BackendClient client;
++    BackendTrust(client);
+     HTTPClient http;
+     // Send logical joint degrees; the backend calculates Cartesian position.
+-    const String movementUrl = "https://" + String(HOST) + "/UpdateMovement?s1="
++    const String movementUrl = BACKEND_SCHEME + String(HOST) + "/UpdateMovement?s1="
+         + String(degrees(currentAngles.s1), 3) + "&s2=" + String(degrees(currentAngles.s2), 3)
+         + "&s3=" + String(degrees(currentAngles.s3), 3) + "&s4="
+         + String(degrees(currentAngles.s4), 3);
+@@ -64,10 +64,10 @@
+         Serial.println("[ERROR][Movement] WiFi disconnected; completion pending");
+         return false;
+     }
+-    WiFiClientSecure client;
+-    client.setInsecure();
++    BackendClient client;
++    BackendTrust(client);
+     HTTPClient http;
+-    const String url = "https://" + String(HOST) + "/movement-complete";
++    const String url = BACKEND_SCHEME + String(HOST) + "/movement-complete";
+     if (!http.begin(client, url)) {
+         Serial.println("[ERROR][Movement] Cannot initialise completion request");
+         return false;
+diff -ruN a/src/network/StatusClient.h b/src/network/StatusClient.h
+--- a/src/network/StatusClient.h
++++ b/src/network/StatusClient.h
+@@ -15,11 +15,11 @@
+     }
+     lastStatusTime = millis();
+ 
+-    WiFiClientSecure client;
+-    client.setInsecure();
++    BackendClient client;
++    BackendTrust(client);
+ 
+     HTTPClient http;
+-    const String statusUrl = "https://" + String(HOST) + "/status";
++    const String statusUrl = BACKEND_SCHEME + String(HOST) + "/status";
+     if (!http.begin(client, statusUrl)) {
+         Serial.println("Failed to initialise status request");
+         return;
+diff -ruN a/src/network/WifiConnection.h b/src/network/WifiConnection.h
+--- a/src/network/WifiConnection.h
++++ b/src/network/WifiConnection.h
+@@ -65,6 +65,10 @@
+     if (pathStart >= 0) {
+         pingHost.remove(pathStart);
+     }
++    const int portStart = pingHost.indexOf(':');       // HOST may carry a port ("192.168.1.20:8001")
++    if (portStart >= 0) {
++        pingHost.remove(portStart);
++    }
+ 
+     // Ping only the host name; Ping cannot resolve a URL with a protocol or path.
+     if (Ping.ping(pingHost.c_str(), 3)) {

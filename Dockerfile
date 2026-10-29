@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY server.py .
+COPY server.py index.html .
 
 # Where to forward every received controller state (empty = don't forward)
 ENV FORWARD_URL=""

@@ -66,7 +66,7 @@ class PoseRunner:
 
     A pose is reached when the arm's reported position is within tol_mm of it, is recent, and no move is in progress. A pose that is not reached in time,
     a refused target, or a lost backend ends the run with a BackendError and the arm is told to hold. stop() does the same from another thread."""
-    def __init__(self, client, speed=20.0, tol_mm=1.5, magnet=None, clock=time.time, sleep=time.sleep, poll_s=0.2, max_age_s=2.0, on_pose=None):
+    def __init__(self, client, speed=35.0, tol_mm=1.5, magnet=None, clock=time.time, sleep=time.sleep, poll_s=0.1, max_age_s=2.0, on_pose=None):
         self.client, self.speed, self.tol, self.magnet = client, speed, tol_mm, magnet
         self.clock, self.sleep, self.poll, self.max_age, self.on_pose = clock, sleep, poll_s, max_age_s, on_pose
         self._stop = False
@@ -118,7 +118,7 @@ class PoseRunner:
                 seen_busy = True
             near = pos is not None and pos["age_s"] <= self.max_age and math.dist((pos["x"], pos["y"], pos["z"]), (pose["x"], pose["y"], pose["z"])) <= self.tol
             # at the target and not moving: reached. (An arm that was already there never shows a busy move: give the firmware a moment to confirm.)
-            if near and mv.get("status") != "in_progress" and (seen_busy or self.clock() - started >= 1.0):
+            if near and mv.get("status") != "in_progress" and (seen_busy or self.clock() - started >= 0.5):
                 return
         raise BackendError("NOT_REACHED", "The arm did not get to the pose in time", "Pose x %.0f, y %.0f, z %.0f was not reached within %.0f s." % (pose["x"], pose["y"], pose["z"], timeout),
                            "Check the arm is powered and connected to the backend, then try again.")

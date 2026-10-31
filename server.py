@@ -51,6 +51,8 @@ def server_stamp(path=None):
 MAX_BODY = 64 * 1024
 STALE_S = 1.5   # no input newer than this = the sender is gone
 
+_cmd = {"command": None, "received_at": None, "count": 0}  # latest command from index.html (POST /controller)
+COMMANDS = {"collect_keys", "return_keys", "home", "stop"}
 _lock = threading.Lock()
 _state = {"data": None, "received_at": None, "count": 0}
 _cond = threading.Condition(_lock)  # wakes /stream clients the moment a new state arrives
@@ -326,7 +328,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, {"error": "forbidden"})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return self._send(200, {"ok": True})
-        if self.path not in ("/input", "/control", "/status", "/calibration", "/sequence", "/armstate"):
+        if self.path not in ("/input", "/control", "/controller", "/status", "/calibration", "/sequence", "/armstate"):
             return self._send(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -380,6 +382,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "invalid JSON"})
         if not isinstance(data, dict):
             return self._send(400, {"error": "expected a JSON object"})
+        if self.path == "/controller":    # {"command": one of COMMANDS} from the buttons on index.html (the latest is kept in _cmd)
+            if data.get("command") not in COMMANDS:
+                return self._send(400, {"error": "command must be one of %s" % sorted(COMMANDS)})
+            with _lock:
+                _cmd.update(command=data["command"], received_at=time.time(), count=_cmd["count"] + 1)
+            print("[command] %s" % data["command"], flush=True)
+            return self._send(200, {"ok": True, "command": data["command"]})
         if self.path == "/control":
             # {"forward": true|false} pauses/resumes forwarding; {"maxSpeed": 1..60} sets the joint speed limit (deg/s)
             # that goes to the arm with every packet. Either or both.

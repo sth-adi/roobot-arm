@@ -122,6 +122,15 @@ class DeadMan(unittest.TestCase):
                                    headers={"Content-Type": "application/json"})
         urllib.request.urlopen(r, timeout=3).read()
 
+    def test_dashboard_buttons_post_a_command(self):
+        self.post("/controller", {"command": "home"})
+        self.assertEqual(server._cmd["command"], "home")
+        for bad in ({"command": "dance"}, {}):
+            with self.assertRaises(urllib.error.HTTPError) as c:
+                self.post("/controller", bad)
+            self.assertEqual(c.exception.code, 400)
+        self.assertEqual(server._cmd["command"], "home")
+
     def wait_for(self, cond, timeout=3.0):
         end = time.time() + timeout
         while time.time() < end:

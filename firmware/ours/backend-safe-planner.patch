@@ -1,6 +1,6 @@
 diff -ruN a/GlobalVariables.py b/GlobalVariables.py
---- a/GlobalVariables.py	2026-10-29 14:10:20.293160465 +0000
-+++ b/GlobalVariables.py	2026-10-29 14:38:08.907200028 +0000
+--- a/GlobalVariables.py	2026-10-31 01:01:02.722422283 +0000
++++ b/GlobalVariables.py	2026-10-31 01:01:02.740951967 +0000
 @@ -7,10 +7,13 @@
  
  from models.robot import Coordinates
@@ -18,26 +18,26 @@ diff -ruN a/GlobalVariables.py b/GlobalVariables.py
  
  controller_state = {}
  arm_status = ""
-@@ -25,6 +28,8 @@
+@@ -26,6 +29,8 @@
  arm_mode = os.getenv("ARM_MODE", "Normal")
  
  TargetCords = Coordinates(0, 250, 250 , 0)
 +current_cords = None  # Where the arm last said it was (from its joint angles); None until it first asks for a move.
 +current_cords_time = None  # time.time() of that report
  TargetSpeed = 10.0  # Cartesian millimetres per second
- # Completion means the arm has finished sending this packet's servo commands.
- movement_state = {"id": None, "status": "idle", "target": None}
+ # True between issuing a packet and receiving the firmware's completion POST.
+ arm_moving = False
 diff -ruN a/api/handlers.py b/api/handlers.py
---- a/api/handlers.py	2026-10-29 14:10:20.293227769 +0000
-+++ b/api/handlers.py	2026-10-29 14:39:27.998965759 +0000
+--- a/api/handlers.py	2026-10-31 01:01:02.722480799 +0000
++++ b/api/handlers.py	2026-10-31 01:01:02.742091711 +0000
 @@ -1,5 +1,6 @@
  import json
  import math
 +import time
  import GlobalVariables as state
- import uuid
  from http.server import BaseHTTPRequestHandler
-@@ -11,6 +12,12 @@
+ from urllib.parse import parse_qs, urlparse
+@@ -10,6 +11,12 @@
  
  class Handler(BaseHTTPRequestHandler):
  
@@ -50,7 +50,7 @@ diff -ruN a/api/handlers.py b/api/handlers.py
      def do_GET(self):
  
          if self.path == "/mode":
-@@ -36,6 +43,20 @@
+@@ -35,6 +42,20 @@
              self.end_headers()
              self.wfile.write(response)
  
@@ -71,7 +71,7 @@ diff -ruN a/api/handlers.py b/api/handlers.py
          elif self.path == "/status":
              response = state.arm_status.encode("utf-8")
              self.send_response(200)
-@@ -64,6 +85,8 @@
+@@ -68,6 +89,8 @@
                  if not all(math.isfinite(value) and 0 <= value <= 180 for value in degrees):
                      raise ValueError("Invalid joint angle")
                  current_cords = ForwardKim(Angles(*(math.radians(value) for value in degrees)))
@@ -80,7 +80,7 @@ diff -ruN a/api/handlers.py b/api/handlers.py
              except (KeyError, IndexError, TypeError, ValueError):
                  self.send_error(400, "s1, s2, s3 and s4 must be finite joint degrees in 0-180")
                  return
-@@ -80,8 +103,11 @@
+@@ -84,8 +107,16 @@
  
              try:
                  angle_packet = CompileAnglePacket(current_cords, state.TargetCords, state.TargetSpeed, state.STEPS_PER_MM)
@@ -91,10 +91,15 @@ diff -ruN a/api/handlers.py b/api/handlers.py
 +                reason = getattr(error, "title", "") or "unreachable"
 +                print("Movement refused:", getattr(error, "code", "ERROR"), getattr(error, "detail", error))
 +                self.send_error(422, "Unable to compile movement packet: " + reason)
++                return
++
++            if not angle_packet:
++                self.send_response(204)          # nothing to move
++                self.end_headers()
                  return
  
              # One timestamped servo command per line.  Keeping this in the
-@@ -121,8 +147,15 @@
+@@ -137,14 +168,32 @@
                  if math.hypot(x, y) - 63.0 * math.cos(candidate.A) < 0:
                      raise ValueError("Wrist behind base")
                  InverseKim(candidate)
@@ -112,13 +117,13 @@ diff -ruN a/api/handlers.py b/api/handlers.py
                  return
              state.TargetCords = candidate
              state.TargetSpeed = speed
-@@ -130,6 +163,16 @@
              self.send_response(204)
              self.end_headers()
              return
 +
 +        elif self.path == "/hold":
-+            # Stop wanting to go anywhere: the target becomes where the arm last said it was. A packet already being played still finishes.
++            # Stop wanting to go anywhere: the target becomes where the arm last said it was. Allowed while a move is being played
++            # (it only changes the target; the packet already issued still finishes).
 +            if state.current_cords is None:
 +                self.send_error(409, "The arm has not reported a position yet")
 +                return
@@ -128,11 +133,11 @@ diff -ruN a/api/handlers.py b/api/handlers.py
 +            return
  
          elif self.path == "/movement-complete":
-             movement_id = self.headers.get("Movement-ID")
+             state.arm_moving = False
 diff -ruN a/motion/packets.py b/motion/packets.py
---- a/motion/packets.py	2026-10-29 14:10:20.293469201 +0000
-+++ b/motion/packets.py	2026-10-29 14:10:20.315905439 +0000
-@@ -18,37 +18,13 @@
+--- a/motion/packets.py	2026-10-31 01:01:02.722604192 +0000
++++ b/motion/packets.py	2026-10-31 01:01:02.741031271 +0000
+@@ -18,43 +18,19 @@
  
  
  def CompileAnglePacket(StartingCords: Coordinates, EndingCords: Coordinates, Speed, StepsPmm):
@@ -142,12 +147,23 @@ diff -ruN a/motion/packets.py b/motion/packets.py
 -    YDiff = EndingCords.Y - StartingCords.Y
 -    ZDiff = EndingCords.Z - StartingCords.Z
 -    ADiff = EndingCords.A - StartingCords.A
--
++    Output: the step count, the interval in milliseconds, then steps + 1 rows "time_ms/j1/j2/j3/j4" (what the firmware's ExecuteMovementPacket reads).
++    An empty list means there is nothing to move.
+ 
 -    Distance = math.sqrt(XDiff**2 + YDiff**2 + ZDiff**2)
 -    if Speed <= 0 or StepsPmm <= 0:
 -        raise ValueError("Speed and StepsPmm must be greater than zero")
 -    if Distance == 0:
--        return []
++    Raises motion.safe_planner.PlanError (a ValueError with code, title, detail and hint) for a path that is unreachable, outside the
++    calibrated joint limits, too close to the base axis or needs a joint to jump. No packet is produced for such a move."""
++    import GlobalVariables as state
++    from motion import safe_planner
++
++    start = (StartingCords.X, StartingCords.Y, StartingCords.Z, StartingCords.A)
++    end = (EndingCords.X, EndingCords.Y, EndingCords.Z, EndingCords.A)
++    plan = safe_planner.plan(start, end, state.calibration_data["jointLimits"], Speed, state.MAX_JOINT_DPS, state.PLAN_RATE_HZ)
++    if not plan["lines"]:
+         return []
 -
 -    TimeTaken = Distance / Speed
 -    Steps = max(1, math.ceil(Distance * StepsPmm))
@@ -157,7 +173,13 @@ diff -ruN a/motion/packets.py b/motion/packets.py
 -
 -    InitialAngles = InverseKim(StartingCords)
 -
+-    MovementSet.append(str(Steps))
+-
+-    MovementSet.append(f"{StepTiming * 1000:.0f}")  # milliseconds per step
+-    
 -    MovementSet.append(FormatPacketEntry(0, InitialAngles))
+-
+-
 -
 -    for step in range(1, Steps + 1):
 -        fraction = step / Steps
@@ -171,28 +193,24 @@ diff -ruN a/motion/packets.py b/motion/packets.py
 -        MovementSet.append(FormatPacketEntry(step * StepTiming, target_angles))
 -
 -    return MovementSet
-+    Raises motion.safe_planner.PlanError (a ValueError with code, title, detail and hint) for a path that is unreachable, outside the
-+    calibrated joint limits, too close to the base axis or needs a joint to jump. No packet is produced for such a move."""
-+    import GlobalVariables as state
-+    from motion import safe_planner
-+
-+    start = (StartingCords.X, StartingCords.Y, StartingCords.Z, StartingCords.A)
-+    end = (EndingCords.X, EndingCords.Y, EndingCords.Z, EndingCords.A)
-+    return safe_planner.plan(start, end, state.calibration_data["jointLimits"], Speed, state.MAX_JOINT_DPS, state.PLAN_RATE_HZ)["lines"]
++    return [str(plan["steps"]), str(max(1, round(1000.0 * plan["duration"] / plan["steps"])))] + plan["lines"]
 diff -ruN a/tests/test_movement_api.py b/tests/test_movement_api.py
---- a/tests/test_movement_api.py	2026-10-29 14:10:20.293552980 +0000
-+++ b/tests/test_movement_api.py	2026-10-29 14:10:49.547966321 +0000
-@@ -98,9 +98,10 @@
+--- a/tests/test_movement_api.py	2026-10-31 01:01:02.722622483 +0000
++++ b/tests/test_movement_api.py	2026-10-31 01:01:18.669296644 +0000
+@@ -118,10 +118,12 @@
                           {"X": "0", "Y": "250", "Z": "250", "A": "0", "Speed": "20"})[0], 204)
          _, _, fast = self.packet()
-         slow_lines, fast_lines = slow.splitlines(), fast.splitlines()
+         self.request("POST", "/movement-complete")
+-        slow_lines, fast_lines = slow.splitlines(), fast.splitlines()
 -        self.assertEqual(len(slow_lines), len(fast_lines))
 -        for first, second in zip(slow_lines, fast_lines):
 -            self.assertEqual(first.split(b"/")[1:], second.split(b"/")[1:])
-+        # The checked planner sends servo commands at a fixed rate in time, so a slower move has more lines (it used to have the same number, spaced further apart).
++        # Skip the two header lines (step count, interval). The checked planner sends servo commands at a fixed rate in time, so a slower move has
++        # more rows (it used to have the same number, spaced further apart).
++        slow_lines, fast_lines = slow.splitlines()[2:], fast.splitlines()[2:]
 +        self.assertGreater(len(slow_lines), len(fast_lines))
 +        self.assertEqual(slow_lines[0].split(b"/")[1:], fast_lines[0].split(b"/")[1:])
 +        self.assertEqual(slow_lines[-1].split(b"/")[1:], fast_lines[-1].split(b"/")[1:])
          self.assertAlmostEqual(float(slow_lines[-1].split(b"/")[0]),
                                 2 * float(fast_lines[-1].split(b"/")[0]), delta=1)
-         self.assertEqual(state.movement_state["target"]["speed"], 20)
+         self.assertEqual(self.request("POST", "/target",

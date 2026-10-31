@@ -136,6 +136,7 @@ def plan(start, end, limits=None, speed_mm_s=30.0, max_joint_dps=30.0, rate_hz=5
                                 "The path passes close to a singular position: pick a different route.")
             peak = max(peak, biggest * rate_hz)
         _check_limits(q, bounds, "step %d" % i)
-        lines.append("%d/%.3f/%.3f/%.3f/%.3f" % (round(tau * duration * 1000.0), q[0], q[1], q[2], q[3]))
+        c = [min(180.0, max(0.0, v)) for v in q]            # the limits allow 0.5 degrees of slack; his firmware rejects anything outside 0-180
+        lines.append("%d/%.3f/%.3f/%.3f/%.3f" % (round(tau * duration * 1000.0), c[0], c[1], c[2], c[3]))
         prev = q
     return {"lines": lines, "duration": duration, "peak_joint_dps": peak, "steps": steps}

@@ -27,7 +27,14 @@ def built_dir():
 
 
 def parse(body):
-    return [[float(v) for v in l.split("/")] for l in body.decode().strip().split("\n")]
+    """The rows of a packet: "time_ms/j1/j2/j3/j4". The first two lines (step count, interval in ms) are left out; see header()."""
+    return [[float(v) for v in l.split("/")] for l in body.decode().strip().split("\n") if "/" in l]
+
+
+def header(body):
+    """(step count, interval ms) from the first two lines of a packet."""
+    lines = body.decode().strip().split("\n")
+    return int(lines[0]), int(lines[1])
 
 
 class BackendTestCase(unittest.TestCase):
@@ -94,7 +101,7 @@ class FakeEsp(threading.Thread):
                     rows = parse(body)
                     self.packets.append(rows)
                     self.q = rows[-1][1:]
-                    self.h.req("POST", "/movement-complete", {"Movement-ID": headers["Movement-ID"]})
+                    self.h.req("POST", "/movement-complete")
             except Exception:
                 pass
             time.sleep(self.gap)

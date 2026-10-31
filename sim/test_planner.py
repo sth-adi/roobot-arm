@@ -127,6 +127,12 @@ class PlanQuality(unittest.TestCase):
         self.assertLess(first, mid * 0.15)
         self.assertLess(last, mid * 0.15)
 
+    def test_every_angle_is_inside_0_to_180_as_his_firmware_requires(self):
+        tight = [[0, 180], [0, 180], [0, 180], [0, 180]]
+        for end in ((0.0, 250.0, 150.0, 0.0), (80.0, 200.0, 180.0, 0.2)):
+            for row in parse(PL.plan(HOME, end, limits=tight)["lines"]):
+                self.assertTrue(all(0.0 <= v <= 180.0 for v in row[1:]), row)
+
     def test_no_movement(self):
         self.assertEqual(PL.plan(HOME, HOME)["lines"], [])
 

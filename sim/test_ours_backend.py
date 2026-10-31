@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-from backend_harness import BackendTestCase, parse  # noqa: E402
+from backend_harness import BackendTestCase, parse, header  # noqa: E402
 
 
 class OursBackendTest(BackendTestCase):
@@ -24,8 +24,10 @@ class OursBackendTest(BackendTestCase):
         self.target(0, 250, 250, 0, speed=50)                  # reaching it from the start below is a 100 mm move at 50 mm/s
         code, _, headers, body = self.report((0, 250, 150, 0))
         self.assertEqual(code, 200)
-        self.assertTrue(headers["Movement-ID"])
         rows = parse(body)
+        steps, interval = header(body)
+        self.assertEqual(steps, len(rows) - 1)                  # what his ExecuteMovementPacket requires: step count, interval, then steps + 1 rows
+        self.assertEqual(interval, 20)
         start = self.IK(self.C(0, 250, 150, 0))
         self.assertAlmostEqual(rows[0][1], math.degrees(start.S1), places=2)
         self.assertAlmostEqual(rows[0][2], math.degrees(start.S2), places=2)
@@ -61,6 +63,27 @@ class OursBackendTest(BackendTestCase):
         self.assertEqual(self.req("POST", "/hold")[0], 204)
         self.assertAlmostEqual(self.state.TargetCords.X, 0.0, places=3)
         self.assertEqual(self.report((0, 250, 150, 0))[0], 204)  # nothing left to do
+
+    def test_while_a_move_is_played_a_new_target_is_refused_but_hold_works(self):
+        self.assertEqual(self.target(60, 250, 150)[0], 204)
+        self.assertEqual(self.report((0, 250, 150, 0))[0], 200)       # now the arm is moving
+        self.assertEqual(self.req("GET", "/movement")[3], b"true")
+        self.assertEqual(self.target(0, 250, 200)[0], 409)            # his rule
+        self.assertEqual(self.report((0, 250, 150, 0))[0], 204)       # and no second packet
+        self.assertEqual(self.req("POST", "/hold")[0], 204)           # ours: the target can still be cancelled
+        self.assertAlmostEqual(self.state.TargetCords.X, 0.0, places=3)
+        self.req("POST", "/movement-complete")
+        self.assertEqual(self.req("GET", "/movement")[3], b"false")
+        self.assertEqual(self.target(0, 250, 200)[0], 204)
+
+    def test_every_angle_is_inside_what_his_firmware_accepts(self):
+        self.target(0, 250, 250, 0, speed=50)
+        for pose in ((0, 250, 150, 0), (-100, 250, 200, 0)):
+            self.req("POST", "/movement-complete")
+            code, _, _, body = self.report(pose)
+            if code == 200:
+                for row in parse(body):
+                    self.assertTrue(all(0.0 <= v <= 180.0 for v in row[1:]), row)
 
     def test_a_move_that_goes_wrong_midway_is_refused_whole(self):
         self.report((0, 250, 250, 0))

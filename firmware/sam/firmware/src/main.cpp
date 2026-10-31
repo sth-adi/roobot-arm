@@ -1,32 +1,38 @@
 #include "core/StartupProcess.h"
 #include "network/MovementClient.h"
+#include "network/TestConnection.h"
 
 void setup()
 {
     StartupProcess();
+    Serial.println("[Movement] Continuously checking backend for target movements");
 }
 
 void loop()
 {
-    static String pendingCompletion;
-    if (pendingCompletion.length() > 0) {
-        if (SendMovementComplete(pendingCompletion)) {
-            pendingCompletion = "";
-        } else {
-            delay(1000);
-        }
-        return;
-    }
+    TestConnection();
 
     String movementPacket;
-    String movementId;
-    if (GetMovementPacket(targetAngles, movementPacket, movementId)) {
-        if (ExecuteMovementPacket(movementPacket, targetAngles)) {
-            pendingCompletion = movementId;
-        } else {
-            Serial.println("[ERROR][Movement] Playback aborted; retaining last commanded angles");
+    if (GetMovementPacket(targetAngles, movementPacket)) {
+        Serial.printf("[Movement] Received packet: %u bytes\n", movementPacket.length());
+        const RobotAngles savedTargetAngles = targetAngles;
+
+        if (!ExecuteMovementPacket(movementPacket)) {
+            Serial.println("[ERROR][Movement] Playback aborted; returning to target angles");
+            targetAngles = savedTargetAngles;
+
+            const float angles[] = {
+                targetAngles.s1,
+                targetAngles.s2,
+                targetAngles.s3,
+                targetAngles.s4,
+            };
+            for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
+                WriteJointAngle(jointIndex, degrees(angles[jointIndex]));
+            }
         }
+        SendMovementComplete();
     }
-    // Avoid immediately re-requesting a packet after a 204 or failed request.
+
     delay(100);
 }

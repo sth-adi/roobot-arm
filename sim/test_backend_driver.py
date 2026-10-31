@@ -51,6 +51,36 @@ class DriverTest(BackendTestCase):
                 for j in range(1, 5):
                     self.assertLessEqual(abs(b[j] - a[j]) / ((b[0] - a[0]) / 1000.0), self.state.MAX_JOINT_DPS * 1.07 + 1.0)
 
+    def test_movement_reads_his_true_false_and_the_older_dict(self):
+        self.assertEqual(self.client.movement()["status"], "idle")
+        orig = self.client._call
+        self.client._call = lambda *a, **k: (200, b"true")
+        self.assertEqual(self.client.movement()["status"], "in_progress")
+        self.client._call = lambda *a, **k: (200, b'{"status": "complete"}')
+        self.assertEqual(self.client.movement()["status"], "complete")
+        self.client._call = orig
+
+    def test_a_target_refused_while_the_last_move_plays_is_retried_until_it_is_done(self):
+        self.esp.stop()                                                # drive the backend by hand
+        self.client.set_target(0, 250, 150, 0, 40)
+        self.report(START)                                             # packet issued: the arm is "moving"
+        with self.assertRaises(BC.BackendError) as c:
+            self.client.set_target(60, 250, 150, 0, 40)
+        self.assertEqual(c.exception.code, "BUSY")
+        threading.Timer(0.3, lambda: self.req("POST", "/movement-complete")).start()
+        runner = BC.PoseRunner(self.client, speed=40, poll_s=0.05)
+        runner._set_target(pose(60, 250, 150))                         # waits, then goes through
+        self.assertAlmostEqual(self.state.TargetCords.X, 60.0, places=3)
+
+    def test_a_target_that_stays_busy_is_given_up_on(self):
+        self.esp.stop()
+        self.client.set_target(0, 250, 150, 0, 40)
+        self.report(START)
+        runner = BC.PoseRunner(self.client, speed=40, poll_s=0.05)
+        with self.assertRaises(BC.BackendError) as c:
+            runner._set_target(pose(60, 250, 150), wait_s=0.3)
+        self.assertEqual(c.exception.code, "BUSY")
+
     def test_a_refused_pose_ends_the_run_and_holds(self):
         with self.assertRaises(BC.BackendError) as c:
             self.run_poses([pose(0, 250, 150), pose(-30, 60, 150), pose(0, 250, 100)])

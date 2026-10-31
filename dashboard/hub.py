@@ -144,6 +144,7 @@ class Hub:
         self.backend_speed, self.backend_ignore_magnet = float(backend_speed), bool(backend_ignore_magnet)
         self._be_thread, self._be_runner, self._be_error = None, None, None
         self._be_info = {"online": None}
+        self._be_follow = False
         self.cell = Workcell()                  # boxes, keys, tray and the electromagnet (sim/workcell.py)
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
         self.packets = collections.deque(maxlen=500)
@@ -860,10 +861,8 @@ class Hub:
     # ---- firmware ----------------------------------------------------------------------------------
     # firmware profiles: what can be flashed onto the board from the dashboard
     FW_PROFILES = {
-        "sam": {"label": "Sam's firmware", "kind": "stock", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
-                "desc": "The UWE-RArm firmware exactly as shipped (firmware/stock/src, untouched). Polls the end server itself."},
-        "ours": {"label": "Our firmware", "kind": "ours", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
-                 "desc": "Sam's firmware plus our three patches: damper and failsafes, sequences and magnet, a speed per sequence pose."},
+        "local": {"label": "Sam's 29 Oct firmware, our backend", "kind": "local", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
+                  "desc": "His latest firmware (firmware/sam/firmware) with one change: it asks this computer's backend (http, port 8001) for each move. The hub sends the targets, so the dashboard (Ask box, sequences, nudges, training) drives the arm. Start the launcher with --backend-lan so the board can reach it."},
         "usb": {"label": "USB jog sketch", "kind": None, "fqbn": FQBN, "libs": ["ArduinoJson"],
                 "desc": "Our older sketch (arduino/arm_receiver): jog control over USB or WiFi."},
     }
@@ -879,30 +878,38 @@ class Hub:
         self.FWB.mkdir(exist_ok=True)
         (self.FWB / "state.json").write_text(json.dumps(st), encoding="utf-8")
 
-    def _fw_secrets(self):
-        """(ssid, password, host) for the stock-based firmwares, taken from secrets.h and .env. Never sent to the browser."""
+    def _fw_secrets(self, kind=None):
+        """(ssid, password, host) for the local-backend firmware, from secrets.h and this computer's address. Never sent to the browser.
+        The host is this computer's LAN address and the backend's port, so the board can reach the backend."""
         txt = (SKETCH / "secrets.h").read_text(encoding="utf-8", errors="replace") if (SKETCH / "secrets.h").exists() else ""
 
         def g(k):
             m = re.search(r'#define\s+%s\s+"([^"]*)"' % k, txt)
             return m.group(1) if m else ""
         from urllib.parse import urlparse
-        ssid, pw, host = g("WIFI_SSID"), g("WIFI_PASS"), urlparse(self.env_forward()).hostname or ""
-        if not (ssid and host):
-            raise ValueError("needs WIFI_SSID in arduino/arm_receiver/secrets.h and FORWARD_URL in .env (its host is the end server the firmware polls)")
-        return ssid, pw, host
+        ssid, pw = g("WIFI_SSID"), g("WIFI_PASS")
+        if not ssid:
+            raise ValueError("needs WIFI_SSID (and WIFI_PASS) in arduino/arm_receiver/secrets.h; WIFI_USER too for a WPA2 Enterprise network")
+        port = urlparse(self.backend.base).port if self.backend else 8001
+        return ssid, pw, "%s:%s" % (lan_ip(), port or 8001)
+
+    def _fw_wifi_user(self):
+        """Optional WIFI_USER in secrets.h: the board then joins a WPA2 Enterprise network (as Sam's firmware does)."""
+        txt = (SKETCH / "secrets.h").read_text(encoding="utf-8", errors="replace") if (SKETCH / "secrets.h").exists() else ""
+        m = re.search(r'#define\s+WIFI_USER\s+"([^"]*)"', txt)
+        return m.group(1) if m else ""
 
     def _fw_hash(self, pid):
         import hashlib
         h = hashlib.sha1()
         prof = self.FW_PROFILES[pid]
-        roots = [SKETCH] if prof["kind"] is None else [ROOT / "firmware" / "stock" / "src", ROOT / "firmware" / "stock" / "patches"]
+        roots = [SKETCH] if prof["kind"] is None else [ROOT / "firmware" / "sam" / "firmware" / "src", ROOT / "firmware" / "ours"]
         for r in roots:
             for f in sorted(r.rglob("*")):
                 if f.is_file():
                     h.update(f.relative_to(r).as_posix().encode() + f.read_bytes())
         if prof["kind"] is not None:
-            h.update(("|".join(self._fw_secrets()) + prof["kind"]).encode())
+            h.update(("|".join(self._fw_secrets(prof["kind"])) + self._fw_wifi_user() + prof["kind"]).encode())
         return h.hexdigest()[:12]
 
     _fw_stale_cache, _fw_stale_t = {}, 0.0         # "changed since the last build" needs every firmware file hashed: do it every 5 s, not every status update
@@ -935,19 +942,21 @@ class Hub:
         if prof["kind"] is None:
             return SKETCH, out_dir
         import tempfile
-        import emu_runner
-        ssid, pw, host = self._fw_secrets()
+        ssid, pw, host = self._fw_secrets(prof["kind"])
         sk = self.FWB / pid / pid
         shutil.rmtree(sk, ignore_errors=True)
         sk.mkdir(parents=True)
-        with tempfile.TemporaryDirectory() as td:                    # patched trees are built outside the repo
-            src = emu_runner.emu_mod.firmware_src(prof["kind"], td)
-            for f in os.listdir(src):
-                if f != "SecretsExample.h":
-                    shutil.copy2(os.path.join(src, f), sk / f)
-        (sk / (pid + ".ino")).write_text("// Entry point only: the firmware is main.cpp in this folder.\n", encoding="utf-8")
-        (sk / "Secrets.h").write_text('const char* WIFI_SSID = "%s";\nconst char* WIFI_PASSWORD = "%s";\nconst char* HOST = "%s";\n' % (ssid, pw, host), encoding="utf-8")
-        return sk, out_dir
+        if prof["kind"] == "local":                                   # his 29 Oct firmware, patched to use a plain-http backend
+            sys.path.insert(0, str(ROOT / "firmware" / "ours"))
+            try:
+                import build_firmware
+            finally:
+                sys.path.pop(0)
+            with tempfile.TemporaryDirectory() as td:
+                built = build_firmware.build(Path(td) / "t", host, ssid, pw, self._fw_wifi_user())
+                shutil.copytree(built / "src", sk, dirs_exist_ok=True)
+            (sk / (pid + ".ino")).write_text("// Entry point only: the firmware is main.cpp in this folder.\n", encoding="utf-8")
+            return sk, out_dir
 
     def firmware_job(self, action, profile="usb"):
         if action not in ("compile", "upload", "swap") or profile not in self.FW_PROFILES:
@@ -962,7 +971,7 @@ class Hub:
                     if not (SKETCH / "secrets.h").exists():
                         return False, "arduino/arm_receiver/secrets.h is missing: copy secrets.example.h and fill it in"
                 else:
-                    self._fw_secrets()
+                    self._fw_secrets(self.FW_PROFILES[profile]["kind"])
             except ValueError as e:
                 return False, str(e)
             if action in ("upload", "swap"):
@@ -1140,6 +1149,7 @@ class Hub:
             "config": {"env_present": (ROOT / ".env").exists(), "forward_url_set": bool(self.env_forward())},
             "project": self.cache["git"],
             "sim": self._sim_snapshot(),
+            "backend": self._be_summary() if self.backend else None,
             "emu": self.emu.snapshot(),
             "phone_url": self.phone_url,
             "phone_url_https": self.phone_url_https,
@@ -1184,7 +1194,7 @@ class Hub:
     def state_packet(self):
         st = self._state_packet_core()
         if self.backend:
-            st["backend"] = dict(self._be_info)
+            st["backend"] = self._be_summary()
         return st
 
     def _state_packet_core(self):
@@ -1729,6 +1739,48 @@ class Hub:
                 self.log("hub", "could not tell the backend to hold: %s" % e.title)
         threading.Thread(target=hold, daemon=True).start()
 
+    BACKEND_MAX_SPEED = 50.0                         # his backend refuses a Speed above its MAX_SPEED (GlobalVariables.py)
+    FOLLOW_HZ, FOLLOW_MM, FOLLOW_DEG = 8.0, 1.0, 1.5     # how often the real arm is told where the virtual one is, and how much it must have moved first
+
+    def _be_summary(self):
+        return dict(self._be_info, speed=self.backend_speed, max_speed=self.BACKEND_MAX_SPEED, follow=self._be_follow)
+
+    def set_backend_speed(self, mm_s):
+        """Tool speed the real arm moves at through the backend (mm/s). Used for the controller, the Home button, the Ask box and sequences."""
+        v = float(mm_s)
+        if not (5.0 <= v <= self.BACKEND_MAX_SPEED):
+            raise ValueError("real arm speed must be 5-%d mm/s (his backend's limit)" % self.BACKEND_MAX_SPEED)
+        self.backend_speed = v
+        self.log("hub", "real arm speed set to %g mm/s" % v)
+
+    def _follow_loop(self):
+        """Live follow. His backend only moves the arm toward the last target it was given, so while ARMED (and no run owns the real arm) the virtual arm's
+        position is posted as that target whenever it has moved: the sticks, the Home button and anything else that moves the virtual arm then move the
+        real one too. Nothing is sent when arming, only once the virtual arm moves; the backend's own checks and speed limit apply to every target."""
+        last, last_err = None, 0.0
+        while not self.stop.is_set():
+            time.sleep(1.0 / self.FOLLOW_HZ)
+            if not self.backend or not self.armed or self._be_busy() or self.mirror["on"]:
+                last, self._be_follow = None, False
+                continue
+            try:
+                with self.sim_lock:
+                    pose = tuple(self.sim.pose())
+                if last is None:
+                    last = pose
+                    continue
+                if math.dist(pose[:3], last[:3]) < self.FOLLOW_MM and abs(pose[3] - last[3]) < self.FOLLOW_DEG:
+                    continue
+                last = pose
+                self.backend.set_target(pose[0], pose[1], pose[2], pose[3], self.backend_speed)
+                self._be_follow = True
+            except BC.BackendError as e:                # a refused or unreachable target must not stop the loop; say so at most every 5 s
+                if time.time() - last_err > 5.0:
+                    last_err = time.time()
+                    self.log("hub", "real arm: %s %s" % (e.title, e.detail or ""))
+            except Exception as e:
+                self.log("hub", "real arm follow error: %s" % e)
+
     def _backend_loop(self):
         while not self.stop.is_set():
             time.sleep(1.0)
@@ -1775,7 +1827,7 @@ class Hub:
                 "logs": {k: list(v)[-80:] for k, v in self.logs.items()}}
 
     def start(self):
-        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop, self._backend_loop):
+        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop, self._backend_loop, self._follow_loop):
             threading.Thread(target=fn, daemon=True).start()
         threading.Thread(target=self._ticker, daemon=True).start()
         threading.Thread(target=self._boot_calibration, daemon=True).start()
@@ -2112,6 +2164,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": str(e)})
                 except RuntimeError as e:
                     return self._json(409, {"error": str(e)})
+            if path == "/api/backend":          # the real arm's speed through the backend: {"speed": mm/s}
+                if not HUB.backend:
+                    return self._json(409, {"error": "the hub was started without --backend"})
+                try:
+                    HUB.set_backend_speed(d.get("speed"))
+                    return self._json(200, {"ok": True, "speed": HUB.backend_speed})
+                except (ValueError, TypeError) as e:
+                    return self._json(400, {"error": str(e)})
             if path == "/api/mirror":           # mirror mode: on | off | test (nudge one joint) | map (joint -> channel)
                 try:
                     return self._json(200, {"ok": True, "mirror": HUB.mirror_action(d)})
@@ -2211,7 +2271,7 @@ def main():
                     help="also send the damper to the arm as maxSpeed (needs the modified firmware in firmware/rarm)")
     ap.add_argument("--backend", default=os.environ.get("BACKEND_URL", ""),
                     help="Sam's backend (our build, see firmware/ours), e.g. http://127.0.0.1:8000: when the output is ARMED the real arm follows the virtual one through it")
-    ap.add_argument("--backend-speed", type=float, default=20.0, help="tool speed for the real arm, mm/s (the backend allows up to 50)")
+    ap.add_argument("--backend-speed", type=float, default=35.0, help="tool speed for the real arm, mm/s (the backend allows up to 50; change it live on the Control page)")
     ap.add_argument("--backend-ignore-magnet", action="store_true",
                     help="move the real arm through sequences that use the magnet, without switching it (its firmware has no switch): the virtual magnet still handles the keys")
     args = ap.parse_args()

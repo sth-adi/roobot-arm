@@ -338,6 +338,11 @@ function mountControl(root) {
         <div class="field"><div class="inline"><input type="range" id="c-rate" min="0" max="60" step="1" aria-label="Fastest joint speed in degrees per second"><span class="mono" id="c-rate-v" style="min-width:90px;text-align:right"></span></div>
           <div class="note" id="c-rate-n"></div></div>
       </section>
+      <section class="sec" id="c-real" hidden><h2>Real arm speed (Sam's backend)</h2>
+        <p class="lead">How fast the real arm moves through his backend, in millimetres per second: the controller, the Home button, the Ask box and sequences. His backend allows up to 50. The virtual arm's damper and stick speed above still decide how fast the virtual arm, which the real arm follows, moves; the backend also keeps every joint under 30 degrees per second.</p>
+        <div class="field"><div class="inline"><input type="range" id="c-realsp" min="5" max="50" step="1" aria-label="Real arm tool speed in millimetres per second"><span class="mono" id="c-realsp-v" style="min-width:90px;text-align:right"></span></div>
+          <div class="note" id="c-real-n"></div></div>
+      </section>
       <section class="sec"><h2>Move speed (sequences)</h2>
         <p class="lead">Sequence poses are reached on a smooth straight line through space, with the speed easing in and out (the linear move from Sam's UWE-RArm repo). This is the peak tool speed along that line, in millimetres per second; 0 goes back to every joint heading straight for the pose. The damper above still caps the joints underneath.</p>
         <div class="field"><div class="inline"><input type="range" id="c-move" min="0" max="300" step="10" aria-label="Peak tool speed of straight-line moves in millimetres per second"><span class="mono" id="c-move-v" style="min-width:90px;text-align:right"></span></div></div>
@@ -398,6 +403,15 @@ function mountControl(root) {
   stickSl.addEventListener("change", async () => {
     stickT = performance.now();
     const r = await api("/api/sim", { stick_speed: +stickSl.value });
+    if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
+  });
+  // real arm speed through the backend
+  const realSl = $r("#c-realsp");
+  let realT = 0;
+  realSl.addEventListener("input", () => { realT = performance.now(); $r("#c-realsp-v").textContent = realSl.value + " mm/s"; });
+  realSl.addEventListener("change", async () => {
+    realT = performance.now();
+    const r = await api("/api/backend", { speed: +realSl.value });
     if (!r.ok) toast(r.error || "The hub is not reachable", "bad");
   });
   // move speed
@@ -514,6 +528,12 @@ function mountControl(root) {
         : `As shipped: no speed limit, the XYZ target is separate from the arm (target ${sm.target ? sm.target.join(", ") : "-"}), Go home gives up after 3 s, and once it ends the arm swings back to the pre-home target.`;
       slider.value = cfg.rate;
       if (sm && sm.move_speed != null && performance.now() - moveT > 1500) { moveSl.value = sm.move_speed; $r("#c-move-v").textContent = moveLabel(sm.move_speed); }
+      const be = st.backend;
+      $r("#c-real").hidden = !be;
+      if (be && be.speed != null) {
+        if (performance.now() - realT > 1500) { realSl.value = be.speed; $r("#c-realsp-v").textContent = be.speed + " mm/s"; }
+        $r("#c-real-n").textContent = be.online === false ? "The backend is not answering (" + (be.error || "offline") + ")." : be.follow ? "Following the virtual arm live." : "Ready: while ARMED the real arm follows the virtual one.";
+      }
       if (sm && sm.stick_speed != null && performance.now() - stickT > 1500) { stickSl.value = sm.stick_speed; $r("#c-stick-v").textContent = sm.stick_speed + " mm/s"; }
       $r("#c-rate-v").textContent = cfg.rate > 0 ? `${cfg.rate} deg/s` : "no limit";
       $r("#c-rate-n").textContent = sm && sm.model === "stock" && !sm.patch ? "The stock firmware has no speed limiter: this setting is ignored in this mode." : cfg.rate > 0 ? `A 90 degree joint move takes at least ${Math.round(90 / cfg.rate)} s.` : "No limit: joints are capped at 180 deg/s.";
@@ -840,7 +860,7 @@ function mountFirmware(root) {
   <div class="cols">
     <div>
       <section class="sec" style="border-top:0;padding-top:0"><h2>Swap the firmware on the board</h2>
-        <p class="lead">Flash Sam's firmware, ours, or the USB jog sketch onto the ESP32. Each one is built once and kept, so swapping back is just an upload. Sam's and ours poll the end server over WiFi themselves; the USB sketch does not.</p>
+        <p class="lead">Flash Sam's 29 Oct firmware (asking our backend over WiFi, so the dashboard sends the moves) or the USB jog sketch onto the ESP32. Each one is built once and kept, so swapping back is just an upload.</p>
         <div class="rows" id="f-profiles"></div>
         <p class="note" id="f-pnote" style="margin-top:8px"></p></section>
       <section class="sec"><h2>ESP32 sketch (USB jog)</h2>

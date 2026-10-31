@@ -1771,10 +1771,13 @@ class Hub:
                     continue
                 if math.dist(pose[:3], last[:3]) < self.FOLLOW_MM and abs(pose[3] - last[3]) < self.FOLLOW_DEG:
                     continue
-                last = pose
+                before, last = last, pose
                 self.backend.set_target(pose[0], pose[1], pose[2], pose[3], self.backend_speed)
                 self._be_follow = True
             except BC.BackendError as e:                # a refused or unreachable target must not stop the loop; say so at most every 5 s
+                if e.code == "BUSY":                    # his backend takes no new target while a packet is being played: send it again on the next tick
+                    last = before
+                    continue
                 if time.time() - last_err > 5.0:
                     last_err = time.time()
                     self.log("hub", "real arm: %s %s" % (e.title, e.detail or ""))

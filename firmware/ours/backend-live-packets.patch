@@ -17,7 +17,7 @@ diff -ruN a/GlobalVariables.py b/GlobalVariables.py
 diff -ruN a/api/handlers.py b/api/handlers.py
 --- a/api/handlers.py
 +++ b/api/handlers.py
-@@ -10,7 +10,14 @@
+@@ -9,7 +9,14 @@
  from motion.packets import CompileAnglePacket
  
  
@@ -32,7 +32,7 @@ diff -ruN a/api/handlers.py b/api/handlers.py
  
      def log_message(self, format, *args):
          # The dashboard asks these two every second: leave them out of the console so real events stay visible.
-@@ -102,7 +109,7 @@
+@@ -106,7 +113,7 @@
                  return
  
              try:
@@ -41,26 +41,30 @@ diff -ruN a/api/handlers.py b/api/handlers.py
              except (ValueError, ZeroDivisionError, OverflowError) as error:
                  # A refused move says why (title only: the status line must be one short line); the full reason is printed.
                  reason = getattr(error, "title", "") or "unreachable"
-@@ -159,6 +166,7 @@
-                 return
-             state.TargetCords = candidate
-             state.TargetSpeed = speed
+@@ -135,7 +142,9 @@
+     def do_POST(self):
+         target_url = urlparse(self.path)
+         if target_url.path == "/target":
+-            
++            # ours: count every target request, also one he refuses because a packet is playing: that is how we know targets keep arriving
 +            state.target_times = (state.target_times + [time.time()])[-8:]
-             # An in-flight packet keeps its own target snapshot and ID.
-             self.send_response(204)
-             self.end_headers()
++
+             if state.arm_moving:
+                 self.send_error(409, "Arm is moving; retry after movement completes")
+                 return
 diff -ruN a/main.py b/main.py
 --- a/main.py
 +++ b/main.py
-@@ -1,9 +1,10 @@
+@@ -1,4 +1,4 @@
 -from http.server import HTTPServer
 +from http.server import ThreadingHTTPServer
+ import threading
+ import time
  
- from api.handlers import Handler
- import GlobalVariables as state
- 
+@@ -20,5 +20,6 @@
  
  if __name__ == "__main__":
+     threading.Thread(target=print_movement_state_forever, daemon=True).start()
 -    server = HTTPServer((state.SERVER_HOST, state.SERVER_PORT), Handler)
 +    server = ThreadingHTTPServer((state.SERVER_HOST, state.SERVER_PORT), Handler)   # the board's kept-open connection must not block the dashboard's requests
 +    server.daemon_threads = True
@@ -76,11 +80,30 @@ diff -ruN a/motion/packets.py b/motion/packets.py
 +def CompileAnglePacket(StartingCords: Coordinates, EndingCords: Coordinates, Speed, StepsPmm, live=False):
      """Same inputs and output as before (StepsPmm is no longer used), but every step is checked first.
  
-     Raises motion.safe_planner.PlanError (a ValueError with code, title, detail and hint) for a path that is unreachable, outside the
-@@ -27,4 +27,5 @@
+     Output: the step count, the interval in milliseconds, then steps + 1 rows "time_ms/j1/j2/j3/j4" (what the firmware's ExecuteMovementPacket reads).
+@@ -30,7 +30,8 @@
  
      start = (StartingCords.X, StartingCords.Y, StartingCords.Z, StartingCords.A)
      end = (EndingCords.X, EndingCords.Y, EndingCords.Z, EndingCords.A)
--    return safe_planner.plan(start, end, state.calibration_data["jointLimits"], Speed, state.MAX_JOINT_DPS, state.PLAN_RATE_HZ)["lines"]
-+    return safe_planner.plan(start, end, state.calibration_data["jointLimits"], Speed, state.MAX_JOINT_DPS, state.PLAN_RATE_HZ,
-+                             live=live, chunk_s=state.LIVE_PACKET_S)["lines"]
+-    plan = safe_planner.plan(start, end, state.calibration_data["jointLimits"], Speed, state.MAX_JOINT_DPS, state.PLAN_RATE_HZ)
++    plan = safe_planner.plan(start, end, state.calibration_data["jointLimits"], Speed, state.MAX_JOINT_DPS, state.PLAN_RATE_HZ,
++                             live=live, chunk_s=state.LIVE_PACKET_S)
+     if not plan["lines"]:
+         return []
+     return [str(plan["steps"]), str(max(1, round(1000.0 * plan["duration"] / plan["steps"])))] + plan["lines"]
+diff -ruN a/tests/test_movement_api.py b/tests/test_movement_api.py
+--- a/tests/test_movement_api.py
++++ b/tests/test_movement_api.py
+@@ -112,10 +112,12 @@
+             self.assertIs(state.TargetCords, original)
+ 
+     def test_speed_changes_packet_timing(self):
++        state.target_times = []     # ours: this test is about one long move, not a stream of targets
+         _, _, slow = self.packet()
+         self.request("POST", "/movement-complete")
+         self.assertEqual(self.request("POST", "/target",
+                          {"X": "0", "Y": "250", "Z": "250", "A": "0", "Speed": "20"})[0], 204)
++        state.target_times = []
+         _, _, fast = self.packet()
+         self.request("POST", "/movement-complete")
+         # Skip the two header lines (step count, interval). The checked planner sends servo commands at a fixed rate in time, so a slower move has

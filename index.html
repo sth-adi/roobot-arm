@@ -1,0 +1,274 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Robot Arm Control</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #f1f5f9;
+            color: #1e293b;
+            margin: 0;
+            padding: 24px 16px;
+        }
+
+        main {
+            max-width: 550px;
+            margin: auto;
+        }
+
+        h1 {
+            text-align: center;
+        }
+
+        .panel {
+            background: white;
+            padding: 22px;
+            margin: 18px 0;
+            border-radius: 14px;
+            box-shadow: 0 3px 12px #0001;
+        }
+
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            margin: 12px 0;
+        }
+
+        button {
+            width: 100%;
+            padding: 20px 12px;
+            margin: 8px 0;
+            border: none;
+            border-radius: 10px;
+            color: white;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            touch-action: manipulation;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: wait;
+        }
+
+        .collect { background: #2563eb; }
+        .return { background: #15803d; }
+        .home { background: #475569; }
+        .stop { background: #dc2626; }
+        .refresh { background: #64748b; }
+
+        #message {
+            overflow-wrap: anywhere;
+            line-height: 1.5;
+        }
+
+        .muted {
+            color: #64748b;
+            font-size: 14px;
+        }
+
+        .KeyDropdown {
+            width: 90%;
+            padding: 12px;
+            margin: 8px 0;
+            border-radius: 10px;
+            border: 1px solid #cbd5e1;
+            font-size: 16px;
+        }
+    </style>
+</head>
+
+<body>
+<main>
+    <h1>Robot Arm Control</h1>
+
+    <section class="panel">
+        <h2>Connection</h2>
+
+        <div class="status-row">
+            <span>Server</span>
+            <strong id="connection">Checking...</strong>
+        </div>
+
+        <div class="status-row">
+            <span>Operating mode</span>
+            <strong id="mode">Unknown</strong>
+        </div>
+
+        <div class="status-row">
+            <span>Arm status</span>
+            <strong id="armStatus">Loading...</strong>
+        </div>
+
+        <button class="refresh" onclick="refreshAll()">
+            Refresh Status
+        </button>
+    </section>
+
+    <section class="panel" id="KeyRequest">
+        <h2>Request Key</h2>
+
+        <label for="KeySelect">Choose a car:</label>
+
+        <select name="KeySelect" id="KeySelect" class="KeyDropdown">
+            <option value="volvo">PLACEHOLDER Need to change so these options are gottEn from the server</option>
+            <option value="saab">Saab</option>
+            <option value="mercedes">Mercedes</option>
+            <option value="audi">Audi</option>
+        </select>
+
+        <button
+            class="collect"
+            onclick="sendCommand('request_key')">
+            Request Key
+        </button>
+    </section>
+
+    <section class="panel" id="KeyReturn">
+        <h2>Return Key</h2>
+
+        <label for="KeyReturn">Choose a car:</label>
+
+        <select name="KeyReturn" id="KeyReturn" class="KeyDropdown">
+            <option value="volvo">PLACEHOLDER Need to change so these options are gottEn from the server</option>
+            <option value="saab">Saab</option>
+            <option value="mercedes">Mercedes</option>
+            <option value="audi">Audi</option>
+        </select>
+
+        <button
+            class="return"
+            onclick="sendCommand('return_key')">
+            Return Key
+        </button>
+    </section>
+
+    <p id="message" role="status" aria-live="polite">
+        Ready to connect.
+    </p>
+
+
+</main>
+
+<script>
+    // Send a JSON command to the Python server.
+    async function sendCommand(command) {
+        const message = document.getElementById("message");
+
+        // Prevent overlapping command submissions.
+        const buttons = document.querySelectorAll(
+            ".panel button:not(.refresh)"
+        );
+
+        buttons.forEach(button => button.disabled = true);
+        message.textContent = "Sending command: " + command + "...";
+
+        try {
+            const response = await fetch("/controller", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    command: command
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error("HTTP " + response.status);
+            }
+
+            message.textContent =
+                "Command accepted by server: " + command;
+        } catch (error) {
+            message.textContent =
+                "Failed to send command: " + error.message;
+        } finally {
+            buttons.forEach(button => button.disabled = false);
+        }
+    }
+
+    // Read the arm status from GET /status.
+    async function refreshStatus() {
+        const statusElement = document.getElementById("armStatus");
+
+        try {
+            const response = await fetch("/status");
+
+            if (!response.ok) {
+                throw new Error("HTTP " + response.status);
+            }
+
+            const status = await response.text();
+
+            statusElement.textContent = status || "No status reported";
+        } catch (error) {
+            statusElement.textContent = "Unavailable";
+        }
+    }
+
+    // Read the operating mode from GET /mode.
+    async function refreshMode() {
+        const modeElement = document.getElementById("mode");
+
+        try {
+            const response = await fetch("/mode");
+
+            if (!response.ok) {
+                throw new Error("HTTP " + response.status);
+            }
+
+            modeElement.textContent =
+                response.headers.get("Mode") || "Unknown";
+        } catch (error) {
+            modeElement.textContent = "Unavailable";
+        }
+    }
+
+    // Test whether the server responds.
+    async function checkConnection() {
+        const connectionElement =
+            document.getElementById("connection");
+
+        try {
+            const response = await fetch("/controller");
+
+            if (!response.ok) {
+                throw new Error("HTTP " + response.status);
+            }
+
+            // Ensure the returned controller data is valid JSON.
+            await response.json();
+
+            connectionElement.textContent = "Online";
+            connectionElement.style.color = "#15803d";
+        } catch (error) {
+            connectionElement.textContent = "Offline";
+            connectionElement.style.color = "#dc2626";
+        }
+    }
+
+    async function refreshAll() {
+        await Promise.all([
+            checkConnection(),
+            refreshStatus(),
+            refreshMode()
+        ]);
+    }
+
+    // Update the displayed information every two seconds.
+    refreshAll();
+    setInterval(refreshAll, 2000);
+</script>
+</body>
+</html>

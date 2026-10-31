@@ -1,0 +1,86 @@
+diff -ruN a/GlobalVariables.py b/GlobalVariables.py
+--- a/GlobalVariables.py
++++ b/GlobalVariables.py
+@@ -14,6 +14,12 @@
+ STEPS_PER_MM = 5  # Only used by the original planner; the checked planner (motion/safe_planner.py) updates at PLAN_RATE_HZ.
+ MAX_JOINT_DPS = 30.0  # No joint is asked to move faster than this (deg/s); a move is slowed down as a whole to keep to it.
+ PLAN_RATE_HZ = 50.0   # Servo commands per second in a packet.
++# While targets keep arriving (the dashboard following a controller) a packet covers only the first LIVE_PACKET_S seconds of the way, at a constant speed,
++# so the arm chases a target that is at most about that old. "Keep arriving" = LIVE_MIN_TARGETS targets within the last LIVE_WINDOW_S seconds.
++LIVE_PACKET_S = 0.5
++LIVE_WINDOW_S = 0.6
++LIVE_MIN_TARGETS = 3
++target_times = []     # when the last few targets were set
+ 
+ controller_state = {}
+ arm_status = ""
+diff -ruN a/api/handlers.py b/api/handlers.py
+--- a/api/handlers.py
++++ b/api/handlers.py
+@@ -10,7 +10,14 @@
+ from motion.packets import CompileAnglePacket
+ 
+ 
++def _targets_are_live():
++    now = time.time()
++    return sum(1 for t in state.target_times if now - t <= state.LIVE_WINDOW_S) >= state.LIVE_MIN_TARGETS
++
++
+ class Handler(BaseHTTPRequestHandler):
++    protocol_version = "HTTP/1.1"   # the board keeps one connection open instead of connecting for every request
++    timeout = 5                     # and a board that vanishes frees its connection after this many seconds
+ 
+     def log_message(self, format, *args):
+         # The dashboard asks these two every second: leave them out of the console so real events stay visible.
+@@ -102,7 +109,7 @@
+                 return
+ 
+             try:
+-                angle_packet = CompileAnglePacket(current_cords, state.TargetCords, state.TargetSpeed, state.STEPS_PER_MM)
++                angle_packet = CompileAnglePacket(current_cords, state.TargetCords, state.TargetSpeed, state.STEPS_PER_MM, live=_targets_are_live())
+             except (ValueError, ZeroDivisionError, OverflowError) as error:
+                 # A refused move says why (title only: the status line must be one short line); the full reason is printed.
+                 reason = getattr(error, "title", "") or "unreachable"
+@@ -159,6 +166,7 @@
+                 return
+             state.TargetCords = candidate
+             state.TargetSpeed = speed
++            state.target_times = (state.target_times + [time.time()])[-8:]
+             # An in-flight packet keeps its own target snapshot and ID.
+             self.send_response(204)
+             self.end_headers()
+diff -ruN a/main.py b/main.py
+--- a/main.py
++++ b/main.py
+@@ -1,9 +1,10 @@
+-from http.server import HTTPServer
++from http.server import ThreadingHTTPServer
+ 
+ from api.handlers import Handler
+ import GlobalVariables as state
+ 
+ 
+ if __name__ == "__main__":
+-    server = HTTPServer((state.SERVER_HOST, state.SERVER_PORT), Handler)
++    server = ThreadingHTTPServer((state.SERVER_HOST, state.SERVER_PORT), Handler)   # the board's kept-open connection must not block the dashboard's requests
++    server.daemon_threads = True
+     server.serve_forever()
+diff -ruN a/motion/packets.py b/motion/packets.py
+--- a/motion/packets.py
++++ b/motion/packets.py
+@@ -17,7 +17,7 @@
+     )
+ 
+ 
+-def CompileAnglePacket(StartingCords: Coordinates, EndingCords: Coordinates, Speed, StepsPmm):
++def CompileAnglePacket(StartingCords: Coordinates, EndingCords: Coordinates, Speed, StepsPmm, live=False):
+     """Same inputs and output as before (StepsPmm is no longer used), but every step is checked first.
+ 
+     Raises motion.safe_planner.PlanError (a ValueError with code, title, detail and hint) for a path that is unreachable, outside the
+@@ -27,4 +27,5 @@
+ 
+     start = (StartingCords.X, StartingCords.Y, StartingCords.Z, StartingCords.A)
+     end = (EndingCords.X, EndingCords.Y, EndingCords.Z, EndingCords.A)
+-    return safe_planner.plan(start, end, state.calibration_data["jointLimits"], Speed, state.MAX_JOINT_DPS, state.PLAN_RATE_HZ)["lines"]
++    return safe_planner.plan(start, end, state.calibration_data["jointLimits"], Speed, state.MAX_JOINT_DPS, state.PLAN_RATE_HZ,
++                             live=live, chunk_s=state.LIVE_PACKET_S)["lines"]

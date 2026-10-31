@@ -116,6 +116,54 @@ class HubWithBackend(BackendTestCase):
         self.assertEqual(b["url"], self.url)
         self.assertIn("position", b)
 
+    def move_virtual_arm_to(self, x, y, z, a):
+        ang = self.IK(self.C(x, y, z, a))
+        with self.hub.sim_lock:
+            self.hub.sim.angles = (ang.S1, ang.S2, ang.S3, ang.S4)
+
+    def test_moving_the_virtual_arm_by_hand_moves_the_real_arm_live(self):
+        """The sticks and the Home button only move the virtual arm; while ARMED the follower posts its position to the backend as the target."""
+        self.make_hub()
+        self.hub.set_backend_speed(33)
+        time.sleep(0.6)                                                   # the first tick after arming only records where the virtual arm is
+        self.move_virtual_arm_to(60, 250, 150, 0)
+        end = self.IK(self.C(60, 250, 150, 0))
+        want = [math.degrees(v) for v in (end.S1, end.S2, end.S3, end.S4)]
+        self.assertTrue(self.wait(lambda: all(abs(g - w) < 0.5 for g, w in zip(self.esp.q, want)), 20), self.esp.q)
+        self.assertEqual(self.state.TargetSpeed, 33)                       # at the speed set from the dashboard
+        self.assertTrue(self.hub.state_packet()["backend"]["follow"])
+
+    def test_nothing_is_sent_when_arming_only_when_the_virtual_arm_moves(self):
+        self.make_hub()
+        time.sleep(1.0)
+        self.assertEqual(self.esp.packets, [])
+
+    def test_safe_the_virtual_arm_moves_alone(self):
+        self.make_hub(armed=False)
+        self.move_virtual_arm_to(60, 250, 150, 0)
+        time.sleep(1.2)
+        self.assertEqual(self.esp.packets, [])
+
+    def test_a_refused_follow_target_does_not_kill_the_loop(self):
+        self.make_hub()
+        time.sleep(0.6)
+        self.move_virtual_arm_to(-30, 60, 150, 0)                         # the backend refuses this one (outside the calibrated base range)
+        time.sleep(0.8)
+        self.move_virtual_arm_to(60, 250, 150, 0)
+        end = self.IK(self.C(60, 250, 150, 0))
+        want = [math.degrees(v) for v in (end.S1, end.S2, end.S3, end.S4)]
+        self.assertTrue(self.wait(lambda: all(abs(g - w) < 0.5 for g, w in zip(self.esp.q, want)), 20), self.esp.q)
+
+    def test_real_arm_speed_is_limited_to_what_his_backend_allows(self):
+        self.make_hub()
+        self.hub.set_backend_speed(50)
+        self.assertEqual(self.hub.backend_speed, 50)
+        for bad in (4, 51, "x", None):
+            with self.assertRaises((ValueError, TypeError)):
+                self.hub.set_backend_speed(bad)
+        self.assertEqual(self.hub.backend_speed, 50)
+        self.assertEqual(self.hub.state_packet()["backend"]["max_speed"], 50.0)
+
     def test_offline_backend_is_reported_not_fatal(self):
         import hub as H
         h = H.Hub("http://127.0.0.1:1", backend_url="http://127.0.0.1:9")

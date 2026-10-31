@@ -8,7 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from http.server import HTTPServer
+from http.server import ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MODS = ("api", "api.handlers", "models", "models.robot", "motion", "motion.kinematics", "motion.packets", "motion.safe_planner", "GlobalVariables")
@@ -48,7 +48,8 @@ class BackendTestCase(unittest.TestCase):
         from motion.kinematics import InverseKim
         from models.robot import Coordinates
         self.state, self.IK, self.C = state, InverseKim, Coordinates
-        self.server = HTTPServer(("127.0.0.1", 0), handlers.Handler)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handlers.Handler)       # as main.py: the board keeps a connection open
+        self.server.daemon_threads = True
         self.url = "http://127.0.0.1:%d" % self.server.server_port
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()

@@ -103,7 +103,7 @@ def main():
     ap.add_argument("--no-backend", action="store_true", help="do not start Sam's backend: the virtual arm only")
     ap.add_argument("--backend-port", type=int, default=8001)
     ap.add_argument("--backend-lan", action="store_true", help="let the ESP32 reach the backend over the network (it has no password)")
-    ap.add_argument("--backend-speed", type=float, default=20.0, help="tool speed for the real arm, mm/s (up to 50)")
+    ap.add_argument("--backend-speed", type=float, default=35.0, help="tool speed for the real arm, mm/s (up to 50)")
     ap.add_argument("--backend-ignore-magnet", action="store_true", help="move the real arm through sequences that use the magnet, without switching it (its firmware cannot)")
     a = ap.parse_args()
     py = sys.executable

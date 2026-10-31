@@ -38,7 +38,13 @@ def CompileAnglePacket(StartingCords: Coordinates, EndingCords: Coordinates, Spe
 
     InitialAngles = InverseKim(StartingCords)
 
+    MovementSet.append(str(Steps))
+
+    MovementSet.append(f"{StepTiming * 1000:.0f}")  # milliseconds per step
+    
     MovementSet.append(FormatPacketEntry(0, InitialAngles))
+
+
 
     for step in range(1, Steps + 1):
         fraction = step / Steps

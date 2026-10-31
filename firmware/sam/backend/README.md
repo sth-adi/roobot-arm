@@ -15,10 +15,10 @@ Function names, calculations, routes and response formats are unchanged by the r
 
 ## Movement API
 
-- `POST /target`: supply `X`, `Y`, `Z` headers in millimetres and `A` in degrees. Optional `Speed` sets Cartesian speed in mm/s (finite, greater than zero and no greater than `MAX_SPEED` in `GlobalVariables.py` (initially 50 mm/s)). If omitted, the previous speed is kept; startup default is 10 mm/s. Returns 204; missing/non-finite values return 400 and unreachable targets return 422. A new target is used on the next movement request; it does not interrupt a running packet.
-- `GET /UpdateMovement?s1=...&s2=...&s3=...&s4=...`: logical joint degrees. A 200 response contains timestamped commands plus a `Movement-ID` header. A 204 response means already at target.
-- `POST /movement-complete`: supply the returned `Movement-ID` header. Returns 204, including duplicate acknowledgements for the current movement; missing IDs return 400 and mismatched IDs return 409.
-- `GET /movement`: JSON with the most recently issued movement's `id`, `status` (`idle`, `in_progress`, `complete`) and target snapshot. Target orientation is degrees; `target.speed` is the speed used for that packet in mm/s.
+- `POST /target`: supply `X`, `Y`, `Z` in millimetres and `A` in degrees as headers or query parameters (for example `/target?X=200&Y=200&Z=200&A=0`). Headers take precedence when both are supplied. Optional `Speed` (header or query parameter) sets Cartesian speed in mm/s (finite, greater than zero and no greater than `MAX_SPEED` in `GlobalVariables.py` (initially 50 mm/s)). If omitted, the previous speed is kept; startup default is 10 mm/s. Returns 204; missing/non-finite values return 400 and unreachable targets return 422. Targets can be replaced until a movement packet is issued. While the arm is moving, new targets return 409 without changing the target or speed; retry after completion.
+- `GET /UpdateMovement?s1=...&s2=...&s3=...&s4=...`: logical joint degrees. A 200 response contains timestamped commands. Issuing a packet sets `arm_moving` to true. A 204 response means already at target or a packet is still awaiting completion.
+- `POST /movement-complete`: clears `arm_moving` and returns 204. It may safely be repeated.
+- `GET /movement`: JSON boolean (`true` while a packet is being played; otherwise `false`).
 
 Example (PowerShell):
 

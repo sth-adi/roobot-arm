@@ -35,6 +35,8 @@ class BackendClient:
             reason = e.reason if isinstance(e.reason, str) else str(e.reason)
             if e.code == 422:
                 raise BackendError("REFUSED", reason or "The backend refused that move", "The backend checked the move and said no.", "Pick a different point.")
+            if e.code == 409 and method == "POST" and path.startswith("/target"):
+                raise BackendError("BUSY", "The arm is still finishing its last move", "The backend does not take a new target while a move is being played.", "Wait a moment.")
             if e.code == 400:
                 raise BackendError("BAD_REQUEST", reason or "The backend did not accept that", "", "")
             raise BackendError("BACKEND_ERROR", "The backend answered %d %s" % (e.code, reason), "", "Check the backend window for the reason.")
@@ -53,7 +55,11 @@ class BackendClient:
         self._call("POST", "/hold")
 
     def movement(self):
-        return json.loads(self._call("GET", "/movement")[1])
+        """{"status": "in_progress" | "idle"}. Sam's backend answers true/false (arm_moving); the older one answered a dict with a status."""
+        v = json.loads(self._call("GET", "/movement")[1])
+        if isinstance(v, bool):
+            return {"status": "in_progress" if v else "idle"}
+        return v
 
     def position(self):
         """{x, y, z, a, age_s}, or None when the arm has not reported yet."""
@@ -86,7 +92,7 @@ class PoseRunner:
             last = self.client.position()
             for i, p in enumerate(poses):
                 self._check_stopped()
-                self.client.set_target(p["x"], p["y"], p["z"], p["angle"], p.get("speed") or self.speed)
+                self._set_target(p)
                 dist = math.dist((last["x"], last["y"], last["z"]), (p["x"], p["y"], p["z"])) if last else 300.0
                 self._wait_for(p, timeout=max(15.0, 3.0 * dist / max(self.speed, 1.0) + 10.0))
                 last = {"x": p["x"], "y": p["y"], "z": p["z"]}
@@ -101,6 +107,20 @@ class PoseRunner:
             except BackendError:
                 pass
             raise
+
+    def _set_target(self, p, wait_s=8.0):
+        """The backend refuses a new target while the last packet is still being played (409). The previous pose can look reached a moment before the arm
+        confirms, so wait a little for it rather than failing."""
+        end = self.clock() + wait_s
+        while True:
+            self._check_stopped()
+            try:
+                self.client.set_target(p["x"], p["y"], p["z"], p["angle"], p.get("speed") or self.speed)
+                return
+            except BackendError as e:
+                if e.code != "BUSY" or self.clock() >= end:
+                    raise
+                self.sleep(self.poll)
 
     def _check_stopped(self):
         if self._stop:

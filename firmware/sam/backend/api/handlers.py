@@ -1,7 +1,6 @@
 import json
 import math
 import GlobalVariables as state
-import uuid
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from models.robot import Angles, Coordinates
@@ -29,7 +28,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(response)
 
         elif self.path == "/movement":
-            response = json.dumps(state.movement_state).encode("utf-8")
+            response = json.dumps(state.arm_moving).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(response)))
@@ -57,6 +56,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(response)
 
         elif urlparse(self.path).path == "/UpdateMovement":
+            if state.arm_moving:
+                self.send_response(204)
+                self.end_headers()
+                return
+
             # Firmware reports logical joint degrees, before servo inversion.
             query = parse_qs(urlparse(self.path).query)
             try:
@@ -87,16 +91,9 @@ class Handler(BaseHTTPRequestHandler):
             # One timestamped servo command per line.  Keeping this in the
             # response body avoids HTTP header-size limits for long moves.
             response = ("\n".join(angle_packet) + "\n").encode("utf-8")
-            movement_id = uuid.uuid4().hex
-            state.movement_state.update(
-                id=movement_id, status="in_progress",
-                target={"x": state.TargetCords.X, "y": state.TargetCords.Y,
-                        "z": state.TargetCords.Z, "a": math.degrees(state.TargetCords.A),
-                        "speed": state.TargetSpeed},
-            )
+            state.arm_moving = True
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Movement-ID", movement_id)
             self.send_header("Content-Length", str(len(response)))
             self.end_headers()
             self.wfile.write(response)
@@ -105,12 +102,31 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        if self.path == "/target":
+        target_url = urlparse(self.path)
+        if target_url.path == "/target":
+            
+            if state.arm_moving:
+                self.send_error(409, "Arm is moving; retry after movement completes")
+                return
+
+            query = parse_qs(target_url.query, keep_blank_values=True)
+
+            def target_value(name, default=None):
+                # Headers take precedence for existing clients.
+                if name in self.headers:
+                    return self.headers[name]
+                values = query.get(name)
+                if values is None:
+                    return default
+                if len(values) != 1:
+                    raise ValueError("Duplicate target parameter")
+                return values[0]
+
             try:
-                x, y, z, a = (float(self.headers[name]) for name in ("X", "Y", "Z", "A"))
+                x, y, z, a = (float(target_value(name)) for name in ("X", "Y", "Z", "A"))
                 if not all(math.isfinite(value) for value in (x, y, z, a)):
                     raise ValueError("Non-finite coordinate")
-                speed = float(self.headers.get("Speed", state.TargetSpeed))
+                speed = float(target_value("Speed", state.TargetSpeed))
                 if not math.isfinite(speed) or not 0 < speed <= state.MAX_SPEED:
                     raise ValueError("Invalid speed")
                 candidate = Coordinates(x, y, z, math.radians(a))
@@ -126,22 +142,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             state.TargetCords = candidate
             state.TargetSpeed = speed
-            # An in-flight packet keeps its own target snapshot and ID.
             self.send_response(204)
             self.end_headers()
             return
 
         elif self.path == "/movement-complete":
-            movement_id = self.headers.get("Movement-ID")
-            if not movement_id:
-                self.send_error(400, "Movement-ID header is required")
-                return
-            if movement_id != state.movement_state["id"]:
-                self.send_error(409, "Movement-ID does not match the current movement")
-                return
-            # Repeated callbacks are accepted if the first response was lost.
-            state.movement_state["status"] = "complete"
-            print("Movement complete:", movement_id)
+            state.arm_moving = False
+            print("Movement complete")
             self.send_response(204)
             self.end_headers()
             return

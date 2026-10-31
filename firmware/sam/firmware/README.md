@@ -20,3 +20,5 @@ Application headers are grouped under `src/` by responsibility. `main.cpp` remai
 
 `config/Secrets.h` supplies local credentials; use `config/SecretsExample.h` as the template.
 The regrouping preserves function names and implementations.
+
+After startup/calibration, the ESP continuously requests /UpdateMovement using its last commanded joint angles. Idle checks run every 100 ms (plus HTTP request time). Each received packet plays to completion, then the ESP posts `/movement-complete` and checks the latest target again. Targets posted during playback are picked up after that packet finishes. Failed acknowledgements retry once per second. Disconnected Wi-Fi retries every five seconds, and movement HTTP requests use three-second connection/read timeouts.

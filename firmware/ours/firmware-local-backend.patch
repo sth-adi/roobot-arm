@@ -1,6 +1,6 @@
 diff -ruN a/src/calibration/CalibrationFuncs.h b/src/calibration/CalibrationFuncs.h
---- a/src/calibration/CalibrationFuncs.h
-+++ b/src/calibration/CalibrationFuncs.h
+--- a/src/calibration/CalibrationFuncs.h	2026-10-31 01:10:49.056892288 +0000
++++ b/src/calibration/CalibrationFuncs.h	2026-10-31 01:10:49.086268140 +0000
 @@ -30,10 +30,10 @@
          return false;
      }
@@ -30,57 +30,28 @@ diff -ruN a/src/calibration/CalibrationFuncs.h b/src/calibration/CalibrationFunc
          Serial.println("[ERROR][Calibration] Cannot initialise HTTP request");
          return false;
 diff -ruN a/src/main.cpp b/src/main.cpp
---- a/src/main.cpp
-+++ b/src/main.cpp
-@@ -23,10 +23,11 @@
-     if (GetMovementPacket(targetAngles, movementPacket, movementId)) {
-         if (ExecuteMovementPacket(movementPacket, targetAngles)) {
-             pendingCompletion = movementId;
-+            return;     // ours: acknowledge and ask for the next packet at once (the original waited 100 ms here)
-         } else {
-             Serial.println("[ERROR][Movement] Playback aborted; retaining last commanded angles");
+--- a/src/main.cpp	2026-10-31 01:10:49.057048654 +0000
++++ b/src/main.cpp	2026-10-31 01:10:49.087564396 +0000
+@@ -31,8 +31,14 @@
+                 WriteJointAngle(jointIndex, degrees(angles[jointIndex]));
+             }
          }
+-        SendMovementComplete();
++        // ours: his backend takes no new target and sends no new packet until this is acknowledged, so keep trying
++        // (his version sends it once and, if that one request is lost, the arm would be stuck "moving" until the backend restarts).
++        while (!SendMovementComplete()) {
++            TestConnection();
++            delay(200);
++        }
++        return;     // ours: ask for the next packet at once (the original waited 100 ms here)
      }
-     // Avoid immediately re-requesting a packet after a 204 or failed request.
+ 
 -    delay(100);
-+    delay(BACKEND_IDLE_MS);
++    delay(BACKEND_IDLE_MS);   // nothing to do (204) or a failed request
  }
-diff -ruN a/src/motion/RobotMovement.h b/src/motion/RobotMovement.h
---- a/src/motion/RobotMovement.h
-+++ b/src/motion/RobotMovement.h
-@@ -38,6 +38,16 @@
-     return inverted ? 180 - clampedAngle : clampedAngle;
- }
- 
-+// Ours: packets carry fractions of a degree, so write the pulse width directly instead of rounding to whole degrees (the same 500 to 2400 us
-+// over 0 to 180 degrees as attach() in StartupProcess.h). Inversion works as in ServoCommandAngle.
-+int ServoCommandMicroseconds(int jointIndex, float logicalAngle)
-+{
-+    const float clamped = fminf(fmaxf(logicalAngle, 0.0f), 180.0f);
-+    const bool inverted = JointLims[jointIndex][0] > JointLims[jointIndex][1];
-+    const float command = inverted ? 180.0f - clamped : clamped;
-+    return static_cast<int>(lroundf(500.0f + (2400.0f - 500.0f) * command / 180.0f));
-+}
-+
- inline bool ExecuteMovementPacket(const String& packet, RobotAngles& currentAngles)
- {
-     int lineNumber = 0;
-@@ -100,9 +110,9 @@
- 
-         previousTimestamp = timestamp;
-         for (int jointIndex = 0; jointIndex < 4; ++jointIndex) {
--            jointServos[jointIndex].write(ServoCommandAngle(
--                jointIndex, static_cast<int>(lroundf(values[jointIndex + 1]))
--            ));
-+            jointServos[jointIndex].writeMicroseconds(
-+                ServoCommandMicroseconds(jointIndex, values[jointIndex + 1])
-+            );
-         }
-         currentAngles = {
-             radians(values[1]), radians(values[2]), radians(values[3]), radians(values[4])
 diff -ruN a/src/network/BackendConnection.h b/src/network/BackendConnection.h
---- a/src/network/BackendConnection.h
-+++ b/src/network/BackendConnection.h
+--- a/src/network/BackendConnection.h	2026-10-31 01:10:49.057129634 +0000
++++ b/src/network/BackendConnection.h	2026-10-31 01:10:49.086386692 +0000
 @@ -5,3 +5,44 @@
  #include <HTTPClient.h>
  #include <WiFiClientSecure.h>
@@ -127,8 +98,8 @@ diff -ruN a/src/network/BackendConnection.h b/src/network/BackendConnection.h
 +    return http;
 +}
 diff -ruN a/src/network/ControllerClient.h b/src/network/ControllerClient.h
---- a/src/network/ControllerClient.h
-+++ b/src/network/ControllerClient.h
+--- a/src/network/ControllerClient.h	2026-10-31 01:10:49.057149287 +0000
++++ b/src/network/ControllerClient.h	2026-10-31 01:10:49.086419469 +0000
 @@ -5,7 +5,7 @@
  
  bool GetControllerState(StickInput& input)
@@ -152,9 +123,9 @@ diff -ruN a/src/network/ControllerClient.h b/src/network/ControllerClient.h
              Serial.println("Failed to initialise controller request");
              return false;
 diff -ruN a/src/network/MovementClient.h b/src/network/MovementClient.h
---- a/src/network/MovementClient.h
-+++ b/src/network/MovementClient.h
-@@ -19,16 +19,16 @@
+--- a/src/network/MovementClient.h	2026-10-31 01:10:49.057166508 +0000
++++ b/src/network/MovementClient.h	2026-10-31 01:10:49.087508069 +0000
+@@ -20,18 +20,18 @@
          return false;
      }
  
@@ -163,6 +134,8 @@ diff -ruN a/src/network/MovementClient.h b/src/network/MovementClient.h
 -    HTTPClient http;
 +    BackendClient& client = BackendSharedClient();
 +    HTTPClient& http = BackendSharedHttp();
+     http.setConnectTimeout(3000);
+     http.setTimeout(3000);
      // Send logical joint degrees; the backend calculates Cartesian position.
 -    const String movementUrl = "https://" + String(HOST) + "/UpdateMovement?s1="
 +    const String movementUrl = BACKEND_SCHEME + String(HOST) + "/UpdateMovement?s1="
@@ -175,33 +148,34 @@ diff -ruN a/src/network/MovementClient.h b/src/network/MovementClient.h
          return false;
      }
  
-@@ -54,6 +54,9 @@
+@@ -50,6 +50,9 @@
              statusCode < 0 ? HTTPClient::errorToString(statusCode).c_str() : "HTTP response");
      }
      http.end();
 +    if (statusCode < 0) {
-+        client.stop();
++        client.stop();       // ours: the next request opens a fresh connection
 +    }
      return false;
  }
  
-@@ -64,17 +67,20 @@
+@@ -60,18 +63,21 @@
          Serial.println("[ERROR][Movement] WiFi disconnected; completion pending");
          return false;
      }
 -    WiFiClientSecure client;
 -    client.setInsecure();
 -    HTTPClient http;
--    const String url = "https://" + String(HOST) + "/movement-complete";
 +    BackendClient& client = BackendSharedClient();
 +    HTTPClient& http = BackendSharedHttp();
+     http.setConnectTimeout(3000);
+     http.setTimeout(3000);
+-    const String url = "https://" + String(HOST) + "/movement-complete";
 +    const String url = BACKEND_SCHEME + String(HOST) + "/movement-complete";
      if (!http.begin(client, url)) {
          Serial.println("[ERROR][Movement] Cannot initialise completion request");
 +        client.stop();
          return false;
      }
-     http.addHeader("Movement-ID", movementId);
      const int statusCode = http.POST("");
      http.end();
 +    if (statusCode < 0) {
@@ -211,8 +185,8 @@ diff -ruN a/src/network/MovementClient.h b/src/network/MovementClient.h
          Serial.printf("[ERROR][Movement] Completion POST failed: %d; will retry\n", statusCode);
          return false;
 diff -ruN a/src/network/StatusClient.h b/src/network/StatusClient.h
---- a/src/network/StatusClient.h
-+++ b/src/network/StatusClient.h
+--- a/src/network/StatusClient.h	2026-10-31 01:10:49.057183638 +0000
++++ b/src/network/StatusClient.h	2026-10-31 01:10:49.086444638 +0000
 @@ -15,11 +15,11 @@
      }
      lastStatusTime = millis();
@@ -229,8 +203,8 @@ diff -ruN a/src/network/StatusClient.h b/src/network/StatusClient.h
          Serial.println("Failed to initialise status request");
          return;
 diff -ruN a/src/network/WifiConnection.h b/src/network/WifiConnection.h
---- a/src/network/WifiConnection.h
-+++ b/src/network/WifiConnection.h
+--- a/src/network/WifiConnection.h	2026-10-31 01:10:49.057217597 +0000
++++ b/src/network/WifiConnection.h	2026-10-31 01:10:49.086469350 +0000
 @@ -65,6 +65,10 @@
      if (pathStart >= 0) {
          pingHost.remove(pathStart);

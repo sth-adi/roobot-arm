@@ -30,9 +30,20 @@ class OursBackendTest(BackendTestCase):
         self.assertGreater(self.state.TargetCords.X, 59)                   # the target itself is unchanged
         # asked again from where that packet ended, it carries on toward the target
         end = rows[-1]
+        self.req("POST", "/movement-complete")                             # the arm has played it
         code2, _, _, body2 = self.req("GET", "/UpdateMovement?s1=%.3f&s2=%.3f&s3=%.3f&s4=%.3f" % tuple(end[1:]))
         self.assertEqual(code2, 200)
         self.assertGreater(parse(body2)[-1][1], end[1])
+
+    def test_targets_that_arrive_while_a_packet_plays_still_count_as_a_stream(self):
+        self.assertEqual(self.target(60, 250, 250, 0, speed=35)[0], 204)
+        self.assertEqual(self.report((0, 250, 250, 0))[0], 200)           # one long packet is playing
+        for i in range(3):
+            self.assertEqual(self.target(61 + i, 250, 250, 0, speed=35)[0], 409)     # his rule: no new target while it plays
+        self.req("POST", "/movement-complete")
+        code, _, _, body = self.report((0, 250, 250, 0))
+        self.assertEqual(code, 200)
+        self.assertLessEqual(parse(body)[-1][0], 520)                      # but the next packet is already a short one
 
     def test_a_single_target_is_still_one_long_eased_packet(self):
         self.assertEqual(self.target(60, 250, 250, 0, speed=35)[0], 204)

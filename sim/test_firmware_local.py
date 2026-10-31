@@ -63,11 +63,14 @@ class LocalFirmwareTest(unittest.TestCase):
         self.assertEqual(moves.count("client.stop()"), 4)                  # a failed request drops it so the next one reconnects
 
     def test_servos_are_written_in_fractions_of_a_degree(self):
-        mv = read(os.path.join(self.src, "motion", "RobotMovement.h"))
+        mv = read(os.path.join(self.src, "motion", "RobotMovement.h"))                # his 29 Oct evening firmware does this itself: nothing of ours is needed
         self.assertIn("writeMicroseconds(", mv)
-        self.assertIn("500.0f + (2400.0f - 500.0f)", mv)                   # the same range as attach(pin, 500, 2400) in StartupProcess.h
-        packet_part = mv[mv.index("inline bool ExecuteMovementPacket("):]
-        self.assertNotIn("lroundf(values[", packet_part)                   # no rounding to whole degrees any more
+        self.assertIn("ServoMinPulseUs + commandAngle * (ServoMaxPulseUs - ServoMinPulseUs) / 180.0f", mv)
+        self.assertEqual(mv, read(os.path.join(ROOT, "firmware", "sam", "firmware", "src", "motion", "RobotMovement.h")))
+
+    def test_the_completion_is_retried_until_the_backend_has_it(self):
+        main = read(os.path.join(self.src, "main.cpp"))
+        self.assertIn("while (!SendMovementComplete())", main)      # otherwise one lost POST leaves his backend "moving" for good
 
     def test_latency_check_drops_the_port(self):
         self.assertIn("pingHost.indexOf(':')", read(os.path.join(self.src, "network", "WifiConnection.h")))

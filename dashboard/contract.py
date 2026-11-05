@@ -107,3 +107,16 @@ def job_status(job, status, step=None, of=None, message="", error=None):
     if error is not None and not (isinstance(error, dict) and {"code", "title"} <= set(error)):
         raise ValueError("error needs code and title")
     return {"v": VERSION, "job": job, "status": status, "step": step, "of": of, "message": message, "error": error}
+
+
+def step_message(job, step, of, pose):
+    """The message to the low-level side (Sam's Python code) for ONE step of a job. PLACEHOLDER: Sam has not defined the JSON yet.
+    pose: {"x", "y", "z", "angle" (degrees), optional "speed" (mm/s), optional "action": "grab" | "release"}. Units are mm and degrees."""
+    for k in ("x", "y", "z", "angle"):
+        _num(pose.get(k), k)
+    magnet = {"grab": "on", "release": "off", None: None}.get(pose.get("action"), "bad")
+    if magnet == "bad":
+        raise ContractError("action must be grab or release")
+    return {"v": VERSION, "job": job, "type": "move", "step": step, "of": of,
+            "target": {"x": float(pose["x"]), "y": float(pose["y"]), "z": float(pose["z"]), "pitch": float(pose["angle"]), "speed": pose.get("speed")},
+            "magnet": magnet}

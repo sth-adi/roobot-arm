@@ -100,7 +100,8 @@ def main():
     ap.add_argument("--no-open", action="store_true")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--server-port", type=int, default=8000)
-    ap.add_argument("--no-backend", action="store_true", help="do not start Sam's backend: the virtual arm only")
+    ap.add_argument("--backend", action="store_true", help="start Sam's backend and drive the real arm through it, instead of mirror mode (the default)")
+    ap.add_argument("--no-backend", action="store_true", help=argparse.SUPPRESS)       # the old default's opt-out: now the default, kept so old shortcuts still work
     ap.add_argument("--backend-port", type=int, default=8001)
     ap.add_argument("--backend-lan", action="store_true", help="let the ESP32 reach the backend over the network (it has no password)")
     ap.add_argument("--backend-speed", type=float, default=35.0, help="tool speed for the real arm, mm/s (up to 50)")
@@ -133,7 +134,7 @@ def main():
                 if up(server_url + "/health"):
                     break
                 time.sleep(0.2)
-        backend_url = None if a.no_backend else start_backend(py, a.backend_port, a.backend_lan, kids)
+        backend_url = None if (a.no_backend or not a.backend) else start_backend(py, a.backend_port, a.backend_lan, kids)
         old = hub_build(hub_url)
         if old is not None and old != code_stamp():
             print("an older hub is running (build %s, files are %s): replacing it" % (old, code_stamp()))
@@ -154,6 +155,8 @@ def main():
             cmd = [py, os.path.join(ROOT, "dashboard", "hub.py"), "--no-open", "--port", str(a.port), "--server", server_url]
             if not a.local_only:
                 cmd.append("--lan")
+            if not backend_url:
+                cmd.append("--mirror")           # the default route to the real arm: the board follows the virtual arm (board IK)
             if backend_url:
                 cmd += ["--backend", backend_url, "--backend-speed", str(a.backend_speed)]
                 if a.backend_ignore_magnet:

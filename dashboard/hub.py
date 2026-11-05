@@ -2274,12 +2274,18 @@ def main():
                     help="also send the damper to the arm as maxSpeed (needs the modified firmware in firmware/rarm)")
     ap.add_argument("--backend", default=os.environ.get("BACKEND_URL", ""),
                     help="Sam's backend (our build, see firmware/ours), e.g. http://127.0.0.1:8000: when the output is ARMED the real arm follows the virtual one through it")
+    ap.add_argument("--mirror", action="store_true", help="start with mirror mode on (the board follows the virtual arm; not together with --backend)")
     ap.add_argument("--backend-speed", type=float, default=35.0, help="tool speed for the real arm, mm/s (the backend allows up to 50; change it live on the Control page)")
     ap.add_argument("--backend-ignore-magnet", action="store_true",
                     help="move the real arm through sequences that use the magnet, without switching it (its firmware has no switch): the virtual magnet still handles the keys")
     args = ap.parse_args()
     global LAN_TOKEN
+    if args.mirror and args.backend:
+        ap.error("--mirror and --backend both drive the real arm: pick one")
     HUB = Hub(args.server, send_speed=args.send_speed, backend_url=args.backend or None, backend_speed=args.backend_speed, backend_ignore_magnet=args.backend_ignore_magnet)
+    if args.mirror:
+        HUB.mirror["on"] = True          # the board follows the virtual arm (with board IK when its sketch supports it) whenever the output is ARMED
+        HUB.log("hub", "mirror mode ON at start (--mirror): the real arm follows the virtual arm whenever the output is ARMED")
     bind = "127.0.0.1"
     if args.lan:
         tf = ROOT / ".hub_token"

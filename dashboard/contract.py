@@ -8,7 +8,7 @@ Inbound (page -> us), the placeholder:
     {"v": 1, "id": "...", "action": "fetch", "key": 2}                         a button press: no AI is involved
     {"command": "request_key"}                                                  what the page sends today (see LEGACY)
 Outbound (us -> page), the placeholder:
-    {"v": 1, "job": "7f3a", "status": "queued|running|done|failed|stopped", "step": 3, "of": 8, "message": "...", "error": null}
+    {"v": 1, "job": "7f3a", "status": "queued|running|done|failed|stopped", "step": 3, "of": 8, "message": "...", "error": null, "led": "moving"}
 
 The AI's answer, and the only things it can ask for (validate_action refuses everything else):
     fetch_key(key 1-3), return_key(key 1-3), go_home, stop, magnet(on), status, move_by(dx, dy, dz; small, never for keys), ask(question)
@@ -22,6 +22,10 @@ KEYS = (1, 2, 3)
 MOVE_MAX_MM = 100.0                        # same limit as dashboard/preflight.py: per command, total distance
 MAX_TEXT = 500
 MENU = ("fetch_key", "return_key", "go_home", "stop", "magnet", "status", "move_by", "ask")
+# The SECOND menu: what the AI may pick when a step fails (see jobs.py). Code does the maths for each one; the AI never writes a coordinate.
+RECOVERY_MENU = ("retry_step", "lift_to_safe_height", "go_home", "release_magnet", "ask_person", "stop")
+# PLACEHOLDER hint for the LEDs (Sam's side): which state to show. Nobody has said whether the LEDs follow our status or the arm's own state.
+LED = {"queued": "waiting", "running": "moving", "done": "done", "failed": "error", "stopped": "stopped"}
 
 # The page as it is today sends these (names from index.html and server.py disagree: it sends request_key, the server accepts collect_keys).
 # Both spellings mean "fetch" / "return" without saying which key, so the answer is a question, not a guess.
@@ -75,6 +79,21 @@ def validate_action(a):
     return out
 
 
+def validate_recovery(a):
+    """A clean copy of the AI's recovery choice, or ContractError. Only the action and a short reason (and a question for ask_person) survive."""
+    if not isinstance(a, dict):
+        raise ContractError("the answer is not an object")
+    if a.get("action") not in RECOVERY_MENU:
+        raise ContractError("unknown recovery action %r" % (a.get("action"),))
+    out = {"action": a["action"]}
+    if a["action"] == "ask_person":
+        q = a.get("question")
+        out["question"] = q.strip()[:200] if isinstance(q, str) and q.strip() else "Something went wrong. What should the arm do?"
+    if isinstance(a.get("reason"), str):
+        out["reason"] = a["reason"][:200]
+    return out
+
+
 def parse_request(d):
     """What the page sent -> {"id", "text", "action"}: action is None when the AI must choose (free text), else an already-validated action dict.
     Raises ContractError for anything that is not understood."""
@@ -106,7 +125,8 @@ def job_status(job, status, step=None, of=None, message="", error=None):
         raise ValueError("status must be one of %s" % (STATUSES,))
     if error is not None and not (isinstance(error, dict) and {"code", "title"} <= set(error)):
         raise ValueError("error needs code and title")
-    return {"v": VERSION, "job": job, "status": status, "step": step, "of": of, "message": message, "error": error}
+    led = "attention" if error and error.get("code") == "NEEDS_PERSON" else LED[status]
+    return {"v": VERSION, "job": job, "status": status, "step": step, "of": of, "message": message, "error": error, "led": led}
 
 
 def step_message(job, step, of, pose):

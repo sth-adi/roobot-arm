@@ -52,7 +52,7 @@ class Actions(unittest.TestCase):
         packets = FP.lifecycle()
         self.assertEqual([p["status"] for p in packets], ["queued", "running", "running", "running", "done"])
         for p in packets:
-            self.assertEqual(set(p), {"v", "job", "status", "step", "of", "message", "error"})
+            self.assertEqual(set(p), {"v", "job", "status", "step", "of", "message", "error", "led"})
         with self.assertRaises(ValueError):
             C.job_status("x", "exploded")
         with self.assertRaises(ValueError):

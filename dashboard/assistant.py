@@ -56,16 +56,10 @@ def keyword_decide(request, last_move=None):
     return {"action": "ask", "question": "I can fetch or return a key (1, 2 or 3), go home, or stop. Which would you like?", "reason": "off topic", "by": "keywords"}
 
 
-def _groq(request, state, key, model, timeout=15):
-    system = ("You decide what a key-fetching robot arm should do. " + AG.SCOPE + " You only choose; you never write coordinates, angles or paths. "
-              'Answer ONLY with JSON: {"action": <"fetch_key" | "return_key" | "go_home" | "stop" | "magnet" | "status" | "move_by" | "ask">, '
-              '"key": <1, 2 or 3 for fetch_key/return_key>, "on": <true/false for magnet>, "dx": <mm>, "dy": <mm>, "dz": <mm>, "question": <for ask>, "reason": <short>}. '
-              "fetch_key moves a key from its box to the tray; return_key moves it from the tray back to its box. If the person did not say which key, or the request is unclear, "
-              "use ask with one short question. move_by is a small nudge (at most 100 mm total) and is NEVER used to fetch or return a key. status is a question, no motion. "
-              "Arm state: " + json.dumps({k: state.get(k) for k in ("busy", "at_home", "holding", "keys")}))
+def _call(system, user, key, model, timeout=15):
     extra = {"reasoning_effort": "low", "max_completion_tokens": 600} if "gpt-oss" in model else {"max_tokens": 200}
     body = json.dumps({**extra, "model": model, "temperature": 0, "response_format": {"type": "json_object"},
-                       "messages": [{"role": "system", "content": system}, {"role": "user", "content": request[:C.MAX_TEXT]}]}).encode()
+                       "messages": [{"role": "system", "content": system}, {"role": "user", "content": user[:C.MAX_TEXT]}]}).encode()
     req = urllib.request.Request(AG.GROQ_URL, body, {"Content-Type": "application/json", "Authorization": "Bearer " + key,
                                                    "User-Agent": "roobot-arm/1.0", "Accept": "application/json"})
     t0 = time.time()
@@ -73,6 +67,72 @@ def _groq(request, state, key, model, timeout=15):
         out = json.loads(r.read())
     raw = out["choices"][0]["message"]["content"]
     return json.loads(raw), {"model": model, "ms": int((time.time() - t0) * 1000), "raw": raw[:500]}
+
+
+def _choose(system, user, validate, timeout=15):
+    """Ask Groq (model fallbacks as agent.py has them) and validate the answer. Returns (clean answer + meta, "") or (None, why it was not used)."""
+    key = AG.api_key()
+    if not key:
+        return None, "no GROQ_API_KEY found (environment or .env in the repository folder)"
+    err = ""
+    try:
+        import urllib.error
+        order = list(dict.fromkeys([m for m in [AG._good_model[0], AG.GROQ_MODEL] + AG.FALLBACK_MODELS if m]))
+        for m in order:
+            try:
+                ans, meta = _call(system, user, key, m, timeout)
+            except urllib.error.HTTPError as e:
+                err = AG._why(e)
+                if e.code in (400, 403, 404):
+                    continue
+                break
+            AG._good_model[0] = m
+            try:
+                return dict(validate(ans), by="groq", **meta), ""
+            except C.ContractError as e:
+                return None, "Groq's answer was refused: %s" % e
+    except Exception as e:
+        err = AG._why(e)
+    return None, err
+
+
+RECOVERY_RULES = ("You help a key-fetching robot arm recover from a failed step. You only CHOOSE one recovery action; you never write coordinates, angles or paths. "
+                  'Answer ONLY with JSON: {"action": <"retry_step" | "lift_to_safe_height" | "go_home" | "release_magnet" | "ask_person" | "stop">, "question": <for ask_person>, "reason": <short>}. '
+                  "retry_step runs the failed step again (the report says how many retries are left). lift_to_safe_height moves straight up, clear of every box. "
+                  "go_home lifts, crosses and returns to the home position. release_magnet is only for when the key is held over the tray or its own box. "
+                  "ask_person gives the person a question; stop leaves the arm where it is. Prefer retry_step for a timeout or a brief stall when retries are left; "
+                  "prefer lift_to_safe_height when the arm is holding a key; never guess when a real fault is reported: ask_person.")
+
+
+def recover(report):
+    """report: the failure report jobs.py builds (error, step, of, label, holding, retries_left, pose_known, over). Returns a valid recovery action
+    ({"action", ["question"], "by": "groq" | "rules", ["ai_error"]}). jobs.py has the final say: it checks that the action is allowed right now."""
+    system = RECOVERY_RULES + " Failure report: " + json.dumps(report)
+    a, err = _choose(system, "What should the arm do now?", C.validate_recovery, timeout=8)
+    if a:
+        return a
+    return dict(rule_recovery(report), by="rules", ai_error=err)
+
+
+def rule_recovery(report):
+    """The fixed rule table used when the AI is not available: retry while retries are left, otherwise get clear and stop."""
+    if report.get("retries_left", 0) > 0:
+        return {"action": "retry_step", "reason": "retries left"}
+    if report.get("holding") and report.get("pose_known"):
+        return {"action": "lift_to_safe_height", "reason": "holding a key: get clear first"}
+    if report.get("pose_known"):
+        return {"action": "go_home", "reason": "no retries left"}
+    return {"action": "ask_person", "question": "The arm stopped (%s). What should it do?" % report.get("error", {}).get("title", "a fault"), "reason": "position unknown"}
+
+
+def _groq(request, state, key, model, timeout=15):
+    system = ("You decide what a key-fetching robot arm should do. " + AG.SCOPE + " You only choose; you never write coordinates, angles or paths. "
+              'Answer ONLY with JSON: {"action": <"fetch_key" | "return_key" | "go_home" | "stop" | "magnet" | "status" | "move_by" | "ask">, '
+              '"key": <1, 2 or 3 for fetch_key/return_key>, "on": <true/false for magnet>, "dx": <mm>, "dy": <mm>, "dz": <mm>, "question": <for ask>, "reason": <short>}. '
+              "fetch_key moves a key from its box to the tray; return_key moves it from the tray back to its box. If the person did not say which key, or the request is unclear, "
+              "use ask with one short question. move_by is a small nudge (at most 100 mm total) and is NEVER used to fetch or return a key. status is a question, no motion. "
+              "Arm state: " + json.dumps({k: state.get(k) for k in ("busy", "at_home", "holding", "keys")}))
+    return _call(system, request, key, model, timeout)
 
 
 def decide(request, state=None):

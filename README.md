@@ -260,3 +260,13 @@ Not done yet: our **firmware** patch set on his new structure (the magnet, a way
 
 ### Running sequences on the (emulated) ESP32 itself
 Start the emulator on the Control page with **Our firmware (stock + patches, magnet and sequences)**, or flash `firmware/stock/src` with both patches applied. While that firmware is reporting its state (`GET /armstate` on the input server), the hub treats the ESP32 as the truth: **Run**, **Run reversed** and **Ask the arm** send the sequence to it (`POST /sequence`), the firmware runs it once, waiting for arrival at each pose and switching the magnet relay, and the dashboard's magnet and keys follow what it reports. Without it, the same buttons drive the virtual arm. See `firmware/stock/README.md` for the protocol and what is not covered (the real board). The launcher now also replaces an out-of-date input server, not just an out-of-date hub.
+
+## The coordinate design: contract and AI menu (placeholders, in progress)
+
+The plan is that only the key boxes' coordinates are stored and the movement for fetching and returning is calculated from them, with no saved sequences. What exists so far is the interface in front of that:
+
+* `dashboard/contract.py`: one place for the shapes between the user's page (`index.html`, not ours) and us. The real format has not been given to us, so these are **placeholders**: a request is free `text` or a button `action` with a `key`, a job answers `{"job", "status": queued|running|done|failed|stopped, "step", "of", "message", "error"}`. The page as it is today sends `request_key` / `return_key`, which `server.py` rejects (it accepts `collect_keys` / `return_keys`); the adapter maps both spellings and answers with a question about which key, never a guess. If the real format differs, change `parse_request()` and `job_status()` only.
+* `dashboard/assistant.py`: the AI step. It may only choose `fetch_key(1-3)`, `return_key(1-3)`, `go_home`, `stop`, `magnet(on)`, `status`, `move_by` (small nudges, never for keys) or `ask(question)`; the answer is checked by `contract.validate_action` and anything outside the menu is refused, then the keyword matcher decides and the reason is reported. It never sees a coordinate. Stop is decided by words before any network call. Groq key handling is as before.
+* `sim/fake_page.py` + `sim/test_contract.py`: a stand-in for the page and tests (no arm needed).
+
+Not built yet: the box store and teach-by-jogging, the route generator and collision check, the job runner in the hub, removing the old sequence code.

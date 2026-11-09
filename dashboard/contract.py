@@ -100,6 +100,12 @@ def parse_request(d):
     if not isinstance(d, dict):
         raise ContractError("the request must be a JSON object")
     rid = str(d.get("id") or "")[:64]
+    for word in ("confirm", "cancel"):                                                          # answering a "Fetch key 2?" question
+        if word in d and "action" not in d and "text" not in d:
+            tok = d[word]
+            if not isinstance(tok, str) or not 1 <= len(tok) <= 32:
+                raise ContractError("%s needs the code from the question" % word)
+            return {"id": rid, "text": "", "action": None, word: tok}
     if isinstance(d.get("command"), str) and "action" not in d and "text" not in d:        # LEGACY
         act = LEGACY.get(d["command"])
         if act is None:
@@ -117,6 +123,20 @@ def parse_request(d):
     if len(text) > MAX_TEXT:
         raise ContractError("the request is longer than %d characters" % MAX_TEXT)
     return {"id": rid, "text": text.strip(), "action": None}
+
+
+REPLY_KINDS = ("started", "confirm", "answer", "question", "stopped", "error")
+
+
+def reply(rid, kind, message, action=None, job=None, by=None, token=None, error=None, heard=""):
+    """The immediate answer to ONE request (job progress comes separately as job_status packets). PLACEHOLDER shape, like the rest.
+    started  a job began (job = its id)           confirm   say yes/no to this action first (token = the code to send back)
+    answer   information, nothing moved           question  the AI needs one more detail from the person
+    stopped  the arm was told to hold             error     refused: error = {"code","title","detail","hint"}
+    heard: the words as understood; action: what was decided; by: "button" | "keywords" | "groq" | "rules"."""
+    if kind not in REPLY_KINDS:
+        raise ValueError("kind must be one of %s" % (REPLY_KINDS,))
+    return {"v": VERSION, "id": rid, "kind": kind, "message": message, "action": action, "job": job, "by": by, "token": token, "error": error, "heard": heard}
 
 
 def job_status(job, status, step=None, of=None, message="", error=None):

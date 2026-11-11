@@ -151,6 +151,17 @@ class Handler(BaseHTTPRequestHandler):
                 if _fwd["url"]:
                     out["forward"] = dict(_fwd)
                 self._send(200, out)
+        elif self.path == "/Noah.png":
+            from pathlib import Path
+
+            image = Path(__file__).with_name("Noah.png")
+            content = image.read_bytes()
+
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
         else:
             self._send(404, {"error": "not found"})
 

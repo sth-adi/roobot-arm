@@ -63,9 +63,10 @@
 
         .collect { background: #2563eb; }
         .return { background: #15803d; }
+        .TypedCommandButton { background:#64748b}
         .home { background: #475569; }
         .stop { background: #dc2626; }
-        .refresh { background: #64748b; }
+        .refresh { background:#1e293b; }
 
         #message {
             overflow-wrap: anywhere;
@@ -84,6 +85,14 @@
             border-radius: 10px;
             border: 1px solid #cbd5e1;
             font-size: 16px;
+        }
+        
+
+        #commandInput {
+            width: 90%;
+            height: 100px;
+            margin: 0 auto;
+            display: block;
         }
     </style>
 </head>
@@ -112,6 +121,20 @@
 
         <button class="refresh" onclick="refreshAll()">
             Refresh Status
+        </button>
+    </section>
+
+    <section class="panel" id="TypedCommand">
+        <h2>Typed Command</h2>
+
+        <label for="KeySelect">Enter your command for our ai assistant:</label>
+
+        <input type="text" id="commandInput">
+
+        <button
+            class="TypedCommandButton"
+            onclick="sendTypedCommand()">
+            Send Command
         </button>
     </section>
 

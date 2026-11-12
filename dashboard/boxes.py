@@ -6,6 +6,8 @@ Saved in one JSON file (default .boxes.json in the repository folder, git-ignore
     tray    the same shape                                                                    where keys are put
     home    [x, y, z, pitch_deg]
     constants   safe_clearance_mm, hover_mm, lift_mm, approach_pitch_deg, speed_mm_s        PLACEHOLDER values: tune them on the real arm
+    keys    "1".."3": "box" | "tray" | "unknown"            where each key currently is; survives a restart (a fresh file assumes all keys are in
+                                                              their boxes, since that is the state a workcell is set up in)
 Positions are the arm's own frame (the one dashboard/planner.py uses: x right, y away from the base, z up, mm). To fill them in, jog the tip to the
 spot and call teach(); the numbers come from the arm itself, so calibration error is already in them.
 A position is refused at save time if the planner cannot reach it from home (the same checks that guard every move).
@@ -28,6 +30,7 @@ DEFAULT_CONSTANTS = {"safe_clearance_mm": 40.0, "hover_mm": 30.0, "lift_mm": 50.
 CONSTANT_RANGE = {"safe_clearance_mm": (10, 200), "hover_mm": (5, 150), "lift_mm": (10, 200), "approach_pitch_deg": (-90, 90), "speed_mm_s": (1, 50)}
 SIZE_RANGE = (5.0, 300.0)                              # mm: a box smaller or larger than this is a typing mistake
 WORKSPACE = {"x": (-400.0, 400.0), "y": (-400.0, 400.0), "z": (0.0, 400.0)}
+WHERE = ("box", "tray", "unknown")
 
 
 class StoreError(ValueError):
@@ -59,7 +62,8 @@ def _size(size):
 class Store:
     def __init__(self, path=None):
         self.path = path or DEFAULT_PATH
-        self.data = {"version": 1, "boxes": {k: None for k in KEYS}, "tray": None, "home": list(DEFAULT_HOME), "constants": dict(DEFAULT_CONSTANTS)}
+        self.data = {"version": 1, "boxes": {k: None for k in KEYS}, "tray": None, "home": list(DEFAULT_HOME), "constants": dict(DEFAULT_CONSTANTS),
+                     "keys": {k: "box" for k in KEYS}}
         self.load()
 
     # ---- file ----
@@ -82,6 +86,10 @@ class Store:
         for k, v in (d.get("constants") or {}).items():
             if k in DEFAULT_CONSTANTS:
                 self.data["constants"][k] = _num(v, k, *CONSTANT_RANGE[k])
+        keys = d.get("keys") if isinstance(d.get("keys"), dict) else {}
+        for k in KEYS:                                 # an older file, or one missing a key, defaults that key to "box"
+            if keys.get(k) in WHERE:
+                self.data["keys"][k] = keys[k]
 
     def save(self):
         folder = os.path.dirname(self.path) or "."
@@ -149,6 +157,18 @@ class Store:
         if name not in DEFAULT_CONSTANTS:
             raise StoreError("BAD_CONSTANT", "Unknown setting %r" % (name,), "one of %s" % sorted(DEFAULT_CONSTANTS))
         self.data["constants"][name] = _num(value, name, *CONSTANT_RANGE[name])
+        self.save()
+
+    # ---- where each key is (box / tray / unknown): survives a restart ----
+    def get_keys(self):
+        return dict(self.data["keys"])
+
+    def set_key(self, key, where):
+        if str(key) not in KEYS:
+            raise StoreError("BAD_KEY", "There is no key %r (1, 2 or 3)" % (key,))
+        if where not in WHERE:
+            raise StoreError("BAD_WHERE", "where must be one of %s" % (WHERE,))
+        self.data["keys"][str(key)] = where
         self.save()
 
     # ---- reading ----

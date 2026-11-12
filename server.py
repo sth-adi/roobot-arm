@@ -38,8 +38,9 @@ The page and the AI front door (Terra's index.html asks for these; the shapes ar
   GET  /ai/job       the latest job status {"status": queued|running|done|failed|stopped, "step", "of", "message", "error", "led"}
   GET  /ai/state     where the keys are, whether the arm is busy       POST /ai/stop   stop (never delayed)
   POST /ai/teach     setting up (never moves the arm): {"action":"where"} | {"action":"save","which":1|2|3|"tray","size":{"w","d","h"}} saves where the
-                     tip is now (or x,y,z) | {"action":"home"} | {"action":"constant","name","value"} | {"action":"preview","kind":"fetch"|"return","key":n}
-                     shows the route and its time without moving | {"action":"list"}      GET /ai/boxes   what is saved and what is still missing
+                     tip is now (or x,y,z) | {"action":"home"} | {"action":"constant","name","value"} | {"action":"key","which":1|2|3,"where":"box"|"tray"|"unknown"}
+                     corrects where a key is believed to be | {"action":"preview","kind":"fetch"|"return","key":n} shows the route and its time without
+                     moving | {"action":"list"}      GET /ai/boxes   what is saved, where each key is, and what is still missing
   --ai virtual (default) moves a pretend arm only; --ai backend drives the real arm through Sam's backend (--backend-url); --ai off disables the routes.
 
 Run:  python server.py [--host 0.0.0.0] [--port 8000] [--forward-url http://host:port/path] [--ai virtual|backend|off] [--backend-url http://127.0.0.1:8001]

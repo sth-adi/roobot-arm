@@ -24,6 +24,29 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(c.exception.code, "NOT_TAUGHT")
         self.assertTrue(c.exception.hint)
 
+    def test_a_fresh_store_assumes_every_key_is_in_its_box(self):
+        self.assertEqual(self.s.get_keys(), {"1": "box", "2": "box", "3": "box"})
+
+    def test_where_a_key_is_survives_a_restart(self):
+        self.s.set_key(2, "tray")
+        self.s.set_key("3", "unknown")
+        t = B.Store(self.path)
+        self.assertEqual(t.get_keys(), {"1": "box", "2": "tray", "3": "unknown"})
+
+    def test_an_older_file_with_no_keys_section_defaults_to_box(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "boxes": {k: None for k in B.KEYS}, "tray": None, "home": list(B.DEFAULT_HOME), "constants": {}}, f)
+        t = B.Store(self.path)
+        self.assertEqual(t.get_keys(), {"1": "box", "2": "box", "3": "box"})
+
+    def test_bad_key_or_place_is_refused(self):
+        with self.assertRaises(B.StoreError) as c:
+            self.s.set_key(9, "tray")
+        self.assertEqual(c.exception.code, "BAD_KEY")
+        with self.assertRaises(B.StoreError) as c:
+            self.s.set_key(1, "shelf")
+        self.assertEqual(c.exception.code, "BAD_WHERE")
+
     def test_saved_values_survive_a_restart(self):
         self.s.set_box(2, 60, 250, 120, {"w": 40, "d": 40, "h": 50})
         self.s.set_tray(-80, 250, 100)

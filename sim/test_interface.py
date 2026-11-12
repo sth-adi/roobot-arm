@@ -74,6 +74,38 @@ class Buttons(unittest.TestCase):
         self.assertEqual(f.state()["keys"]["1"], "unknown")
         self.assertIn("somewhere unknown", f.describe())
 
+    def test_where_each_key_is_survives_a_restart(self):
+        import boxes as B
+        f, arm = door()
+        f.request({"action": "fetch", "key": 2})
+        finish(f)
+        self.assertEqual(f.state()["keys"], {"1": "box", "2": "tray", "3": "box"})
+        reopened = B.Store(f.store.path)                               # a fresh Store on the same file, as a restarted server would make
+        self.assertEqual(reopened.get_keys(), {"1": "box", "2": "tray", "3": "box"})
+        g = I.Frontdoor(reopened, arm, lambda: dict(arm.pose))          # a brand-new front door, as a restarted server would make
+        r = g.request({"action": "fetch", "key": 2})                   # it still knows key 2 is already on the tray
+        self.assertIn("already on the tray", r["message"])
+
+    def test_a_key_location_can_be_corrected_by_hand(self):
+        f, arm = door()
+        r = f.teach({"action": "key", "which": 2, "where": "tray"})
+        self.assertEqual((r["ok"], r["keys"]["2"]), (True, "tray"))
+        self.assertEqual(f.state()["keys"]["2"], "tray")
+        r = f.request({"action": "fetch", "key": 2})                   # the correction is respected: no movement
+        self.assertEqual(r["kind"], "answer")
+        self.assertEqual(f.teach({"action": "key", "which": 2, "where": "sometimes"})["ok"], False)
+        self.assertEqual(f.teach({"action": "key", "which": 9, "where": "tray"})["ok"], False)
+
+    def test_correcting_a_key_is_refused_while_a_job_runs(self):
+        import threading
+        gate = threading.Event()
+        f, arm = door(arm=TJ.Arm(block=gate))
+        f.request({"action": "fetch", "key": 1})
+        r = f.teach({"action": "key", "which": 2, "where": "tray"})
+        self.assertEqual(r["error"]["code"], "BUSY")
+        gate.set()
+        finish(f)
+
 
 class FreeText(unittest.TestCase):
     def decide_fetch2(self, text, state):
@@ -268,6 +300,9 @@ class Teaching(unittest.TestCase):
         code, r = I.handle_http(self.f, "POST", "/teach", json.dumps({"action": "save", "which": 1}).encode())
         self.assertEqual((code, r["ok"]), (200, True))
         self.assertEqual(I.handle_http(self.f, "GET", "/boxes")[1]["missing"], ["box 2", "box 3", "tray"])
+        self.assertEqual(I.handle_http(self.f, "GET", "/boxes")[1]["keys"], {"1": "box", "2": "box", "3": "box"})
+        code, r = I.handle_http(self.f, "POST", "/teach", json.dumps({"action": "key", "which": 1, "where": "tray"}).encode())
+        self.assertEqual((code, r["keys"]["1"]), (200, "tray"))
         self.assertEqual(I.handle_http(self.f, "POST", "/teach", b"{")[0], 400)
         self.assertEqual(I.handle_http(self.f, "POST", "/teach", b'{"action": "save", "which": 9}')[0], 400)
 

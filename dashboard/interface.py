@@ -7,7 +7,8 @@ What it adds around the AI's choice (the AI only ever picks an action from contr
   * Buttons (an explicit action) skip the AI. Free text and speech go through it, and a movement it chose is CONFIRMED first ("Fetch key 2?"): a mis-heard
     word must not move the arm. confirm_text=False turns that off. A confirmation lasts 30 s; "yes" / "no" spoken or typed answers it without the AI.
   * Stop is never delayed, never confirmed and never needs the AI.
-  * It keeps where each key is (box / tray / unknown) so "fetch key 2" when key 2 is already on the tray is an answer, not a movement.
+  * It keeps where each key is (box / tray / unknown) so "fetch key 2" when key 2 is already on the tray is an answer, not a movement. This is
+    saved in the box store (boxes.Store.get_keys/set_key), the same file as the coordinates, so it survives a restart of the server.
   * Nothing moves if the box or tray was not taught, or the arm is busy: the person gets the reason, in words.
 The HTTP shapes are in handle_http(); every shape is the PLACEHOLDER contract (contract.py): when Terra and Sam say what theirs are, change that file.
 """
@@ -28,7 +29,6 @@ except ImportError:                                    # imported as dashboard.i
 CONFIRM_TTL_S = 30.0
 YES = {"yes", "yeah", "yep", "confirm", "confirmed", "ok", "okay", "go", "proceed", "sure", "affirmative"}
 NO = {"no", "nope", "cancel", "abort", "nevermind", "don't", "dont", "negative"}
-KEY_HOME = {"1": "box", "2": "box", "3": "box"}
 
 
 def _words(text):
@@ -42,7 +42,6 @@ class Frontdoor:
         self.confirm_text, self.clock = confirm_text, clock
         self.on_status_cb = on_status
         self.runner = J.JobRunner(store, sender, get_pose, recover=recover, on_status=self._status, max_retries=max_retries, limits=limits)
-        self.keys = dict(KEY_HOME)
         self.pending = None                            # {"token", "action", "heard", "expires"}
         self.current = None                            # {"job", "action"}
         self.last_move = None
@@ -88,8 +87,9 @@ class Frontdoor:
             pass
         home = self.store.home()
         at_home = bool(pose) and abs(pose["x"] - home[0]) < 5 and abs(pose["y"] - home[1]) < 5 and abs(pose["z"] - home[2]) < 5
-        return {"busy": self.runner.busy(), "at_home": at_home, "holding": any(v == "unknown" for v in self.keys.values()) and self.runner.busy(),
-                "keys": dict(self.keys), "last_move": self.last_move, "ready": not self.store.missing(), "pose": pose}
+        keys = self.store.get_keys()
+        return {"busy": self.runner.busy(), "at_home": at_home, "holding": any(v == "unknown" for v in keys.values()) and self.runner.busy(),
+                "keys": keys, "last_move": self.last_move, "ready": not self.store.missing(), "pose": pose}
 
     def _clean_pending(self):
         if self.pending and self.clock() > self.pending["expires"]:
@@ -124,7 +124,7 @@ class Frontdoor:
                            error={"code": "BUSY", "title": "The arm is busy", "detail": "", "hint": "Wait, or stop the current job."})
         if kind in ("fetch_key", "return_key"):
             k = str(a["key"])
-            where = self.keys.get(k)
+            where = self.store.get_keys().get(k)
             if kind == "fetch_key" and where == "tray":
                 return C.reply(rid, "answer", "Key %s is already on the tray." % k, action=a, by=by, heard=heard)
             if kind == "return_key" and where == "box":
@@ -154,7 +154,7 @@ class Frontdoor:
         """Everything saved about the workspace, and what is still missing."""
         st = self.store
         return {"ok": True, "boxes": {k: v for k, v in st.data["boxes"].items()}, "tray": st.data["tray"], "home": st.home(), "constants": st.constants(),
-                "missing": st.missing(), "ready": not st.missing(), "pose": self._pose()}
+                "keys": st.get_keys(), "missing": st.missing(), "ready": not st.missing(), "pose": self._pose()}
 
     def _pose(self):
         try:
@@ -169,6 +169,7 @@ class Frontdoor:
             save   which: 1|2|3|"tray", optional size {w,d,h} (mm), optional x,y,z (else where the tip is now): the pick-up point of that place
             home                        the tip's pose now becomes the home pose
             constant name, value        one of the tuning numbers (clearance, hover, lift, approach pitch, speed)
+            key    which: 1|2|3, where: "box"|"tray"|"unknown"   correct where a key is believed to be (e.g. after it was moved by hand)
             preview kind: fetch|return, key   the route as a dry run, nothing moves
             list                        everything saved (same as GET /boxes)
         Returns {"ok": true, ...} or {"ok": false, "message", "error": {code, title, detail, hint}}. Never moves the arm."""
@@ -177,7 +178,7 @@ class Frontdoor:
         if not isinstance(d, dict):
             return fail("BAD_REQUEST", "The request must be a JSON object")
         act = d.get("action")
-        if act in ("save", "home", "constant") and self.runner.busy():
+        if act in ("save", "home", "constant", "key") and self.runner.busy():
             return fail("BUSY", "The arm is busy", "", "Wait for the job to finish, or stop it, before changing what is saved.")
         try:
             if act == "list":
@@ -214,13 +215,18 @@ class Frontdoor:
             if act == "constant":
                 self.store.set_constant(d.get("name"), d.get("value"))
                 return {"ok": True, "constants": self.store.constants(), "message": "%s saved." % d.get("name")}
+            if act == "key":
+                which = str(C.validate_action({"action": "fetch_key", "key": d.get("which")})["key"])
+                where = d.get("where")
+                self.store.set_key(which, where)
+                return {"ok": True, "keys": self.store.get_keys(), "message": "Key %s is now recorded as %s." % (which, where)}
         except B.StoreError as e:
             return fail(e.code, e.title, e.detail, e.hint)
         except R.RouteError as e:
             return fail(e.code, e.title, e.detail, e.hint)
         except C.ContractError as e:
             return fail("BAD_REQUEST", str(e))
-        return fail("BAD_REQUEST", "action must be one of where, save, home, constant, preview, list")
+        return fail("BAD_REQUEST", "action must be one of where, save, home, constant, key, preview, list")
 
     def describe(self):
         st = self._state()
@@ -244,9 +250,9 @@ class Frontdoor:
             if a["action"] in ("fetch_key", "return_key"):
                 k = str(a["key"])
                 if p["status"] == "done":
-                    self.keys[k] = "tray" if a["action"] == "fetch_key" else "box"
+                    self.store.set_key(k, "tray" if a["action"] == "fetch_key" else "box")
                 else:                                                          # the key may be anywhere: do not guess
-                    self.keys[k] = "unknown"
+                    self.store.set_key(k, "unknown")
         if self.on_status_cb:
             try:
                 self.on_status_cb(p)

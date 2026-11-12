@@ -138,10 +138,8 @@
         </button>
     </section>
 
-    <section class="panel" id="KeyRequest">
+    <section class="panel" id="KeyRequestPanel">
         <h2>Request Key</h2>
-
-        <img src="Noah.png">
 
         <label for="KeySelect">Choose a car:</label>
 
@@ -154,12 +152,12 @@
 
         <button
             class="collect"
-            onclick="sendCommand('request_key')">
+            onclick="CollectKey()">
             Request Key
         </button>
     </section>
 
-    <section class="panel" id="KeyReturn">
+    <section class="panel" id="KeyReturnPanel">
         <h2>Return Key</h2>
 
         <label for="KeyReturn">Choose a car:</label>
@@ -173,7 +171,7 @@
 
         <button
             class="return"
-            onclick="sendCommand('return_key')">
+            onclick="ReturnKey()">
             Return Key
         </button>
     </section>
@@ -268,7 +266,8 @@
         try {
             const response = await fetch("/controller");
 
-            if (!response.ok) {
+            // Does not report as Offline if the server goes down and refresh status is pressed. Needs fixing.
+            if (response.status == 404) {
                 throw new Error("HTTP " + response.status);
             }
 
@@ -289,6 +288,20 @@
             refreshStatus(),
             refreshMode()
         ]);
+    }
+
+    function CollectKey() {
+        const select = document.getElementById("KeySelect");
+        const selectedCar = select.value;
+        sendCommand("request_key:" + selectedCar);
+        alert("request_key:" + selectedCar);
+    }
+
+    function ReturnKey() {
+        const select = document.getElementById("KeyReturn");
+        const selectedCar = select.value;
+        sendCommand("return_key:" + selectedCar);
+        alert("return_key:" + selectedCar);
     }
 
     // Update the displayed information every two seconds.

@@ -88,6 +88,13 @@
         }
         
 
+        #confirmRow button { margin-right: 8px; }
+        #job { font-weight: 600; margin: 8px 0 0; }
+        #job.failed { color: #dc2626; }
+        #job.done { color: #15803d; }
+        .confirm-yes { background: #15803d; }
+        .confirm-no { background: #64748b; }
+
         #commandInput {
             width: 90%;
             height: 100px;
@@ -127,15 +134,23 @@
     <section class="panel" id="TypedCommand">
         <h2>Typed Command</h2>
 
-        <label for="KeySelect">Enter your command for our ai assistant:</label>
+        <label for="commandInput">Enter your command for our ai assistant:</label>
 
-        <input type="text" id="commandInput">
+        <input type="text" id="commandInput" placeholder="e.g. get me the second key" maxlength="500">
 
         <button
             class="TypedCommandButton"
             onclick="sendTypedCommand()">
             Send Command
         </button>
+
+        <!-- Shown when the assistant asks "Fetch key 2?" -->
+        <div id="confirmRow" hidden>
+            <button class="confirm-yes" onclick="answerConfirm(true)">Yes</button>
+            <button class="confirm-no" onclick="answerConfirm(false)">No</button>
+        </div>
+
+        <p id="job" role="status" aria-live="polite">No job yet.</p>
     </section>
 
     <section class="panel" id="KeyRequest">
@@ -143,18 +158,17 @@
 
         <img src="Noah.png">
 
-        <label for="KeySelect">Choose a car:</label>
+        <label for="KeySelect">Choose a key:</label>
 
         <select name="KeySelect" id="KeySelect" class="KeyDropdown">
-            <option value="volvo">PLACEHOLDER Need to change so these options are gottEn from the server</option>
-            <option value="saab">Saab</option>
-            <option value="mercedes">Mercedes</option>
-            <option value="audi">Audi</option>
+            <option value="1">Key 1</option>
+            <option value="2">Key 2</option>
+            <option value="3">Key 3</option>
         </select>
 
         <button
             class="collect"
-            onclick="sendCommand('request_key')">
+            onclick="fetchKey()">
             Request Key
         </button>
     </section>
@@ -162,19 +176,27 @@
     <section class="panel" id="KeyReturn">
         <h2>Return Key</h2>
 
-        <label for="KeyReturn">Choose a car:</label>
+        <label for="KeyReturnSelect">Choose a key:</label>
 
-        <select name="KeyReturn" id="KeyReturn" class="KeyDropdown">
-            <option value="volvo">PLACEHOLDER Need to change so these options are gottEn from the server</option>
-            <option value="saab">Saab</option>
-            <option value="mercedes">Mercedes</option>
-            <option value="audi">Audi</option>
+        <select name="KeyReturnSelect" id="KeyReturnSelect" class="KeyDropdown">
+            <option value="1">Key 1</option>
+            <option value="2">Key 2</option>
+            <option value="3">Key 3</option>
         </select>
 
         <button
             class="return"
-            onclick="sendCommand('return_key')">
+            onclick="returnKey()">
             Return Key
+        </button>
+    </section>
+
+    <section class="panel" id="StopPanel">
+        <h2>Emergency</h2>
+
+        <!-- Always works, even while the arm is busy. -->
+        <button class="stop" id="stopButton" onclick="stopArm()">
+            STOP
         </button>
     </section>
 
@@ -186,6 +208,110 @@
 </main>
 
 <script>
+    // ===== The AI front door (server.py, routes under /ai/) =====================================
+    // Every call to the assistant is in this block. The message shapes are PLACEHOLDERS (see dashboard/contract.py
+    // in the repository): if they change, change this block only.
+    //   POST /ai/request {v, id, text}            typed words: the assistant chooses what to do
+    //   POST /ai/request {v, id, action, key}     a button: action is "fetch", "return", "home" or "stop"
+    //   POST /ai/request {confirm: token}         yes to "Fetch key 2?"   ({cancel: token} is no)
+    //   GET  /ai/job                              progress: {status, step, of, message, error}
+    let pendingToken = null;
+
+    async function aiPost(body) {
+        const response = await fetch("/ai/request", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(Object.assign({ v: 1, id: "page" + Date.now() }, body))
+        });
+        let data = null;
+        try { data = await response.json(); } catch (e) { /* no JSON body */ }
+        if (response.status === 503) {
+            return { kind: "error", message: "The assistant is not running on the server." };
+        }
+        return data || { kind: "error", message: "The server answered HTTP " + response.status + "." };
+    }
+
+    // Show what the assistant said, and the Yes / No buttons when it wants a confirmation.
+    function showReply(reply) {
+        const message = document.getElementById("message");
+        message.textContent = reply.message || "No answer.";
+        message.style.color = reply.kind === "error" ? "#dc2626" : "";
+        pendingToken = reply.kind === "confirm" ? reply.token : null;
+        document.getElementById("confirmRow").hidden = pendingToken === null;
+    }
+
+    async function aiSend(body) {
+        try {
+            showReply(await aiPost(body));
+        } catch (error) {
+            showReply({ kind: "error", message: "Could not reach the server: " + error.message });
+        }
+    }
+
+    async function sendTypedCommand() {
+        const input = document.getElementById("commandInput");
+        const text = input.value.trim();
+
+        if (!text) {
+            showReply({ kind: "error", message: "Type a command first." });
+            return;
+        }
+
+        await aiSend({ text: text });
+        input.value = "";
+    }
+
+    function answerConfirm(yes) {
+        if (pendingToken === null) { return; }
+        aiSend(yes ? { confirm: pendingToken } : { cancel: pendingToken });
+    }
+
+    function fetchKey() {
+        aiSend({ action: "fetch", key: Number(document.getElementById("KeySelect").value) });
+    }
+
+    function returnKey() {
+        aiSend({ action: "return", key: Number(document.getElementById("KeyReturnSelect").value) });
+    }
+
+    function stopArm() {
+        aiSend({ action: "stop" });
+    }
+
+    // Progress of the latest job, every second.
+    async function pollJob() {
+        const line = document.getElementById("job");
+
+        try {
+            const response = await fetch("/ai/job");
+
+            if (response.status === 404) {
+                line.textContent = "No job yet.";
+                line.className = "";
+                return;
+            }
+
+            if (!response.ok) { throw new Error("HTTP " + response.status); }
+
+            const job = await response.json();
+            const steps = job.of ? " (step " + job.step + " of " + job.of + ")" : "";
+
+            line.textContent = job.status + steps + (job.message ? ": " + job.message : "");
+            line.className = job.status === "failed" ? "failed" : job.status === "done" ? "done" : "";
+        } catch (error) {
+            line.textContent = "Job status unavailable.";
+            line.className = "";
+        }
+    }
+
+    document.getElementById("commandInput").addEventListener("keydown", function (event) {
+        if (event.key === "Enter") { sendTypedCommand(); }
+    });
+
+    pollJob();
+    setInterval(pollJob, 1000);
+    // ===== end of the AI front door ================================================================
+
     // Send a JSON command to the Python server.
     async function sendCommand(command) {
         const message = document.getElementById("message");

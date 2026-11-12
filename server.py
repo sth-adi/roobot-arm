@@ -30,13 +30,23 @@ Sequences and arm state (our firmware; the stock firmware never asks for them):
 Optionally forwards every received state to another server (--forward-url or
 the FORWARD_URL env var); /state then also reports forwarding status.
 
-Run:  python server.py [--host 0.0.0.0] [--port 8000] [--forward-url http://host:port/path]
+The page and the AI front door (Terra's index.html asks for these; the shapes are the placeholders in dashboard/contract.py):
+  GET  /, /index.html   the page          GET /Noah.png   its picture
+  POST /ai/request   {"v":1,"id":"..","text":".."} typed or spoken words | {"action":"fetch"|"return"|"home"|"stop","key":1-3} a button |
+                     {"confirm": token} / {"cancel": token}; the answer says what was understood and what happens (kind: started | confirm | answer |
+                     question | stopped | error). Free text goes to the AI, which only chooses from a fixed menu; a movement it chose is confirmed first.
+  GET  /ai/job       the latest job status {"status": queued|running|done|failed|stopped, "step", "of", "message", "error", "led"}
+  GET  /ai/state     where the keys are, whether the arm is busy       POST /ai/stop   stop (never delayed)
+  --ai virtual (default) moves a pretend arm only; --ai backend drives the real arm through Sam's backend (--backend-url); --ai off disables the routes.
+
+Run:  python server.py [--host 0.0.0.0] [--port 8000] [--forward-url http://host:port/path] [--ai virtual|backend|off] [--backend-url http://127.0.0.1:8001]
 """
 import argparse
 import hashlib
 import json
 import os
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -48,7 +58,10 @@ def server_stamp(path=None):
     return hashlib.sha1(("server:%d" % os.stat(path or __file__).st_size).encode()).hexdigest()[:7]
 
 
+ROOT = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY = 64 * 1024
+MAX_AI_BODY = 8 * 1024
+_front = {"door": None, "mode": "off"}       # the AI front door (dashboard/interface.py), built by main() / make_front()
 STALE_S = 1.5   # no input newer than this = the sender is gone
 
 _cmd = {"command": None, "received_at": None, "count": 0}  # latest command from index.html (POST /controller)
@@ -233,6 +246,40 @@ def _forward_once(last_count, neutral_sent):
     return last_count, neutral_sent
 
 
+def make_front(mode, backend_url="http://127.0.0.1:8001"):
+    """Build the AI front door. virtual: a pretend arm and a demo layout of boxes (nothing real can move). backend: the real arm through Sam's backend
+    with the boxes taught and saved in .boxes.json (nothing moves until they are). Returns None for 'off'."""
+    if mode == "off":
+        return None
+    sys.path.insert(0, os.path.join(ROOT, "dashboard"))
+    import interface
+    if mode == "virtual":
+        import virtual
+        arm = virtual.VirtualArm()
+        return interface.Frontdoor(virtual.demo_store(), arm, arm.get_pose)
+    import backend_client as BC
+    import boxes
+    import lowlevel
+    client = BC.BackendClient(backend_url)
+
+    def pose():
+        try:
+            p = client.position()
+        except BC.BackendError:
+            return None
+        return {"x": p["x"], "y": p["y"], "z": p["z"], "angle": p["a"]} if p and (p.get("age_s") is None or p["age_s"] < 3.0) else None
+    return interface.Frontdoor(boxes.Store(), lowlevel.SamSender(client), pose)
+
+
+def _ai(method, path, body=b""):
+    """(status, dict) for a /ai/... route; 503 when the front door is off."""
+    door = _front["door"]
+    if door is None:
+        return 503, {"error": "the AI front door is not running (start the server with --ai virtual or --ai backend)"}
+    import interface
+    return interface.handle_http(door, method, path[len("/ai"):] or "/", body)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "RobotArm/0.1"
 
@@ -276,8 +323,26 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:  # client went away
             pass
 
+    def _file(self, name, ctype):
+        try:
+            with open(os.path.join(ROOT, name), "rb") as f:
+                content = f.read()
+        except OSError:
+            return self._send(404, {"error": "not found"})
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
     def do_GET(self):
-        if self.path == "/stream":
+        if self.path in ("/", "/index.html"):
+            self._file("index.html", "text/html; charset=utf-8")
+        elif self.path == "/Noah.png":
+            self._file("Noah.png", "image/png")
+        elif self.path.startswith("/ai/") or self.path == "/ai":
+            self._send(*_ai("GET", self.path))
+        elif self.path == "/stream":
             self._stream()
         elif self.path == "/health":
             self._send(200, {"status": "ok", "build": server_stamp()})
@@ -328,6 +393,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, {"error": "forbidden"})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return self._send(200, {"ok": True})
+        if self.path.startswith("/ai/"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                n = -1
+            if not 0 <= n <= MAX_AI_BODY:
+                return self._send(413, {"error": "body too large"})
+            return self._send(*_ai("POST", self.path, self.rfile.read(n)))
         if self.path not in ("/input", "/control", "/controller", "/status", "/calibration", "/sequence", "/armstate"):
             return self._send(404, {"error": "not found"})
         try:
@@ -429,7 +502,12 @@ def main():
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--forward-url", default=os.environ.get("FORWARD_URL"),
                    help="also POST each received state to this URL (env: FORWARD_URL)")
+    p.add_argument("--ai", choices=("virtual", "backend", "off"), default="virtual",
+                   help="the AI front door: virtual = a pretend arm (default), backend = the real arm through Sam's backend, off")
+    p.add_argument("--backend-url", default="http://127.0.0.1:8001", help="Sam's backend, for --ai backend")
     args = p.parse_args()
+    _front["door"], _front["mode"] = make_front(args.ai, args.backend_url), args.ai
+    print("AI front door: %s" % {"virtual": "virtual arm (nothing real can move)", "backend": "the real arm through " + args.backend_url, "off": "off"}[args.ai])
     if args.forward_url:
         _fwd["url"] = args.forward_url
         threading.Thread(target=_forward_worker, daemon=True).start()

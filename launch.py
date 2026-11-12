@@ -129,7 +129,7 @@ def main():
         if up(server_url + "/health") or up(server_url + "/state"):
             print("input server already running on :%d" % a.server_port)
         else:
-            kids.append(subprocess.Popen([py, os.path.join(ROOT, "server.py")], cwd=ROOT))
+            kids.append(subprocess.Popen([py, os.path.join(ROOT, "server.py")] + (["--ai", "backend", "--backend-url", "http://127.0.0.1:%d" % a.backend_port] if (a.backend and not a.no_backend) else []), cwd=ROOT))
             for _ in range(30):
                 if up(server_url + "/health"):
                     break

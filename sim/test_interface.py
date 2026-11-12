@@ -187,5 +187,90 @@ class Page(unittest.TestCase):
         self.assertEqual(I.handle_http(door()[0], "GET", "/job")[0], 404)
 
 
+class Teaching(unittest.TestCase):
+    """Setting up the stored coordinates through the front door. Nothing here ever moves the arm."""
+    def setUp(self):
+        import boxes as B
+        import tempfile
+        self.arm = TJ.Arm()
+        self.f = I.Frontdoor(B.Store(os.path.join(tempfile.mkdtemp(), "b.json")), self.arm, lambda: dict(self.arm.pose))
+
+    def at(self, x, y, z):
+        self.arm.pose = {"x": x, "y": y, "z": z, "angle": 0.0}
+
+    def test_an_empty_setup_lists_what_is_missing(self):
+        r = self.f.teach({"action": "list"})
+        self.assertEqual((r["ready"], r["missing"]), (False, ["box 1", "box 2", "box 3", "tray"]))
+
+    def test_where_and_save_use_the_tip_position_and_never_move_the_arm(self):
+        self.assertEqual(self.f.teach({"action": "where"})["pose"]["y"], 250.0)
+        self.at(-60, 250, 120)
+        r = self.f.teach({"action": "save", "which": 1, "size": {"w": 40, "d": 40, "h": 50}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["place"]["x"], r["place"]["z"], r["missing"]), (-60.0, 120.0, ["box 2", "box 3", "tray"]))
+        self.assertEqual(self.arm.ran, [])
+
+    def test_everything_taught_makes_it_ready_and_a_fetch_possible(self):
+        for which, x, y, z in ((1, -60, 250, 120), (2, 0, 250, 120), (3, 60, 250, 120), ("tray", 0, 180, 60)):
+            self.at(x, y, z)
+            self.assertTrue(self.f.teach({"action": "save", "which": which, "size": {"w": 40, "d": 40, "h": 40}})["ok"])
+        self.at(0, 250, 250)
+        self.assertTrue(self.f.teach({"action": "list"})["ready"])
+        self.assertEqual(self.f.request({"action": "fetch", "key": 2})["kind"], "started")
+        finish(self.f)
+
+    def test_typed_numbers_work_without_a_position_report(self):
+        f = I.Frontdoor(self.f.store, TJ.Arm(), lambda: None)
+        self.assertTrue(f.teach({"action": "save", "which": 2, "x": 0, "y": 250, "z": 120})["ok"])
+        self.assertEqual(f.teach({"action": "save", "which": 3})["error"]["code"], "NO_POSITION")
+
+    def test_bad_places_are_refused_with_the_reason(self):
+        self.at(0, 600, 120)
+        self.assertIn(self.f.teach({"action": "save", "which": 1})["error"]["code"], ("UNREACHABLE", "OUT_OF_RANGE"))
+        self.at(0, 250, 120)
+        for bad in ({"which": 9}, {"which": "shelf"}, {"which": 1, "size": {"w": 1}}, {"which": 1, "size": {"w": 1, "d": 1, "h": 1}}):
+            self.assertEqual(self.f.teach(dict(bad, action="save"))["ok"], False, repr(bad))
+        self.assertEqual(self.f.teach({"action": "dance"})["error"]["code"], "BAD_REQUEST")
+        self.assertEqual(self.f.teach(None)["error"]["code"], "BAD_REQUEST")
+
+    def test_saving_is_refused_while_a_job_runs(self):
+        import threading
+        gate = threading.Event()
+        arm = TJ.Arm(block=gate)
+        f = I.Frontdoor(self.f.store, arm, lambda: dict(arm.pose))
+        f.store.set_box(1, -60, 250, 120)
+        f.store.set_tray(0, 180, 60)
+        f.request({"action": "fetch", "key": 1})
+        self.assertEqual(f.teach({"action": "save", "which": 2, "x": 0, "y": 250, "z": 120})["error"]["code"], "BUSY")
+        self.assertTrue(f.teach({"action": "list"})["ok"])                           # reading is always fine
+        gate.set()
+        finish(f)
+
+    def test_preview_shows_the_route_without_moving(self):
+        self.assertEqual(self.f.teach({"action": "preview", "kind": "fetch", "key": 2})["error"]["code"], "NOT_TAUGHT")
+        self.f.store.set_box(2, 0, 250, 120, {"w": 40, "d": 40, "h": 50})
+        self.f.store.set_tray(0, 180, 60, {"w": 80, "d": 60, "h": 30})
+        r = self.f.teach({"action": "preview", "kind": "fetch", "key": 2})
+        self.assertTrue(r["ok"])
+        self.assertEqual((len(r["steps"]), r["steps"][3]["action"], self.arm.ran), (11, "grab", []))
+        self.assertGreater(r["seconds"], 0)
+        self.assertFalse(self.f.teach({"action": "preview", "kind": "wave", "key": 2})["ok"])
+
+    def test_home_and_constants(self):
+        self.at(0, 240, 240)
+        self.assertEqual(self.f.teach({"action": "home"})["home"][:3], [0.0, 240.0, 240.0])
+        self.assertEqual(self.f.teach({"action": "constant", "name": "hover_mm", "value": 25})["constants"]["hover_mm"], 25.0)
+        self.assertEqual(self.f.teach({"action": "constant", "name": "hover_mm", "value": 5000})["error"]["code"], "OUT_OF_RANGE")
+        self.assertEqual(self.f.teach({"action": "constant", "name": "luck", "value": 1})["error"]["code"], "BAD_CONSTANT")
+
+    def test_http_shapes(self):
+        self.at(-60, 250, 120)
+        code, r = I.handle_http(self.f, "POST", "/teach", json.dumps({"action": "save", "which": 1}).encode())
+        self.assertEqual((code, r["ok"]), (200, True))
+        self.assertEqual(I.handle_http(self.f, "GET", "/boxes")[1]["missing"], ["box 2", "box 3", "tray"])
+        self.assertEqual(I.handle_http(self.f, "POST", "/teach", b"{")[0], 400)
+        self.assertEqual(I.handle_http(self.f, "POST", "/teach", b'{"action": "save", "which": 9}')[0], 400)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,8 +21,9 @@ try:
     import boxes as B
     import contract as C
     import jobs as J
+    import routes as R
 except ImportError:                                    # imported as dashboard.interface
-    from dashboard import assistant as AS, boxes as B, contract as C, jobs as J
+    from dashboard import assistant as AS, boxes as B, contract as C, jobs as J, routes as R
 
 CONFIRM_TTL_S = 30.0
 YES = {"yes", "yeah", "yep", "confirm", "confirmed", "ok", "okay", "go", "proceed", "sure", "affirmative"}
@@ -148,6 +149,79 @@ class Frontdoor:
             self.last_move = {k: a[k] for k in ("dx", "dy", "dz")}
         return C.reply(rid, "started", "%s: started." % self._describe(a), action=a, job=job, by=by, heard=heard)
 
+    # ---- setting up: what the stored coordinates are, and how they get there ----
+    def boxes(self):
+        """Everything saved about the workspace, and what is still missing."""
+        st = self.store
+        return {"ok": True, "boxes": {k: v for k, v in st.data["boxes"].items()}, "tray": st.data["tray"], "home": st.home(), "constants": st.constants(),
+                "missing": st.missing(), "ready": not st.missing(), "pose": self._pose()}
+
+    def _pose(self):
+        try:
+            p = self.get_pose()
+        except Exception:
+            return None
+        return {k: p[k] for k in ("x", "y", "z", "angle")} if isinstance(p, dict) and all(k in p for k in ("x", "y", "z", "angle")) else None
+
+    def teach(self, d):
+        """Set up the stored coordinates. d["action"]:
+            where                       where the arm's tip is now
+            save   which: 1|2|3|"tray", optional size {w,d,h} (mm), optional x,y,z (else where the tip is now): the pick-up point of that place
+            home                        the tip's pose now becomes the home pose
+            constant name, value        one of the tuning numbers (clearance, hover, lift, approach pitch, speed)
+            preview kind: fetch|return, key   the route as a dry run, nothing moves
+            list                        everything saved (same as GET /boxes)
+        Returns {"ok": true, ...} or {"ok": false, "message", "error": {code, title, detail, hint}}. Never moves the arm."""
+        def fail(code, title, detail="", hint=""):
+            return {"ok": False, "message": "%s. %s" % (title, hint) if hint else title, "error": {"code": code, "title": title, "detail": detail, "hint": hint}}
+        if not isinstance(d, dict):
+            return fail("BAD_REQUEST", "The request must be a JSON object")
+        act = d.get("action")
+        if act in ("save", "home", "constant") and self.runner.busy():
+            return fail("BUSY", "The arm is busy", "", "Wait for the job to finish, or stop it, before changing what is saved.")
+        try:
+            if act == "list":
+                return self.boxes()
+            if act == "where":
+                p = self._pose()
+                return {"ok": True, "pose": p} if p else fail("NO_POSITION", "The arm's position is not known", "", "Wait for the arm's first position report.")
+            if act == "preview":
+                kind, key, p = d.get("kind"), d.get("key"), self._pose()
+                if kind not in ("fetch", "return"):
+                    return fail("BAD_REQUEST", "kind must be fetch or return")
+                key = C.validate_action({"action": "fetch_key", "key": key})["key"]
+                r = (R.fetch_route if kind == "fetch" else R.return_route)(self.store, key, p, None)
+                return {"ok": True, "seconds": round(r["seconds"], 1), "steps": [{k: st[k] for k in ("label", "x", "y", "z", "speed") if k in st} | ({"action": st["action"]} if "action" in st else {}) for st in r["steps"]]}
+            if act == "save":
+                which = d.get("which")
+                which = "tray" if which == "tray" else str(C.validate_action({"action": "fetch_key", "key": which})["key"])
+                if all(k in d for k in ("x", "y", "z")):
+                    pose = {"x": d["x"], "y": d["y"], "z": d["z"]}
+                else:
+                    p = self._pose()
+                    if not p:
+                        return fail("NO_POSITION", "The arm's position is not known", "", "Give x, y and z, or wait for the arm's first position report.")
+                    pose = p
+                place = self.store.teach(which, pose, d.get("size"))
+                return {"ok": True, "which": which, "place": place, "missing": self.store.missing(), "message": "Saved %s at (%.0f, %.0f, %.0f)." % (
+                    "the tray" if which == "tray" else "box " + which, place["x"], place["y"], place["z"])}
+            if act == "home":
+                p = self._pose()
+                if not p:
+                    return fail("NO_POSITION", "The arm's position is not known", "", "Wait for the arm's first position report.")
+                self.store.set_home(p["x"], p["y"], p["z"], p["angle"])
+                return {"ok": True, "home": self.store.home(), "message": "Home saved."}
+            if act == "constant":
+                self.store.set_constant(d.get("name"), d.get("value"))
+                return {"ok": True, "constants": self.store.constants(), "message": "%s saved." % d.get("name")}
+        except B.StoreError as e:
+            return fail(e.code, e.title, e.detail, e.hint)
+        except R.RouteError as e:
+            return fail(e.code, e.title, e.detail, e.hint)
+        except C.ContractError as e:
+            return fail("BAD_REQUEST", str(e))
+        return fail("BAD_REQUEST", "action must be one of where, save, home, constant, preview, list")
+
     def describe(self):
         st = self._state()
         keys = ", ".join("key %s %s" % (k, {"box": "in its box", "tray": "on the tray"}.get(v, "somewhere unknown")) for k, v in sorted(st["keys"].items()))
@@ -183,7 +257,8 @@ class Frontdoor:
 def handle_http(front, method, path, body=b""):
     """The placeholder HTTP face, as a pure function so any server can mount it: returns (status code, dict).
         POST /request   {contract request} -> reply            GET /job    -> latest job_status (404 before the first job)
-        POST /stop      {}                 -> reply            GET /state  -> {"busy", "at_home", "keys", "ready", ...}"""
+        POST /stop      {}                 -> reply            GET /state  -> {"busy", "at_home", "keys", "ready", ...}
+        POST /teach     {"action": where|save|home|constant|preview|list, ...} -> {"ok", ...}   GET /boxes -> what is saved and what is missing"""
     route = urllib.parse.urlsplit(path).path
     if (method, route) == ("POST", "/request"):
         try:
@@ -199,4 +274,13 @@ def handle_http(front, method, path, body=b""):
         return (200, j) if j else (404, {"error": "no job yet"})
     if (method, route) == ("GET", "/state"):
         return 200, front.state()
+    if (method, route) == ("GET", "/boxes"):
+        return 200, front.boxes()
+    if (method, route) == ("POST", "/teach"):
+        try:
+            data = json.loads(body or b"{}")
+        except ValueError:
+            return 400, {"ok": False, "message": "The request is not valid JSON.", "error": {"code": "BAD_JSON", "title": "Not JSON", "detail": "", "hint": ""}}
+        r = front.teach(data)
+        return (200 if r["ok"] else 409 if r["error"]["code"] == "BUSY" else 400), r
     return 404, {"error": "not found"}

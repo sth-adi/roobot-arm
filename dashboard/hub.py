@@ -1251,13 +1251,77 @@ class Hub:
         return {"messages": [m for m in self.chat if m["id"] > since], "state": self.task.get("state", "idle"),
                 "ai": "groq" if AGENT.api_key() else "keywords", "voice": VOICE.available()}
 
+    # ---- the AI front door (server.py /ai/...): typed and spoken requests go there when it is running ----
+    def _front(self, path, body=None, timeout=4.0):
+        """(status, dict) from the input server's front door, or None when it is not there (old server, not running, --ai off)."""
+        req = urllib.request.Request(self.server + path, data=None if body is None else json.dumps(body).encode(), method="GET" if body is None else "POST",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 503):
+                return None
+            try:
+                return e.code, json.loads(e.read() or b"{}")
+            except ValueError:
+                return None
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+
+    def _front_ask(self, request):
+        """Send the words to the front door and show what it said in the chat. True when it handled the request, False to use the old path."""
+        got = self._front("/ai/request", {"v": 1, "id": "hub%d" % Hub._chat_seq, "text": request})
+        if got is None:
+            return False
+        code, r = got
+        self.chat_add("user", request)
+        kind = r.get("kind")
+        if kind == "error" or code >= 400:
+            e = r.get("error") or {}
+            self.chat_add("error", r.get("message") or e.get("title") or "The request was refused", detail=e.get("detail"), hint=e.get("hint"), code=e.get("code"), state="failed")
+        else:
+            self.chat_add("robot", r.get("message", ""), state="stopped" if kind == "stopped" else self.task.get("state", "idle"))
+        if kind == "started":
+            self.task = {"state": "working", "request": request, "log": [], "error": None, "warning": None}
+            threading.Thread(target=self._front_follow, args=(r.get("job"),), daemon=True).start()
+        return True
+
+    def _front_follow(self, job):
+        """Watch one job and put its news in the chat: retries and recovery as they happen, then the final result."""
+        seen, end = None, time.time() + 900
+        while time.time() < end:
+            got = self._front("/ai/job")
+            if got and got[0] == 200 and got[1].get("job") == job:
+                j = got[1]
+                msg = j.get("message") or ""
+                if msg != seen and any(w in msg for w in ("Retrying", "Recovering")):
+                    self.chat_add("robot", msg, state="working")
+                seen = msg
+                if j["status"] in ("done", "failed", "stopped"):
+                    e = j.get("error")
+                    if j["status"] == "failed":
+                        self.task = {"state": "failed", "request": "", "log": [], "error": e, "warning": None}
+                        self.chat_add("error", msg or "The job failed", detail=(e or {}).get("detail"), hint=(e or {}).get("hint"), code=(e or {}).get("code"), state="failed")
+                    else:
+                        self.task = {"state": "done" if j["status"] == "done" else "stopped", "request": "", "log": [], "error": None, "warning": None}
+                        self.chat_add("robot", "Done." if j["status"] == "done" else "Stopped.", state=self.task["state"])
+                    return
+            time.sleep(0.5)
+        self.task = {"state": "failed", "request": "", "log": [], "error": None, "warning": None}
+        self.chat_add("error", "Lost track of the job (no result after 15 minutes).", state="failed")
+
     def ask(self, request):
-        """Start a task from plain language: make sure the arm is at home grip, pick a sequence, run it once."""
+        """Start a task from plain language. With the AI front door running (server.py /ai/...) the words go there: the AI chooses from a fixed menu and
+        the route is calculated from the stored coordinates. Without it, the old way: make sure the arm is at home grip, pick a sequence, run it once."""
         request = str(request).strip()[:500]
         if not request:
             raise ValueError("say what you want done")
         if PRE.is_stop(request):                       # first, before any busy check, AI or network call
+            self._front("/ai/stop", {})                # best effort: the front door's own job stops too
             return self._stop_now(request)
+        if self._front_ask(request):
+            return
         if self.task.get("state") in ("working", "running"):
             raise RuntimeError("a task is already running")
         if self.tune.get("state") == "running":

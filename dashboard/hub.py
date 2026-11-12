@@ -57,7 +57,6 @@ import voice as VOICE  # noqa: E402
 import tls as TLS  # noqa: E402
 import endcal as ENDCAL  # noqa: E402
 import netlink as NETLINK  # noqa: E402
-import backend_client as BC  # noqa: E402
 LIBRARY = SEQ.Library(ROOT / "sequences")
 CALIB = TUNER.Calibration(str(ROOT / "tuning"))        # limits learned from real-arm trials, per sequence (local to this PC)
 
@@ -111,7 +110,7 @@ def describe(prev, cur):
 
 
 class Hub:
-    def __init__(self, server_url, send_speed=False, backend_url=None, backend_speed=20.0, backend_ignore_magnet=False):
+    def __init__(self, server_url, send_speed=False):
         self.server = server_url.rstrip("/")
         self.send_speed = send_speed            # off: packets reach the arm exactly as the stock UWE-RArm firmware expects
         self.stop = threading.Event()
@@ -141,12 +140,6 @@ class Hub:
         self.phone_url = None                   # set by main() with --lan
         self.phone_url_https = None             # the same over HTTPS (port + 1), which the phone's microphone needs
         self.board_listener = None              # the board's WiFi link (port + 2): the board connects out to this PC, see netlink.py
-        # the real arm through Sam's backend (--backend): the virtual arm stays the brain (keys, magnet, checks); when ARMED, the real arm follows the same poses
-        self.backend = BC.BackendClient(backend_url) if backend_url else None
-        self.backend_speed, self.backend_ignore_magnet = float(backend_speed), bool(backend_ignore_magnet)
-        self._be_thread, self._be_runner, self._be_error = None, None, None
-        self._be_info = {"online": None}
-        self._be_follow = False
         self.cell = Workcell()                  # boxes, keys, tray and the electromagnet (sim/workcell.py)
         self.emu_view = ArmSim()                # the emulated servos drawn as an arm
         self.packets = collections.deque(maxlen=500)
@@ -705,7 +698,6 @@ class Hub:
         if not on:
             self._mirror_angle = self._mirror_test = None
             self.link.update(NEUTRAL)               # stop any motion immediately over USB
-            self._be_stop()                         # and tell the real arm's backend to stop wanting to go anywhere
         res = self.set_forward(on)
         self.log("hub", f"output {'ARMED' if on else 'SAFE'}"
                         + ("" if res else "  (warning: could not change forwarding on the local server)"))
@@ -864,9 +856,9 @@ class Hub:
 
     # ---- firmware ----------------------------------------------------------------------------------
     # firmware profiles: what can be flashed onto the board from the dashboard
+    # (there used to be a second "local" profile here - his firmware patched to poll our backend for each move - removed with backend mode;
+    # the board now does its own IK in mirror mode, which this USB sketch is for)
     FW_PROFILES = {
-        "local": {"label": "Sam's 29 Oct firmware, our backend", "kind": "local", "fqbn": "esp32:esp32:uPesy_wroom", "libs": ["ESP32Servo"], "git_libs": {"ESP32Ping": "https://github.com/marian-craciunescu/ESP32Ping.git"},
-                  "desc": "His latest firmware (firmware/sam/firmware) with one change: it asks this computer's backend (http, port 8001) for each move. The hub sends the targets, so the dashboard (Ask box, sequences, nudges, training) drives the arm. Start the launcher with --backend-lan so the board can reach it."},
         "usb": {"label": "USB jog sketch", "kind": None, "fqbn": FQBN, "libs": ["ArduinoJson"],
                 "desc": "Our older sketch (arduino/arm_receiver): jog control over USB or WiFi."},
     }
@@ -882,38 +874,15 @@ class Hub:
         self.FWB.mkdir(exist_ok=True)
         (self.FWB / "state.json").write_text(json.dumps(st), encoding="utf-8")
 
-    def _fw_secrets(self, kind=None):
-        """(ssid, password, host) for the local-backend firmware, from secrets.h and this computer's address. Never sent to the browser.
-        The host is this computer's LAN address and the backend's port, so the board can reach the backend."""
-        txt = (SKETCH / "secrets.h").read_text(encoding="utf-8", errors="replace") if (SKETCH / "secrets.h").exists() else ""
-
-        def g(k):
-            m = re.search(r'#define\s+%s\s+"([^"]*)"' % k, txt)
-            return m.group(1) if m else ""
-        from urllib.parse import urlparse
-        ssid, pw = g("WIFI_SSID"), g("WIFI_PASS")
-        if not ssid:
-            raise ValueError("needs WIFI_SSID (and WIFI_PASS) in arduino/arm_receiver/secrets.h; WIFI_USER too for a WPA2 Enterprise network")
-        port = urlparse(self.backend.base).port if self.backend else 8001
-        return ssid, pw, "%s:%s" % (lan_ip(), port or 8001)
-
-    def _fw_wifi_user(self):
-        """Optional WIFI_USER in secrets.h: the board then joins a WPA2 Enterprise network (as Sam's firmware does)."""
-        txt = (SKETCH / "secrets.h").read_text(encoding="utf-8", errors="replace") if (SKETCH / "secrets.h").exists() else ""
-        m = re.search(r'#define\s+WIFI_USER\s+"([^"]*)"', txt)
-        return m.group(1) if m else ""
-
     def _fw_hash(self, pid):
         import hashlib
         h = hashlib.sha1()
         prof = self.FW_PROFILES[pid]
-        roots = [SKETCH] if prof["kind"] is None else [ROOT / "firmware" / "sam" / "firmware" / "src", ROOT / "firmware" / "ours"]
+        roots = [SKETCH] if prof["kind"] is None else []    # every current profile is kind None (the USB jog sketch); kept generic in case another is added
         for r in roots:
             for f in sorted(r.rglob("*")):
                 if f.is_file():
                     h.update(f.relative_to(r).as_posix().encode() + f.read_bytes())
-        if prof["kind"] is not None:
-            h.update(("|".join(self._fw_secrets(prof["kind"])) + self._fw_wifi_user() + prof["kind"]).encode())
         return h.hexdigest()[:12]
 
     _fw_stale_cache, _fw_stale_t = {}, 0.0         # "changed since the last build" needs every firmware file hashed: do it every 5 s, not every status update
@@ -940,27 +909,12 @@ class Hub:
         return out
 
     def _fw_prepare(self, pid):
-        """Write the sketch folder for a profile. Returns (sketch_dir, out_dir)."""
+        """Write the sketch folder for a profile. Returns (sketch_dir, out_dir). Every current profile is kind None (the USB jog sketch, used
+        unmodified); kept as a function in case another profile with its own build step is added later."""
         prof = self.FW_PROFILES[pid]
         out_dir = self.FWB / pid / "out"
         if prof["kind"] is None:
             return SKETCH, out_dir
-        import tempfile
-        ssid, pw, host = self._fw_secrets(prof["kind"])
-        sk = self.FWB / pid / pid
-        shutil.rmtree(sk, ignore_errors=True)
-        sk.mkdir(parents=True)
-        if prof["kind"] == "local":                                   # his 29 Oct firmware, patched to use a plain-http backend
-            sys.path.insert(0, str(ROOT / "firmware" / "ours"))
-            try:
-                import build_firmware
-            finally:
-                sys.path.pop(0)
-            with tempfile.TemporaryDirectory() as td:
-                built = build_firmware.build(Path(td) / "t", host, ssid, pw, self._fw_wifi_user())
-                shutil.copytree(built / "src", sk, dirs_exist_ok=True)
-            (sk / (pid + ".ino")).write_text("// Entry point only: the firmware is main.cpp in this folder.\n", encoding="utf-8")
-            return sk, out_dir
 
     def firmware_job(self, action, profile="usb"):
         if action not in ("compile", "upload", "swap") or profile not in self.FW_PROFILES:
@@ -970,14 +924,8 @@ class Hub:
                 return False, "a firmware job is already running"
             if not os.path.exists(ARDUINO) and not shutil.which("arduino-cli"):
                 return False, "arduino-cli not found"
-            try:
-                if self.FW_PROFILES[profile]["kind"] is None:
-                    if not (SKETCH / "secrets.h").exists():
-                        return False, "arduino/arm_receiver/secrets.h is missing: copy secrets.example.h and fill it in"
-                else:
-                    self._fw_secrets(self.FW_PROFILES[profile]["kind"])
-            except ValueError as e:
-                return False, str(e)
+            if self.FW_PROFILES[profile]["kind"] is None and not (SKETCH / "secrets.h").exists():
+                return False, "arduino/arm_receiver/secrets.h is missing: copy secrets.example.h and fill it in"
             if action in ("upload", "swap"):
                 if self.armed:
                     return False, "switch the output to SAFE before flashing (the board resets)"
@@ -1153,7 +1101,6 @@ class Hub:
             "config": {"env_present": (ROOT / ".env").exists(), "forward_url_set": bool(self.env_forward())},
             "project": self.cache["git"],
             "sim": self._sim_snapshot(),
-            "backend": self._be_summary() if self.backend else None,
             "emu": self.emu.snapshot(),
             "phone_url": self.phone_url,
             "phone_url_https": self.phone_url_https,
@@ -1196,10 +1143,7 @@ class Hub:
 
     # ---- state packet and the task runner ------------------------------------------------------------------------
     def state_packet(self):
-        st = self._state_packet_core()
-        if self.backend:
-            st["backend"] = self._be_summary()
-        return st
+        return self._state_packet_core()
 
     def _state_packet_core(self):
         """What an AI needs to see before it decides: pose, home grip, magnet, what is running, where the keys are."""
@@ -1369,7 +1313,6 @@ class Hub:
             self.chat_add("user", request)
         self._run_once = None
         self.last_move = None
-        self._be_stop()
         try:
             if self.esp_state():
                 self._http("/sequence", {"poses": []}, timeout=2.0)         # an empty list stops a run on the ESP32
@@ -1394,9 +1337,6 @@ class Hub:
                 if release:
                     self.cell.set_magnet(False)
                 self.sim.go_home()
-                hx, hy, hz, hth = forward_kin_home(self.sim)
-            if self.backend and self.armed and not self._be_busy():
-                self._be_start([{"x": hx, "y": hy, "z": hz, "angle": hth, "action": None}])
 
     def _do_action(self, act, plan, st, tid=0):
         """The quick commands the AI can ask for: status, go_home, magnet. Fixed menu: no coordinates, nothing the model wrote reaches the arm."""
@@ -1415,7 +1355,7 @@ class Hub:
                 return self._tlog("Already at home", "done")
             self._tlog("Going home", "running")
             self._send_home(st, release=False)
-            if not self._wait(lambda: self.state_packet()["at_home"] and not self._be_busy(), self._t(30)):
+            if not self._wait(lambda: self.state_packet()["at_home"], self._t(30)):
                 return self._fail(PRE.err("HOME_FAILED", "The arm could not get to its home position", "It did not reach home within 30 s.",
                                           "Check the arm is powered and armed, then try again."))
             return self._tlog("At home", "done")
@@ -1450,13 +1390,10 @@ class Hub:
         mm = sum(c * c for c in d) ** 0.5
         self._tlog("Moving %.0f mm (dx %+.0f, dy %+.0f, dz %+.0f)" % (mm, *d), "running")
         self.load_sequence(SEQ.make_sequence([target], [False], "nudge", "free movement"), False, True)   # no magnet action: a nudge leaves the magnet as it is
-        if not self._wait(lambda: self._run_once is None and not self._be_busy(), self._t(60)):
+        if not self._wait(lambda: self._run_once is None, self._t(60)):
             return self._fail(PRE.err("RUN_TIMEOUT", "The move did not finish", "It was still running after %d s." % self._t(60), "Say stop, then go home."))
         if self._tid != tid:
             return
-        if self._be_error:
-            err, self._be_error = self._be_error, None
-            return self._fail(err)
         self.last_move = {"dx": d[0], "dy": d[1], "dz": d[2]}
         self._tlog("Moved", "done")
 
@@ -1466,7 +1403,7 @@ class Hub:
             return None
         (log or self._tlog)("Not at home grip: going home first")
         self._send_home(st, release=True)
-        if not self._wait(lambda: self.state_packet()["at_home"] and not self.state_packet()["magnet"] and not self._be_busy(), self._t(30)):
+        if not self._wait(lambda: self.state_packet()["at_home"] and not self.state_packet()["magnet"], self._t(30)):
             return PRE.err("HOME_FAILED", "The arm could not get to its home position", "It did not reach home grip within 30 s.",
                            "Check the arm is powered and armed, then try again.")
         return None
@@ -1498,10 +1435,6 @@ class Hub:
             problems = PRE.check(request, plan, seq, st)
             if problems:
                 return self._fail(problems[0])
-            if self.backend and self.armed:
-                bad = self._be_check(seq["poses"])
-                if bad:
-                    return self._fail(bad)
             bad = self._ensure_home(st)
             if self._tid != tid:                         # stopped while going home
                 return
@@ -1509,13 +1442,10 @@ class Hub:
                 return self._fail(bad)
             self._tlog("At home grip: running", "running")
             self.load_sequence(seq, False, True)
-            if not self._wait(lambda: self._run_once is None and not self._be_busy(), self._t(120)):
+            if not self._wait(lambda: self._run_once is None, self._t(120)):
                 return self._fail(PRE.err("RUN_TIMEOUT", "The sequence did not finish", "It was still running after %d s." % self._t(120), "Press B to send the arm home."))
             if self._tid != tid:                         # stopped mid-run: _stop_now already told the person
                 return
-            if self._be_error:                           # the real arm refused or lost a pose: nothing after it was sent
-                err, self._be_error = self._be_error, None
-                return self._fail(err)
             time.sleep(1.5)                                  # let a released key finish falling before it is looked at
             bad = PRE.verify(seq, st, self.state_packet(), request, plan)
             if bad:
@@ -1723,10 +1653,6 @@ class Hub:
             self._run_once, self._esp_run = len(seq["poses"]), r["id"]
             self.log("hub", "sent sequence %s%s to the ESP32 (id %d)" % (seq["name"] or "(unnamed)", " (reversed)" if reverse else "", r["id"]))
             return seq
-        if run and self.backend and self.armed:
-            bad = self._be_check(seq["poses"])
-            if bad:
-                raise ValueError(bad["title"] + ". " + bad["hint"])
         saved, mag = SEQ.to_saved(seq)
         with self.sim_lock:
             self.sim.stop_replay()
@@ -1740,118 +1666,12 @@ class Hub:
                 self.sim.start_replay(wait_arrival=True, once=True)
         if run:
             self.log("hub", "running sequence %s%s once" % (seq["name"] or "(unnamed)", " (reversed)" if reverse else ""))
-            if self.backend and self.armed:
-                self._be_start(seq["poses"])
-            elif self.backend:
-                self.log("hub", "the output is SAFE: only the virtual arm moves")
         return seq
 
-    # ---- the real arm through Sam's backend ---------------------------------------------------------------------------------
-    def _be_busy(self):
-        t = self._be_thread
-        return bool(t and t.is_alive())
-
     def _t(self, seconds):
-        """Waits are longer when a real arm is following: it moves slower than the virtual one."""
-        return seconds * 5 if self.backend else seconds
-
-    def _be_check(self, poses):
-        """A structured error for what the real arm could not do, else None. Checked before anything starts, so nothing moves halfway."""
-        if any(p.get("action") for p in poses) and not self.backend_ignore_magnet:
-            return PRE.err("MAGNET_UNSUPPORTED", "This sequence uses the magnet, but the real arm has no way to switch it",
-                           "Sam's firmware has no magnet switch.", "Use our firmware build, or start the hub with --backend-ignore-magnet to move the real arm without it.")
-        if self._be_busy():
-            return PRE.err("REAL_ARM_BUSY", "The real arm is still moving", "A run on the real arm has not finished.", "Wait for it, or say stop.")
-        return None
-
-    def _be_start(self, poses):
-        """Send poses to the real arm through the backend, in a thread. A problem ends up in self._be_error and ends the virtual run too."""
-        clean = [{"x": p["x"], "y": p["y"], "z": p["z"], "angle": p["angle"], "action": p.get("action")} for p in poses]       # the per-pose speeds are degrees per second for the virtual arm: not used here
-        noop = (lambda on: self.log("hub", "magnet %s (virtual only: no switch on this firmware)" % ("on" if on else "off"))) if self.backend_ignore_magnet else None
-        runner = BC.PoseRunner(self.backend, speed=self.backend_speed, magnet=noop)
-        self._be_error, self._be_runner = None, runner
-
-        def work():
-            try:
-                runner.run(clean)
-                self.log("hub", "real arm: finished %d poses" % len(clean))
-            except BC.BackendError as e:
-                self._be_error = e.as_dict()
-                self.log("hub", "real arm: %s (%s)" % (e.title, e.code))
-                if e.code != "STOPPED":
-                    with self.sim_lock:
-                        self.sim.stop_replay()
-                    self._run_once = None
-            except Exception as e:
-                self._be_error = PRE.err("INTERNAL", "Something went wrong sending the move to the real arm", str(e)[:200], "Check the hub console.")
-                with self.sim_lock:
-                    self.sim.stop_replay()
-                self._run_once = None
-            finally:
-                self._be_runner = None
-        self._be_thread = threading.Thread(target=work, daemon=True)
-        self._be_thread.start()
-        self.log("hub", "real arm: following %d poses through the backend" % len(clean))
-
-    def _be_stop(self):
-        """Stop the run on the real arm and make its target where it is now. A packet already being played still finishes."""
-        if not self.backend:
-            return
-        r = self._be_runner
-        if r:
-            r.stop()
-
-        def hold():                                 # in a thread: an unreachable backend must not delay a stop
-            try:
-                self.backend.hold()
-            except BC.BackendError as e:
-                self.log("hub", "could not tell the backend to hold: %s" % e.title)
-        threading.Thread(target=hold, daemon=True).start()
-
-    BACKEND_MAX_SPEED = 50.0                         # his backend refuses a Speed above its MAX_SPEED (GlobalVariables.py)
-    FOLLOW_HZ, FOLLOW_MM, FOLLOW_DEG = 8.0, 1.0, 1.5     # how often the real arm is told where the virtual one is, and how much it must have moved first
-
-    def _be_summary(self):
-        return dict(self._be_info, speed=self.backend_speed, max_speed=self.BACKEND_MAX_SPEED, follow=self._be_follow)
-
-    def set_backend_speed(self, mm_s):
-        """Tool speed the real arm moves at through the backend (mm/s). Used for the controller, the Home button, the Ask box and sequences."""
-        v = float(mm_s)
-        if not (5.0 <= v <= self.BACKEND_MAX_SPEED):
-            raise ValueError("real arm speed must be 5-%d mm/s (his backend's limit)" % self.BACKEND_MAX_SPEED)
-        self.backend_speed = v
-        self.log("hub", "real arm speed set to %g mm/s" % v)
-
-    def _follow_loop(self):
-        """Live follow. His backend only moves the arm toward the last target it was given, so while ARMED (and no run owns the real arm) the virtual arm's
-        position is posted as that target whenever it has moved: the sticks, the Home button and anything else that moves the virtual arm then move the
-        real one too. Nothing is sent when arming, only once the virtual arm moves; the backend's own checks and speed limit apply to every target."""
-        last, last_err = None, 0.0
-        while not self.stop.is_set():
-            time.sleep(1.0 / self.FOLLOW_HZ)
-            if not self.backend or not self.armed or self._be_busy() or self.mirror["on"]:
-                last, self._be_follow = None, False
-                continue
-            try:
-                with self.sim_lock:
-                    pose = tuple(self.sim.pose())
-                if last is None:
-                    last = pose
-                    continue
-                if math.dist(pose[:3], last[:3]) < self.FOLLOW_MM and abs(pose[3] - last[3]) < self.FOLLOW_DEG:
-                    continue
-                before, last = last, pose
-                self.backend.set_target(pose[0], pose[1], pose[2], pose[3], self.backend_speed)
-                self._be_follow = True
-            except BC.BackendError as e:                # a refused or unreachable target must not stop the loop; say so at most every 5 s
-                if e.code == "BUSY":                    # his backend takes no new target while a packet is being played: send it again on the next tick
-                    last = before
-                    continue
-                if time.time() - last_err > 5.0:
-                    last_err = time.time()
-                    self.log("hub", "real arm: %s %s" % (e.title, e.detail or ""))
-            except Exception as e:
-                self.log("hub", "real arm follow error: %s" % e)
+        """(Used to stretch waits when a real arm was following through the backend, which moved slower than the virtual one. Mirror mode moves the
+        real arm itself, at the virtual arm's own pace, so there is nothing to stretch any more - kept so callers don't need to change.)"""
+        return seconds
 
     def _front_loop(self):
         """Show the front door's arm in the viewer, and keep the controller out while a job runs. The front door (server.py /arm/state) reports its busy flag
@@ -1889,17 +1709,6 @@ class Hub:
                         self.log("hub", "could not show the front door's arm: %s" % e)
             time.sleep(0.1 if self.front_busy else 0.3)
 
-    def _backend_loop(self):
-        while not self.stop.is_set():
-            time.sleep(1.0)
-            if not self.backend:
-                continue
-            try:
-                pos, mv = self.backend.position(), self.backend.movement()
-                self._be_info = {"online": True, "url": self.backend.base, "position": pos, "movement": mv.get("status"), "running": self._be_busy()}
-            except BC.BackendError as e:
-                self._be_info = {"online": False, "url": self.backend.base, "error": e.title, "running": self._be_busy()}
-
     def store_sequence(self, name="", description="", requires=None, ends=None):
         """Write the current sequence to sequences/ on this (host) machine."""
         seq = self.current_sequence(name, description, requires, ends)
@@ -1935,7 +1744,7 @@ class Hub:
                 "logs": {k: list(v)[-80:] for k, v in self.logs.items()}}
 
     def start(self):
-        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop, self._backend_loop, self._follow_loop, self._front_loop):
+        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop, self._front_loop):
             threading.Thread(target=fn, daemon=True).start()
         threading.Thread(target=self._ticker, daemon=True).start()
         threading.Thread(target=self._boot_calibration, daemon=True).start()
@@ -1956,12 +1765,6 @@ class Hub:
         self.emu.stop()
         self.set_forward(True)                      # leave the server as it behaved before the hub existed
         self.link.close()
-
-
-def forward_kin_home(sim):
-    """(x, y, z, tool angle degrees) of the virtual arm's home pose."""
-    from sim.armsim import forward_kin
-    return forward_kin(sim._home_angles(), sim.tool)
 
 
 # a cached port lookup so snapshot() (every second) does not enumerate COM ports each time
@@ -2272,14 +2075,6 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": str(e)})
                 except RuntimeError as e:
                     return self._json(409, {"error": str(e)})
-            if path == "/api/backend":          # the real arm's speed through the backend: {"speed": mm/s}
-                if not HUB.backend:
-                    return self._json(409, {"error": "the hub was started without --backend"})
-                try:
-                    HUB.set_backend_speed(d.get("speed"))
-                    return self._json(200, {"ok": True, "speed": HUB.backend_speed})
-                except (ValueError, TypeError) as e:
-                    return self._json(400, {"error": str(e)})
             if path == "/api/mirror":           # mirror mode: on | off | test (nudge one joint) | map (joint -> channel)
                 try:
                     return self._json(200, {"ok": True, "mirror": HUB.mirror_action(d)})
@@ -2377,17 +2172,10 @@ def main():
     ap.add_argument("--no-https", action="store_true", help="with --lan, do not also serve HTTPS on port+1 (the phone's microphone needs it)")
     ap.add_argument("--send-speed", action="store_true",
                     help="also send the damper to the arm as maxSpeed (needs the modified firmware in firmware/rarm)")
-    ap.add_argument("--backend", default=os.environ.get("BACKEND_URL", ""),
-                    help="Sam's backend (our build, see firmware/ours), e.g. http://127.0.0.1:8000: when the output is ARMED the real arm follows the virtual one through it")
-    ap.add_argument("--mirror", action="store_true", help="start with mirror mode on (the board follows the virtual arm; not together with --backend)")
-    ap.add_argument("--backend-speed", type=float, default=35.0, help="tool speed for the real arm, mm/s (the backend allows up to 50; change it live on the Control page)")
-    ap.add_argument("--backend-ignore-magnet", action="store_true",
-                    help="move the real arm through sequences that use the magnet, without switching it (its firmware has no switch): the virtual magnet still handles the keys")
+    ap.add_argument("--mirror", action="store_true", help="start with mirror mode on (the board follows the virtual arm, doing its own IK)")
     args = ap.parse_args()
     global LAN_TOKEN
-    if args.mirror and args.backend:
-        ap.error("--mirror and --backend both drive the real arm: pick one")
-    HUB = Hub(args.server, send_speed=args.send_speed, backend_url=args.backend or None, backend_speed=args.backend_speed, backend_ignore_magnet=args.backend_ignore_magnet)
+    HUB = Hub(args.server, send_speed=args.send_speed)
     if args.mirror:
         HUB.mirror["on"] = True          # the board follows the virtual arm (with board IK when its sketch supports it) whenever the output is ARMED
         HUB.log("hub", "mirror mode ON at start (--mirror): the real arm follows the virtual arm whenever the output is ARMED")

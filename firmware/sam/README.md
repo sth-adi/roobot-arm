@@ -2,7 +2,7 @@
 
 A verbatim copy of the `Robot Arm Firmware` and `Robot Arm Backend` folders of <https://github.com/Samwally1/UWE-RArm> at commit
 `64216fd` (29 Oct 2026, evening), folders renamed to `firmware/` and `backend/`. His `Documentation` folder (large images and a .docx) is left out. **Do not edit these files.**
-Our changes live elsewhere and are applied on top (see `firmware/ours/`). That repository has no licence file, so confirm with its authors that keeping a copy is fine.
+(There used to be a `firmware/ours/` that patched and ran this backend for driving the real arm - removed now that the board does its own IK in mirror mode, so nothing runs this backend any more. His backend code stays here as a reference: `dashboard/planner.py`'s inverse kinematics is checked against his `motion/kinematics.py`, see `sim/test_planner.py`.) That repository has no licence file, so confirm with its authors that keeping a copy is fine.
 
 How it works (read from the code): the ESP32 asks the backend's `GET /UpdateMovement?s1=&s2=&s3=&s4=` (its joint angles in degrees) for each move. The backend works out the tool position
 (63 mm tool), draws a straight line to the target and answers with a packet: the step count, the interval in milliseconds, then `steps + 1` lines `time_ms/j1/j2/j3/j4` (degrees; the firmware

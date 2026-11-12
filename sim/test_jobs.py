@@ -9,7 +9,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "dashboard"))
 sys.path.insert(0, os.path.join(ROOT, "sim"))
 import assistant as AS  # noqa: E402
-import backend_client as BC  # noqa: E402
 import boxes as B  # noqa: E402
 import contract as C  # noqa: E402
 import fake_receiver as FR  # noqa: E402
@@ -38,14 +37,14 @@ class Arm:
             if self.block:
                 self.block.wait(5)
             if self.stops:
-                raise BC.BackendError("STOPPED", "Stopped")
+                raise LL.BackendError("STOPPED", "Stopped")
             codes = self.fail.get(s["label"])
             if codes:
                 code = codes.pop(0)
                 if isinstance(code, tuple):                       # (code, where the arm is when it fails)
                     code, self.pose = code[0], dict(code[1])
                 if code:
-                    raise BC.BackendError(code, "fault: " + code, "scripted")
+                    raise LL.BackendError(code, "fault: " + code, "scripted")
             self.pose = {k: s[k] for k in ("x", "y", "z", "angle")}
             self.ran.append(s["label"] + (":" + s["action"] if "action" in s else ""))
             if on_step:

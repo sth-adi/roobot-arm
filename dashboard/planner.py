@@ -7,7 +7,9 @@ What it adds to Sam's CompileAnglePacket:
   * a fixed update rate (default 50 Hz, what a hobby servo can follow) instead of 5 steps per mm
   * smooth start and stop (quintic easing) so the arm does not lurch
   * the whole move is stretched in time, never one joint clipped, so that no joint exceeds max_joint_dps: the path stays a straight line, just slower
-Pure Python with no dependencies. firmware/ours/build_backend.py copies it into Sam's backend as motion/safe_planner.py.
+Pure Python with no dependencies. Used locally for reachability checks (teaching a box/tray position, dashboard.boxes.Store) and by the hover-point
+math - independent of how the real arm is driven. (It used to also be copied into "our" build of Sam's backend as motion/safe_planner.py; that build
+and the backend-driving route it supported are gone now that the board does its own IK in mirror mode.)
 """
 import math
 

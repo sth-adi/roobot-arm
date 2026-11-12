@@ -1,4 +1,4 @@
-"""dashboard/lowlevel.py: the sender layer in front of Sam's side (placeholder JSON hand-over and the real HTTP route)."""
+"""dashboard/lowlevel.py: the sender layer, JsonSender (the placeholder JSON hand-over) and the shared BackendError."""
 import os
 import sys
 import threading
@@ -7,7 +7,6 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "dashboard"))
 sys.path.insert(0, os.path.join(ROOT, "sim"))
-import backend_client as BC  # noqa: E402
 import contract as C  # noqa: E402
 import fake_receiver as FR  # noqa: E402
 import lowlevel as LL  # noqa: E402
@@ -43,14 +42,14 @@ class JsonSenderTests(unittest.TestCase):
 
     def test_a_refused_step_ends_the_run_with_the_reason_and_stops_the_arm(self):
         rx = FR.FakeReceiver(refuse_at=2)
-        with self.assertRaises(BC.BackendError) as c:
+        with self.assertRaises(LL.BackendError) as c:
             sender(rx).run(STEPS)
         self.assertEqual((c.exception.code, len(rx.steps)), ("UNREACHABLE", 1))
         self.assertGreaterEqual(rx.stops, 1)
 
     def test_an_error_while_moving_is_reported(self):
         rx = FR.FakeReceiver(fail_at=1)
-        with self.assertRaises(BC.BackendError) as c:
+        with self.assertRaises(LL.BackendError) as c:
             sender(rx).run(STEPS)
         self.assertEqual(c.exception.code, "ARM_STALLED")
 
@@ -60,7 +59,7 @@ class JsonSenderTests(unittest.TestCase):
             now[0] += 1.0
             return now[0]
         rx = FR.FakeReceiver(never_finish=True)
-        with self.assertRaises(BC.BackendError) as c:
+        with self.assertRaises(LL.BackendError) as c:
             LL.JsonSender(http=rx, poll_s=0, sleep=lambda s: None, clock=clock, step_timeout_s=5).run(STEPS)
         self.assertEqual(c.exception.code, "NOT_REACHED")
 
@@ -68,40 +67,22 @@ class JsonSenderTests(unittest.TestCase):
         rx, s = FR.FakeReceiver(busy_polls=10 ** 6), None
         s = sender(rx)
         threading.Timer(0.05, s.stop).start()
-        with self.assertRaises(BC.BackendError) as c:
+        with self.assertRaises(LL.BackendError) as c:
             LL.JsonSender.run(s, STEPS)
         self.assertEqual(c.exception.code, "STOPPED")
 
     def test_malformed_answers(self):
         for ack in (None, [], {}, {"accepted": "yes"}):
-            with self.assertRaises(BC.BackendError):
+            with self.assertRaises(LL.BackendError):
                 sender(lambda m, p, b=None, a=ack: a if p == "/step" else {}).run(STEPS)
 
     def test_nothing_to_run_and_a_bad_step(self):
-        with self.assertRaises(BC.BackendError) as c:
+        with self.assertRaises(LL.BackendError) as c:
             sender(FR.FakeReceiver()).run([])
         self.assertEqual(c.exception.code, "NO_POSES")
-        with self.assertRaises(BC.BackendError) as c:
+        with self.assertRaises(LL.BackendError) as c:
             sender(FR.FakeReceiver()).run([{"x": 1}])
         self.assertEqual(c.exception.code, "BAD_REQUEST")
-
-
-class SamSenderTests(unittest.TestCase):
-    def test_passes_steps_and_progress_to_the_pose_runner(self):
-        class Runner:
-            def __init__(self):
-                self.stopped, self.on_pose = False, None
-            def run(self, poses):
-                for i, p in enumerate(poses):
-                    self.on_pose(i, p)
-            def stop(self):
-                self.stopped = True
-        s, seen = LL.SamSender.__new__(LL.SamSender), []
-        s.runner = Runner()
-        s.run(STEPS, on_step=lambda i, p: seen.append((i, p["z"])))
-        s.stop()
-        self.assertEqual(seen, [(0, 200), (1, 120), (2, 200)])
-        self.assertTrue(s.runner.stopped)
 
 
 if __name__ == "__main__":

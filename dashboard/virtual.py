@@ -6,11 +6,11 @@ import os
 import tempfile
 
 try:
-    import backend_client as BC
     import boxes as B
+    import lowlevel as LL
     import planner as PL
 except ImportError:                                    # imported as dashboard.virtual
-    from dashboard import backend_client as BC, boxes as B, planner as PL
+    from dashboard import boxes as B, lowlevel as LL, planner as PL
 
 
 class VirtualArm:
@@ -24,16 +24,16 @@ class VirtualArm:
         self.stopped = False
         for i, s in enumerate(steps):
             if self.stopped:
-                raise BC.BackendError("STOPPED", "Stopped")
+                raise LL.BackendError("STOPPED", "Stopped")
             if s["label"] == self.stall:
                 self.stall = None
-                raise BC.BackendError("ARM_STALLED", "A joint stalled", "scripted for the demo")
+                raise LL.BackendError("ARM_STALLED", "A joint stalled", "scripted for the demo")
             a = (self.pose["x"], self.pose["y"], self.pose["z"], math.radians(self.pose["angle"]))
             b = (s["x"], s["y"], s["z"], math.radians(s["angle"]))
             try:
                 self.t += PL.plan(a, b, speed_mm_s=s["speed"])["duration"]
             except PL.PlanError as e:
-                raise BC.BackendError(e.code, e.title, e.detail)
+                raise LL.BackendError(e.code, e.title, e.detail)
             self.pose = {k: s[k] for k in ("x", "y", "z", "angle")}
             if on_step:
                 on_step(i, s)

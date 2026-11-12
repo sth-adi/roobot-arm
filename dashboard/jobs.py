@@ -9,7 +9,7 @@ sender (lowlevel.py) one list at a time, and every step reached is reported as a
 
 When a step fails:
   * hard faults (the link is down, a stop, a planner refusal, a joint limit ...) are NEVER handed to the AI: the job fails with the reason
-  * soft faults (a step not reached in time, a stall, the backend busy) become a failure report. The AI (assistant.recover) picks ONE action from
+  * soft faults (a step not reached in time, a stall, the low-level side busy) become a failure report. The AI (assistant.recover) picks ONE action from
     contract.RECOVERY_MENU; if there is no AI, no network or its answer does not fit, a fixed rule table (assistant.rule_recovery) picks.
     Retries are capped per step (max_retries); the AI cannot raise the cap. Code checks the choice is allowed right now and does the maths:
         retry_step            run the failed step and the rest again
@@ -24,11 +24,11 @@ import uuid
 
 try:
     import assistant as AS
-    import backend_client as BC
     import contract as C
+    import lowlevel as LL
     import routes as R
 except ImportError:                                    # imported as dashboard.jobs
-    from dashboard import assistant as AS, backend_client as BC, contract as C, routes as R
+    from dashboard import assistant as AS, contract as C, lowlevel as LL, routes as R
 
 SOFT = {"NOT_REACHED", "ARM_STALLED", "BUSY", "BAD_ANSWER"}      # the only faults the AI is asked about
 NEAR_MM = 15.0                                                   # "over the tray" means within this distance in x and y
@@ -158,7 +158,7 @@ class JobRunner:
                 self.sender.run(steps[state["done"]:], job, reached(state["done"]))
                 self._emit(job, "done", n, n, "Done")
                 return
-            except BC.BackendError as e:
+            except LL.BackendError as e:
                 if self._stop or e.code == "STOPPED":
                     self._emit(job, "stopped", state["done"], n, "Stopped")
                     return
@@ -234,7 +234,7 @@ class JobRunner:
             self._emit(job, "running", i, n, "Recovering: " + act.replace("_", " "))
             if extra:
                 self.sender.run(extra, job, None)
-        except (R.RouteError, BC.BackendError) as e2:
+        except (R.RouteError, LL.BackendError) as e2:
             self._emit(job, "failed", i, n, "Recovery failed: " + e2.title, dict(err, recovery=act, recovery_error=e2.title))
             return False
         except Exception as e2:

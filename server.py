@@ -44,9 +44,10 @@ dispatched directly and never calls the AI. The "/arm/" prefix names that shared
                      tip is now (or x,y,z) | {"action":"home"} | {"action":"constant","name","value"} | {"action":"key","which":1|2|3,"where":"box"|"tray"|"unknown"}
                      corrects where a key is believed to be | {"action":"preview","kind":"fetch"|"return","key":n} shows the route and its time without
                      moving | {"action":"list"}      GET /arm/boxes   what is saved, where each key is, and what is still missing
-  --ai virtual (default) moves a pretend arm only; --ai backend drives the real arm through Sam's backend (--backend-url); --ai off disables the routes.
+  --ai virtual (default) moves a pretend arm only; --ai off disables the routes. Nothing here drives the real arm yet (that is mirror mode, in
+  dashboard/hub.py: the board does its own IK from a tool-tip pose).
 
-Run:  python server.py [--host 0.0.0.0] [--port 8000] [--forward-url http://host:port/path] [--ai virtual|backend|off] [--backend-url http://127.0.0.1:8001]
+Run:  python server.py [--host 0.0.0.0] [--port 8000] [--forward-url http://host:port/path] [--ai virtual|off]
 """
 import argparse
 import hashlib
@@ -253,29 +254,17 @@ def _forward_once(last_count, neutral_sent):
     return last_count, neutral_sent
 
 
-def make_front(mode, backend_url="http://127.0.0.1:8001"):
-    """Build the AI front door. virtual: a pretend arm and a demo layout of boxes (nothing real can move). backend: the real arm through Sam's backend
-    with the boxes taught and saved in .boxes.json (nothing moves until they are). Returns None for 'off'."""
+def make_front(mode):
+    """Build the arm's front door. virtual: a pretend arm and a demo layout of boxes (nothing real can move). Returns None for 'off'.
+    (There used to be a 'backend' mode here that drove the real arm through Sam's HTTP backend - removed now that the board does its own IK in mirror
+    mode. Nothing in this front door drives the real arm yet; that still goes through dashboard/hub.py's mirror mode.)"""
     if mode == "off":
         return None
     sys.path.insert(0, os.path.join(ROOT, "dashboard"))
     import interface
-    if mode == "virtual":
-        import virtual
-        arm = virtual.VirtualArm()
-        return interface.Frontdoor(virtual.demo_store(), arm, arm.get_pose)
-    import backend_client as BC
-    import boxes
-    import lowlevel
-    client = BC.BackendClient(backend_url)
-
-    def pose():
-        try:
-            p = client.position()
-        except BC.BackendError:
-            return None
-        return {"x": p["x"], "y": p["y"], "z": p["z"], "angle": p["a"]} if p and (p.get("age_s") is None or p["age_s"] < 3.0) else None
-    return interface.Frontdoor(boxes.Store(), lowlevel.SamSender(client), pose)
+    import virtual
+    arm = virtual.VirtualArm()
+    return interface.Frontdoor(virtual.demo_store(), arm, arm.get_pose)
 
 
 def _door(method, path, body=b""):
@@ -283,7 +272,7 @@ def _door(method, path, body=b""):
     only the latter ever reaches the AI (see interface.Frontdoor), so this is not "ask the AI", it's "ask the arm"."""
     door = _front["door"]
     if door is None:
-        return 503, {"error": "the arm's front door is not running (start the server with --ai virtual or --ai backend)"}
+        return 503, {"error": "the arm's front door is not running (start the server with --ai virtual)"}
     import interface
     return interface.handle_http(door, method, path[len("/arm"):] or "/", body)
 
@@ -510,12 +499,11 @@ def main():
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--forward-url", default=os.environ.get("FORWARD_URL"),
                    help="also POST each received state to this URL (env: FORWARD_URL)")
-    p.add_argument("--ai", choices=("virtual", "backend", "off"), default="virtual",
-                   help="the AI front door: virtual = a pretend arm (default), backend = the real arm through Sam's backend, off")
-    p.add_argument("--backend-url", default="http://127.0.0.1:8001", help="Sam's backend, for --ai backend")
+    p.add_argument("--ai", choices=("virtual", "off"), default="virtual",
+                   help="the arm's front door: virtual = a pretend arm (default), off = disabled. Nothing here drives the real arm yet - that's mirror mode, in dashboard/hub.py")
     args = p.parse_args()
-    _front["door"], _front["mode"] = make_front(args.ai, args.backend_url), args.ai
-    print("AI front door: %s" % {"virtual": "virtual arm (nothing real can move)", "backend": "the real arm through " + args.backend_url, "off": "off"}[args.ai])
+    _front["door"], _front["mode"] = make_front(args.ai), args.ai
+    print("Arm's front door: %s" % {"virtual": "virtual arm (nothing real can move)", "off": "off"}[args.ai])
     if args.forward_url:
         _fwd["url"] = args.forward_url
         threading.Thread(target=_forward_worker, daemon=True).start()

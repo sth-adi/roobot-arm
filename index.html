@@ -159,9 +159,7 @@
         <label for="KeySelect">Choose a key:</label>
 
         <select name="KeySelect" id="KeySelect" class="KeyDropdown">
-            <option value="1">Key 1</option>
-            <option value="2">Key 2</option>
-            <option value="3">Key 3</option>
+            <option value="" disabled>Loading...</option>
         </select>
 
         <button
@@ -177,9 +175,7 @@
         <label for="KeyReturn">Choose a key:</label>
 
         <select name="KeyReturn" id="KeyReturn" class="KeyDropdown">
-            <option value="1">Key 1</option>
-            <option value="2">Key 2</option>
-            <option value="3">Key 3</option>
+            <option value="" disabled>Loading...</option>
         </select>
 
         <button
@@ -268,13 +264,66 @@
     // The Request Key / Return Key buttons: the number (1, 2 or 3) chosen in the dropdown is the action's key.
     // These are buttons, not typed text, so they never go near the AI - they dispatch straight away.
     function CollectKey() {
-        const key = Number(document.getElementById("KeySelect").value);
-        armSend({ action: "fetch", key: key });
+        const select = document.getElementById("KeySelect");
+        if (!select.value) { showReply({ kind: "error", message: "No key is currently available to fetch." }); return; }
+        armSend({ action: "fetch", key: Number(select.value) });
     }
 
     function ReturnKey() {
-        const key = Number(document.getElementById("KeyReturn").value);
-        armSend({ action: "return", key: key });
+        const select = document.getElementById("KeyReturn");
+        if (!select.value) { showReply({ kind: "error", message: "No key is currently out to return." }); return; }
+        armSend({ action: "return", key: Number(select.value) });
+    }
+
+    // ===== Keeping the two dropdowns honest =====================================================
+    // GET /arm/state reports where each key is believed to be ({"1":"box","2":"tray","3":"unknown"}, from
+    // dashboard/boxes.Store, persisted and survives a restart). "Request Key" only ever offers keys that are
+    // in their box (fetchable); "Return Key" only ever offers keys that are NOT in their box (out, so
+    // returnable). Rebuilt only when the key state actually changes, so an open dropdown doesn't jump around.
+    let lastKeyState = null;
+
+    function fillKeyDropdown(select, keyNumbers, emptyLabel) {
+        const current = select.value;
+        select.innerHTML = "";
+        if (keyNumbers.length === 0) {
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = emptyLabel || "None available";
+            opt.disabled = true;
+            select.appendChild(opt);
+            return;
+        }
+        for (const k of keyNumbers) {
+            const opt = document.createElement("option");
+            opt.value = k;
+            opt.textContent = "Key " + k;
+            select.appendChild(opt);
+        }
+        if (keyNumbers.includes(current)) { select.value = current; }
+    }
+
+    function sameKeyState(a, b) {
+        if (!a || !b) { return false; }
+        const ak = Object.keys(a), bk = Object.keys(b);
+        return ak.length === bk.length && ak.every(k => a[k] === b[k]);
+    }
+
+    async function refreshKeyDropdowns() {
+        let keys = {};
+        let reachable = true;
+        try {
+            const response = await fetch("/arm/state");
+            reachable = response.status !== 503;
+            if (response.ok) { keys = (await response.json()).keys || {}; }
+        } catch (error) {
+            reachable = false;
+        }
+        if (reachable && sameKeyState(keys, lastKeyState)) { return; }      // nothing changed, don't disturb an open dropdown
+        lastKeyState = reachable ? keys : null;                            // force a re-check once the front door comes back
+        const numbers = Object.keys(keys).sort();
+        const emptyLabel = reachable ? "None available" : "Front door offline";
+        fillKeyDropdown(document.getElementById("KeySelect"), numbers.filter(k => keys[k] === "box"), emptyLabel);
+        fillKeyDropdown(document.getElementById("KeyReturn"), numbers.filter(k => keys[k] !== "box"), emptyLabel);
     }
 
     function stopArm() {
@@ -313,6 +362,8 @@
 
     pollJob();
     setInterval(pollJob, 1000);
+    refreshKeyDropdowns();
+    setInterval(refreshKeyDropdowns, 2000);
     // ===== end of the arm's front door ================================================================
 
     // Send a JSON command to the Python server.

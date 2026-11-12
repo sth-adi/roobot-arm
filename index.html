@@ -131,7 +131,7 @@
         </button>
     </section>
 
-    <section class="panel" id="TypedCommand">
+    <section class="panel" id="TypedCommandPanel">
         <h2>Typed Command</h2>
 
         <label for="commandInput">Enter your command for our ai assistant:</label>
@@ -266,11 +266,13 @@
 
     // The Request Key / Return Key buttons: the number (1, 2 or 3) chosen in the dropdown goes to the assistant.
     function CollectKey() {
-        aiSend({ action: "fetch", key: Number(document.getElementById("KeySelect").value) });
+        const selectedCar = document.getElementById("KeySelect").value;
+        sendCommand("request_key:" + selectedCar);
     }
 
     function ReturnKey() {
-        aiSend({ action: "return", key: Number(document.getElementById("KeyReturn").value) });
+        const selectedCar = document.getElementById("KeyReturn").value;
+        sendCommand("return_key:" + selectedCar);
     }
 
     function stopArm() {

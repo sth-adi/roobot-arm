@@ -153,10 +153,8 @@
         <p id="job" role="status" aria-live="polite">No job yet.</p>
     </section>
 
-    <section class="panel" id="KeyRequest">
+    <section class="panel" id="KeyRequestPanel">
         <h2>Request Key</h2>
-
-        <img src="Noah.png">
 
         <label for="KeySelect">Choose a key:</label>
 
@@ -168,17 +166,17 @@
 
         <button
             class="collect"
-            onclick="fetchKey()">
+            onclick="CollectKey()">
             Request Key
         </button>
     </section>
 
-    <section class="panel" id="KeyReturn">
+    <section class="panel" id="KeyReturnPanel">
         <h2>Return Key</h2>
 
-        <label for="KeyReturnSelect">Choose a key:</label>
+        <label for="KeyReturn">Choose a key:</label>
 
-        <select name="KeyReturnSelect" id="KeyReturnSelect" class="KeyDropdown">
+        <select name="KeyReturn" id="KeyReturn" class="KeyDropdown">
             <option value="1">Key 1</option>
             <option value="2">Key 2</option>
             <option value="3">Key 3</option>
@@ -186,7 +184,7 @@
 
         <button
             class="return"
-            onclick="returnKey()">
+            onclick="ReturnKey()">
             Return Key
         </button>
     </section>
@@ -266,12 +264,13 @@
         aiSend(yes ? { confirm: pendingToken } : { cancel: pendingToken });
     }
 
-    function fetchKey() {
+    // The Request Key / Return Key buttons: the number (1, 2 or 3) chosen in the dropdown goes to the assistant.
+    function CollectKey() {
         aiSend({ action: "fetch", key: Number(document.getElementById("KeySelect").value) });
     }
 
-    function returnKey() {
-        aiSend({ action: "return", key: Number(document.getElementById("KeyReturnSelect").value) });
+    function ReturnKey() {
+        aiSend({ action: "return", key: Number(document.getElementById("KeyReturn").value) });
     }
 
     function stopArm() {
@@ -394,7 +393,8 @@
         try {
             const response = await fetch("/controller");
 
-            if (!response.ok) {
+            // Does not report as Offline if the server goes down and refresh status is pressed. Needs fixing.
+            if (response.status == 404) {
                 throw new Error("HTTP " + response.status);
             }
 

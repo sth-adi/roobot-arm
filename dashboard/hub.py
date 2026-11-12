@@ -1255,7 +1255,8 @@ class Hub:
         return {"messages": [m for m in self.chat if m["id"] > since], "state": self.task.get("state", "idle"),
                 "ai": "groq" if AGENT.api_key() else "keywords", "voice": VOICE.available()}
 
-    # ---- the AI front door (server.py /ai/...): typed and spoken requests go there when it is running ----
+    # ---- the arm's front door (server.py /arm/...): typed/spoken requests AND buttons both go there when it is running; only typed/spoken
+    # requests ever reach the AI (a button already names its action) ----
     def _front(self, path, body=None, timeout=4.0):
         """(status, dict) from the input server's front door, or None when it is not there (old server, not running, --ai off)."""
         req = urllib.request.Request(self.server + path, data=None if body is None else json.dumps(body).encode(), method="GET" if body is None else "POST",
@@ -1275,7 +1276,7 @@ class Hub:
 
     def _front_ask(self, request):
         """Send the words to the front door and show what it said in the chat. True when it handled the request, False to use the old path."""
-        got = self._front("/ai/request", {"v": 1, "id": "hub%d" % Hub._chat_seq, "text": request})
+        got = self._front("/arm/request", {"v": 1, "id": "hub%d" % Hub._chat_seq, "text": request})
         if got is None:
             return False
         code, r = got
@@ -1295,7 +1296,7 @@ class Hub:
         """Watch one job and put its news in the chat: retries and recovery as they happen, then the final result."""
         seen, end = None, time.time() + 900
         while time.time() < end:
-            got = self._front("/ai/job")
+            got = self._front("/arm/job")
             if got and got[0] == 200 and got[1].get("job") == job:
                 j = got[1]
                 msg = j.get("message") or ""
@@ -1316,13 +1317,13 @@ class Hub:
         self.chat_add("error", "Lost track of the job (no result after 15 minutes).", state="failed")
 
     def ask(self, request):
-        """Start a task from plain language. With the AI front door running (server.py /ai/...) the words go there: the AI chooses from a fixed menu and
-        the route is calculated from the stored coordinates. Without it, the old way: make sure the arm is at home grip, pick a sequence, run it once."""
+        """Start a task from plain language. With the arm's front door running (server.py /arm/...) the words go there: the AI chooses from a fixed menu
+        and the route is calculated from the stored coordinates. Without it, the old way: make sure the arm is at home grip, pick a sequence, run it once."""
         request = str(request).strip()[:500]
         if not request:
             raise ValueError("say what you want done")
         if PRE.is_stop(request):                       # first, before any busy check, AI or network call
-            self._front("/ai/stop", {})                # best effort: the front door's own job stops too
+            self._front("/arm/stop", {})                # best effort: the front door's own job stops too
             return self._stop_now(request)
         if self._front_ask(request):
             return
@@ -1853,11 +1854,11 @@ class Hub:
                 self.log("hub", "real arm follow error: %s" % e)
 
     def _front_loop(self):
-        """Show the AI front door's arm in the viewer, and keep the controller out while a job runs. The front door (server.py /ai/state) reports its busy flag
+        """Show the front door's arm in the viewer, and keep the controller out while a job runs. The front door (server.py /arm/state) reports its busy flag
         and the tool-tip pose; while its job runs, and once after it ends, the virtual arm is put at that pose (inverse kinematics, display only).
         NOT while the real arm is ARMED: the virtual arm is what the board follows in mirror mode, and a pretend arm must never drive the real one."""
         while not self.stop.is_set():
-            got = self._front("/ai/state", timeout=1.0)
+            got = self._front("/arm/state", timeout=1.0)
             if got is None or got[0] != 200:
                 self.front_busy = False
                 time.sleep(2.0)                         # no front door: look again now and then

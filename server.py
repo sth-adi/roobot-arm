@@ -30,17 +30,20 @@ Sequences and arm state (our firmware; the stock firmware never asks for them):
 Optionally forwards every received state to another server (--forward-url or
 the FORWARD_URL env var); /state then also reports forwarding status.
 
-The page and the AI front door (Terra's index.html asks for these; the shapes are the placeholders in dashboard/contract.py):
+The page and the arm's front door (Terra's index.html asks for these; the shapes are the placeholders in dashboard/contract.py). Both buttons and
+typed/spoken text go through this SAME front door, but only typed/spoken text ever reaches the AI: a button already names its action, so it is
+dispatched directly and never calls the AI. The "/arm/" prefix names that shared door, not "ask the AI":
   GET  /, /index.html   the page          GET /Noah.png   its picture
-  POST /ai/request   {"v":1,"id":"..","text":".."} typed or spoken words | {"action":"fetch"|"return"|"home"|"stop","key":1-3} a button |
+  POST /arm/request  {"v":1,"id":"..","text":".."} typed or spoken words | {"action":"fetch"|"return"|"home"|"stop","key":1-3} a button |
                      {"confirm": token} / {"cancel": token}; the answer says what was understood and what happens (kind: started | confirm | answer |
                      question | stopped | error). Free text goes to the AI, which only chooses from a fixed menu; a movement it chose is confirmed first.
-  GET  /ai/job       the latest job status {"status": queued|running|done|failed|stopped, "step", "of", "message", "error", "led"}
-  GET  /ai/state     where the keys are, whether the arm is busy       POST /ai/stop   stop (never delayed)
-  POST /ai/teach     setting up (never moves the arm): {"action":"where"} | {"action":"save","which":1|2|3|"tray","size":{"w","d","h"}} saves where the
+                     A button's "action" is dispatched straight away and never goes near the AI.
+  GET  /arm/job      the latest job status {"status": queued|running|done|failed|stopped, "step", "of", "message", "error", "led"}
+  GET  /arm/state    where the keys are, whether the arm is busy       POST /arm/stop   stop (never delayed)
+  POST /arm/teach    setting up (never moves the arm): {"action":"where"} | {"action":"save","which":1|2|3|"tray","size":{"w","d","h"}} saves where the
                      tip is now (or x,y,z) | {"action":"home"} | {"action":"constant","name","value"} | {"action":"key","which":1|2|3,"where":"box"|"tray"|"unknown"}
                      corrects where a key is believed to be | {"action":"preview","kind":"fetch"|"return","key":n} shows the route and its time without
-                     moving | {"action":"list"}      GET /ai/boxes   what is saved, where each key is, and what is still missing
+                     moving | {"action":"list"}      GET /arm/boxes   what is saved, where each key is, and what is still missing
   --ai virtual (default) moves a pretend arm only; --ai backend drives the real arm through Sam's backend (--backend-url); --ai off disables the routes.
 
 Run:  python server.py [--host 0.0.0.0] [--port 8000] [--forward-url http://host:port/path] [--ai virtual|backend|off] [--backend-url http://127.0.0.1:8001]
@@ -64,8 +67,8 @@ def server_stamp(path=None):
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY = 64 * 1024
-MAX_AI_BODY = 8 * 1024
-_front = {"door": None, "mode": "off"}       # the AI front door (dashboard/interface.py), built by main() / make_front()
+MAX_DOOR_BODY = 8 * 1024
+_front = {"door": None, "mode": "off"}       # the arm's front door (dashboard/interface.py), built by main() / make_front() - buttons and AI requests both go through it
 STALE_S = 1.5   # no input newer than this = the sender is gone
 
 _cmd = {"command": None, "received_at": None, "count": 0}  # latest command from index.html (POST /controller)
@@ -275,13 +278,14 @@ def make_front(mode, backend_url="http://127.0.0.1:8001"):
     return interface.Frontdoor(boxes.Store(), lowlevel.SamSender(client), pose)
 
 
-def _ai(method, path, body=b""):
-    """(status, dict) for a /ai/... route; 503 when the front door is off."""
+def _door(method, path, body=b""):
+    """(status, dict) for a /arm/... route; 503 when the front door is off. Handles buttons and typed/spoken text alike -
+    only the latter ever reaches the AI (see interface.Frontdoor), so this is not "ask the AI", it's "ask the arm"."""
     door = _front["door"]
     if door is None:
-        return 503, {"error": "the AI front door is not running (start the server with --ai virtual or --ai backend)"}
+        return 503, {"error": "the arm's front door is not running (start the server with --ai virtual or --ai backend)"}
     import interface
-    return interface.handle_http(door, method, path[len("/ai"):] or "/", body)
+    return interface.handle_http(door, method, path[len("/arm"):] or "/", body)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -344,8 +348,8 @@ class Handler(BaseHTTPRequestHandler):
             self._file("index.html", "text/html; charset=utf-8")
         elif self.path == "/Noah.png":
             self._file("Noah.png", "image/png")
-        elif self.path.startswith("/ai/") or self.path == "/ai":
-            self._send(*_ai("GET", self.path))
+        elif self.path.startswith("/arm/") or self.path == "/arm":
+            self._send(*_door("GET", self.path))
         elif self.path == "/stream":
             self._stream()
         elif self.path == "/health":
@@ -397,14 +401,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, {"error": "forbidden"})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return self._send(200, {"ok": True})
-        if self.path.startswith("/ai/"):
+        if self.path.startswith("/arm/"):
             try:
                 n = int(self.headers.get("Content-Length", 0))
             except ValueError:
                 n = -1
-            if not 0 <= n <= MAX_AI_BODY:
+            if not 0 <= n <= MAX_DOOR_BODY:
                 return self._send(413, {"error": "body too large"})
-            return self._send(*_ai("POST", self.path, self.rfile.read(n)))
+            return self._send(*_door("POST", self.path, self.rfile.read(n)))
         if self.path not in ("/input", "/control", "/controller", "/status", "/calibration", "/sequence", "/armstate"):
             return self._send(404, {"error": "not found"})
         try:

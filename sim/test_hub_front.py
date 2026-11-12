@@ -1,4 +1,4 @@
-"""The hub's chat and voice text go through the AI front door on the input server (server.py /ai/...), and fall back to the old path without it."""
+"""The hub's chat and voice text go through the arm's front door on the input server (server.py /arm/...), and fall back to the old path without it."""
 import os
 import sys
 import threading

@@ -206,17 +206,18 @@
 </main>
 
 <script>
-    // ===== The AI front door (server.py, routes under /ai/) =====================================
-    // Every call to the assistant is in this block. The message shapes are PLACEHOLDERS (see dashboard/contract.py
-    // in the repository): if they change, change this block only.
-    //   POST /ai/request {v, id, text}            typed words: the assistant chooses what to do
-    //   POST /ai/request {v, id, action, key}     a button: action is "fetch", "return", "home" or "stop"
-    //   POST /ai/request {confirm: token}         yes to "Fetch key 2?"   ({cancel: token} is no)
-    //   GET  /ai/job                              progress: {status, step, of, message, error}
+    // ===== The arm's front door (server.py, routes under /arm/) =====================================
+    // Buttons and typed/spoken words BOTH go through this block, to the same door - only typed words ever reach
+    // the AI (a button already names its action, so it skips straight to doing it). The message shapes are
+    // PLACEHOLDERS (see dashboard/contract.py in the repository): if they change, change this block only.
+    //   POST /arm/request {v, id, text}            typed words: the assistant chooses what to do
+    //   POST /arm/request {v, id, action, key}     a button: action is "fetch", "return", "home" or "stop" (no AI call)
+    //   POST /arm/request {confirm: token}         yes to "Fetch key 2?"   ({cancel: token} is no)
+    //   GET  /arm/job                              progress: {status, step, of, message, error}
     let pendingToken = null;
 
-    async function aiPost(body) {
-        const response = await fetch("/ai/request", {
+    async function armPost(body) {
+        const response = await fetch("/arm/request", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(Object.assign({ v: 1, id: "page" + Date.now() }, body))
@@ -224,7 +225,7 @@
         let data = null;
         try { data = await response.json(); } catch (e) { /* no JSON body */ }
         if (response.status === 503) {
-            return { kind: "error", message: "The assistant is not running on the server." };
+            return { kind: "error", message: "The arm's front door is not running on the server." };
         }
         return data || { kind: "error", message: "The server answered HTTP " + response.status + "." };
     }
@@ -238,9 +239,9 @@
         document.getElementById("confirmRow").hidden = pendingToken === null;
     }
 
-    async function aiSend(body) {
+    async function armSend(body) {
         try {
-            showReply(await aiPost(body));
+            showReply(await armPost(body));
         } catch (error) {
             showReply({ kind: "error", message: "Could not reach the server: " + error.message });
         }
@@ -255,28 +256,29 @@
             return;
         }
 
-        await aiSend({ text: text });
+        await armSend({ text: text });
         input.value = "";
     }
 
     function answerConfirm(yes) {
         if (pendingToken === null) { return; }
-        aiSend(yes ? { confirm: pendingToken } : { cancel: pendingToken });
+        armSend(yes ? { confirm: pendingToken } : { cancel: pendingToken });
     }
 
-    // The Request Key / Return Key buttons: the number (1, 2 or 3) chosen in the dropdown goes to the assistant.
+    // The Request Key / Return Key buttons: the number (1, 2 or 3) chosen in the dropdown is the action's key.
+    // These are buttons, not typed text, so they never go near the AI - they dispatch straight away.
     function CollectKey() {
-        const selectedCar = document.getElementById("KeySelect").value;
-        sendCommand("request_key:" + selectedCar);
+        const key = Number(document.getElementById("KeySelect").value);
+        armSend({ action: "fetch", key: key });
     }
 
     function ReturnKey() {
-        const selectedCar = document.getElementById("KeyReturn").value;
-        sendCommand("return_key:" + selectedCar);
+        const key = Number(document.getElementById("KeyReturn").value);
+        armSend({ action: "return", key: key });
     }
 
     function stopArm() {
-        aiSend({ action: "stop" });
+        armSend({ action: "stop" });
     }
 
     // Progress of the latest job, every second.
@@ -284,7 +286,7 @@
         const line = document.getElementById("job");
 
         try {
-            const response = await fetch("/ai/job");
+            const response = await fetch("/arm/job");
 
             if (response.status === 404) {
                 line.textContent = "No job yet.";
@@ -311,7 +313,7 @@
 
     pollJob();
     setInterval(pollJob, 1000);
-    // ===== end of the AI front door ================================================================
+    // ===== end of the arm's front door ================================================================
 
     // Send a JSON command to the Python server.
     async function sendCommand(command) {

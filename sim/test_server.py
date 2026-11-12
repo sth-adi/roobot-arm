@@ -225,8 +225,8 @@ class StretchTest(unittest.TestCase):
         self.assertEqual(wait, 0.0)
 
 
-class PageAndAi(unittest.TestCase):
-    """The page (/, /Noah.png) and the AI front door routes (/ai/...)."""
+class PageAndArm(unittest.TestCase):
+    """The page (/, /Noah.png) and the arm's front door routes (/arm/...) - buttons and typed text both go through them, only typed text reaches the AI."""
     @classmethod
     def setUpClass(cls):
         cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
@@ -261,35 +261,35 @@ class PageAndAi(unittest.TestCase):
 
     def test_routes_say_so_when_the_front_door_is_off(self):
         server._front["door"] = None
-        self.assertEqual(self.call("/ai/state")[0], 503)
-        self.assertEqual(self.call("/ai/request", {"action": "stop"})[0], 503)
+        self.assertEqual(self.call("/arm/state")[0], 503)
+        self.assertEqual(self.call("/arm/request", {"action": "stop"})[0], 503)
 
     def test_a_button_and_the_status_go_through_the_virtual_arm(self):
         server._front["door"] = server.make_front("virtual")
-        code, body, _ = self.call("/ai/request", {"v": 1, "id": "t", "action": "fetch", "key": 2})
+        code, body, _ = self.call("/arm/request", {"v": 1, "id": "t", "action": "fetch", "key": 2})
         r = json.loads(body)
         self.assertEqual((code, r["kind"], r["by"]), (200, "started", "button"))
         server._front["door"].runner.wait(20)
-        code, body, _ = self.call("/ai/job")
+        code, body, _ = self.call("/arm/job")
         self.assertEqual((code, json.loads(body)["status"]), (200, "done"))
-        self.assertEqual(json.loads(self.call("/ai/state")[1])["keys"]["2"], "tray")
+        self.assertEqual(json.loads(self.call("/arm/state")[1])["keys"]["2"], "tray")
 
     def test_typed_text_is_confirmed_before_anything_moves(self):
         door = server._front["door"] = server.make_front("virtual")
         door.decide = lambda text, state: {"action": "fetch_key", "key": 3, "by": "keywords"}
-        r = json.loads(self.call("/ai/request", {"v": 1, "id": "t", "text": "get key three"})[1])
+        r = json.loads(self.call("/arm/request", {"v": 1, "id": "t", "text": "get key three"})[1])
         self.assertEqual(r["kind"], "confirm")
         self.assertEqual(door.runner.last, None)
-        r = json.loads(self.call("/ai/request", {"confirm": r["token"]})[1])
+        r = json.loads(self.call("/arm/request", {"confirm": r["token"]})[1])
         self.assertEqual(r["kind"], "started")
         door.runner.wait(20)
 
     def test_bad_input_is_a_clear_error_and_big_bodies_are_refused(self):
         server._front["door"] = server.make_front("virtual")
-        self.assertEqual(self.call("/ai/request", b"not json")[0], 400)
-        self.assertEqual(self.call("/ai/request", {"text": ""})[0], 400)
-        self.assertEqual(self.call("/ai/request", b"x" * 9000)[0], 413)
-        self.assertEqual(self.call("/ai/nowhere")[0], 404)
+        self.assertEqual(self.call("/arm/request", b"not json")[0], 400)
+        self.assertEqual(self.call("/arm/request", {"text": ""})[0], 400)
+        self.assertEqual(self.call("/arm/request", b"x" * 9000)[0], 413)
+        self.assertEqual(self.call("/arm/nowhere")[0], 404)
 
     def test_the_old_controller_routes_still_work(self):
         self.assertEqual(self.call("/controller", {"command": "stop"})[0], 200)

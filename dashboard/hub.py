@@ -44,7 +44,7 @@ STATIC = HERE / "static"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 from serial_link import SerialLink, BUTTON_ORDER  # noqa: E402
-from sim.armsim import ArmSim, STALE_S, internal_from_wire, wire_from_internal  # noqa: E402
+from sim.armsim import ArmSim, STALE_S, internal_from_wire, wire_from_internal, inverse_kin, forward_kin  # noqa: E402
 from emu_runner import EmuRunner  # noqa: E402
 from stamp import code_stamp  # noqa: E402
 from sim.workcell import Workcell  # noqa: E402
@@ -133,6 +133,8 @@ class Hub:
         self._cal_synced = False
         self.emu = EmuRunner(self.server, self.log)   # emulated ESP32 + network (Control page)
         self._prev_y = False
+        self.front_busy = False                 # the AI front door has a job running: the controller is ignored until it ends (see _front_loop)
+        self._front_seen, self._front_note = None, 0.0
         self._run_once = None
         self._esp = None                        # (state dict, time) last report of our firmware via the server's /armstate
         self._esp_run = None                    # id of the sequence the ESP is running for us
@@ -267,7 +269,9 @@ class Hub:
             now = time.monotonic()
             dt, last = now - last, now
             wire = self.latest_wire if (self.latest_wire is not None and time.time() - self.latest_recv < STALE_S) else None
-            if wire is None and self.sim.latched:
+            if self.front_busy:
+                wire = None                             # the AI's job owns the arm: the controller is only for setting up, so it cannot take over or start anything
+            elif wire is None and self.sim.latched:
                 wire = dict(IDLE_WIRE)                  # a started replay runs on without any controller input
             try:
                 with self.sim_lock:
@@ -1848,6 +1852,42 @@ class Hub:
             except Exception as e:
                 self.log("hub", "real arm follow error: %s" % e)
 
+    def _front_loop(self):
+        """Show the AI front door's arm in the viewer, and keep the controller out while a job runs. The front door (server.py /ai/state) reports its busy flag
+        and the tool-tip pose; while its job runs, and once after it ends, the virtual arm is put at that pose (inverse kinematics, display only).
+        NOT while the real arm is ARMED: the virtual arm is what the board follows in mirror mode, and a pretend arm must never drive the real one."""
+        while not self.stop.is_set():
+            got = self._front("/ai/state", timeout=1.0)
+            if got is None or got[0] != 200:
+                self.front_busy = False
+                time.sleep(2.0)                         # no front door: look again now and then
+                continue
+            st = got[1]
+            self.front_busy = bool(st.get("busy"))
+            pose = st.get("pose")
+            if pose and (self.front_busy or pose != self._front_seen):
+                if self.armed:
+                    if time.time() - self._front_note > 30.0:
+                        self._front_note = time.time()
+                        self.log("hub", "the front door's arm is not shown while the real arm is ARMED (the virtual arm is what the board follows)")
+                else:
+                    try:
+                        with self.sim_lock:
+                            g = inverse_kin((pose["x"], pose["y"], pose["z"], pose["angle"]), self.sim.angles, self.sim.limits, self.sim.tool)
+                            if g is not None:
+                                self.sim.angles = tuple(g)
+                                if self.sim.model == "stock":                       # the stock-firmware model keeps its own target as well
+                                    self.sim._t_ang = tuple(g)
+                                    self.sim._t_pos = forward_kin(g, self.sim.tool)
+                                self.sim.moved += 1
+                                self.sim.mode = "idle"
+                            elif self._front_seen != pose:
+                                self.log("hub", "the viewer cannot show the front door's arm at (%.0f, %.0f, %.0f): outside the virtual arm's limits" % (pose["x"], pose["y"], pose["z"]))
+                        self._front_seen = pose
+                    except Exception as e:
+                        self.log("hub", "could not show the front door's arm: %s" % e)
+            time.sleep(0.1 if self.front_busy else 0.3)
+
     def _backend_loop(self):
         while not self.stop.is_set():
             time.sleep(1.0)
@@ -1894,7 +1934,7 @@ class Hub:
                 "logs": {k: list(v)[-80:] for k, v in self.logs.items()}}
 
     def start(self):
-        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop, self._backend_loop, self._follow_loop):
+        for fn in (self._stream_reader, self._pump, self._poller, self._sim_loop, self._esp_loop, self._backend_loop, self._follow_loop, self._front_loop):
             threading.Thread(target=fn, daemon=True).start()
         threading.Thread(target=self._ticker, daemon=True).start()
         threading.Thread(target=self._boot_calibration, daemon=True).start()

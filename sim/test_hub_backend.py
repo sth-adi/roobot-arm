@@ -48,7 +48,7 @@ class HubWithBackend(BackendTestCase):
         self.assertIsNone(self.hub._be_error)
         end = self.IK(self.C(60, 250, 150, 0))
         for got, want in zip(self.esp.q, (end.S1, end.S2, end.S3, end.S4)):
-            self.assertAlmostEqual(got, math.degrees(want), places=1)
+            self.assertAlmostEqual(got, math.degrees(want), delta=0.5)      # a pose counts as reached within the runner's 1.5 mm, which is a fraction of a degree
         x, y, z, _ = self.hub.sim.pose()
         self.assertAlmostEqual(x, 60, delta=2)                           # and the virtual arm got there too
 
@@ -119,7 +119,12 @@ class HubWithBackend(BackendTestCase):
     def move_virtual_arm_to(self, x, y, z, a):
         ang = self.IK(self.C(x, y, z, a))
         with self.hub.sim_lock:
-            self.hub.sim.angles = (ang.S1, ang.S2, ang.S3, ang.S4)
+            sim = self.hub.sim
+            sim.angles = (ang.S1, ang.S2, ang.S3, ang.S4)
+            if sim.model == "stock":                                       # the stock-firmware model (the hub's default) holds its own target and would pull the angles back
+                from sim.armsim import forward_kin
+                sim._t_ang = tuple(sim.angles)
+                sim._t_pos = forward_kin(sim.angles, sim.tool)
 
     def test_moving_the_virtual_arm_by_hand_moves_the_real_arm_live(self):
         """The sticks and the Home button only move the virtual arm; while ARMED the follower posts its position to the backend as the target."""

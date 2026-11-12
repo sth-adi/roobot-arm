@@ -89,7 +89,7 @@ class Frontdoor:
         home = self.store.home()
         at_home = bool(pose) and abs(pose["x"] - home[0]) < 5 and abs(pose["y"] - home[1]) < 5 and abs(pose["z"] - home[2]) < 5
         return {"busy": self.runner.busy(), "at_home": at_home, "holding": any(v == "unknown" for v in self.keys.values()) and self.runner.busy(),
-                "keys": dict(self.keys), "last_move": self.last_move, "ready": not self.store.missing()}
+                "keys": dict(self.keys), "last_move": self.last_move, "ready": not self.store.missing(), "pose": pose}
 
     def _clean_pending(self):
         if self.pending and self.clock() > self.pending["expires"]:

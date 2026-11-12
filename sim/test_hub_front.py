@@ -88,5 +88,76 @@ class HubUsesTheFrontDoor(unittest.TestCase):
         self.assertTrue(any("Groq was not used" in m["text"] or "home" in m["text"].lower() for m in new if m["role"] != "user"))      # the old agent answered
 
 
+class HubShowsTheFrontDoorsArm(unittest.TestCase):
+    """The viewer follows the front door's arm (display only), and the controller is kept out while its job runs."""
+    @classmethod
+    def setUpClass(cls):
+        HubUsesTheFrontDoor.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        HubUsesTheFrontDoor.tearDownClass.__func__(cls)
+
+    def setUp(self):
+        self._saved = dict(server._front)
+        server._front["door"] = server.make_front("virtual")
+        self.addCleanup(lambda: server._front.update(self._saved))
+        self.h = H.Hub(self.url)
+        self.addCleanup(self.h.stop.set)
+
+    def run_loop(self, fn):
+        t = threading.Thread(target=fn, daemon=True)
+        t.start()
+        return t
+
+    def tip(self):
+        with self.h.sim_lock:
+            return self.h.sim.pose()
+
+    def until(self, cond, timeout=10):
+        end = time.time() + timeout
+        while time.time() < end and not cond():
+            time.sleep(0.05)
+        return cond()
+
+    def test_the_viewer_ends_where_the_front_doors_arm_is(self):
+        door = server._front["door"]
+        with self.h.sim_lock:
+            self.h.sim.angles = tuple(a + 0.3 for a in self.h.sim.angles)             # somewhere else first
+        self.run_loop(self.h._front_loop)
+        door.request({"action": "fetch", "key": 2})
+        door.runner.wait(20)
+        want = door.state()["pose"]
+        self.assertTrue(self.until(lambda: abs(self.tip()[1] - want["y"]) < 1.0 and abs(self.tip()[2] - want["z"]) < 1.0), (self.tip(), want))
+
+    def test_a_pretend_arm_is_never_shown_while_the_real_arm_is_armed(self):
+        self.h.armed = True
+        before = tuple(self.h.sim.angles)
+        self.run_loop(self.h._front_loop)
+        server._front["door"].request({"action": "fetch", "key": 2})
+        server._front["door"].runner.wait(20)
+        time.sleep(0.8)
+        self.assertEqual(tuple(self.h.sim.angles), before)
+        self.assertTrue(any("ARMED" in str(m) for m in self.h.logs["hub"]))
+
+    def test_the_controller_is_ignored_while_a_job_runs_and_works_again_after(self):
+        self.h.latest_wire = dict(H.IDLE_WIRE, LSX=1.0, LSY=1.0)
+        self.h.latest_recv = time.time() + 1000                                       # never stale for this test
+        before = self.tip()
+        self.h.front_busy = True
+        self.run_loop(self.h._sim_loop)
+        time.sleep(0.6)
+        self.assertEqual(self.tip(), before)                                           # ignored
+        self.h.front_busy = False
+        self.assertTrue(self.until(lambda: self.tip() != before, 5))                   # the stick moves the arm again
+
+    def test_no_front_door_means_nothing_changes(self):
+        server._front["door"] = None
+        before = tuple(self.h.sim.angles)
+        self.run_loop(self.h._front_loop)
+        time.sleep(0.5)
+        self.assertEqual((tuple(self.h.sim.angles), self.h.front_busy), (before, False))
+
+
 if __name__ == "__main__":
     unittest.main()

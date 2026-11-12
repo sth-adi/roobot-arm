@@ -33,6 +33,11 @@ try:
 except ImportError:  # pyserial missing: link stays permanently unavailable
     serial = None
 
+# The exception names used in the `except` clauses below. Without pyserial `serial` is None, and `serial.SerialException` inside an except clause would
+# itself raise AttributeError the moment any OSError happens (a network link without pyserial installed hit exactly that).
+SerialException = serial.SerialException if serial else OSError
+SerialTimeoutException = serial.SerialTimeoutException if serial else OSError
+
 BUTTON_ORDER = ("a", "b", "x", "y", "lb", "rb", "back", "start", "ls", "rs")
 ESP32_USB_IDS = {(0x10C4, 0xEA60), (0x1A86, 0x7523), (0x303A, 0x1001)}  # CP210x, CH340, ESP32-S3
 RESCAN_S = 1.0
@@ -190,7 +195,7 @@ class SerialLink:
             return False
         try:
             self._open(device)
-        except (OSError, serial.SerialException) as e:   # busy (IDE monitor/upload/GUI) or vanished
+        except (OSError, SerialException) as e:   # busy (IDE monitor/upload/GUI) or vanished
             self._drop(f"{device} busy/unavailable ({str(e)[:40]})", "busy")
             return False
         return True
@@ -222,7 +227,7 @@ class SerialLink:
                 if self.board_ik == "missing" and self.cal_line:          # a reset board has lost it: give it back (it refuses while following, which is right)
                     try:
                         self.ser.write(self.cal_line.encode("ascii") + b"\n")
-                    except (OSError, serial.SerialException, serial.SerialTimeoutException):
+                    except (OSError, SerialException, SerialTimeoutException):
                         pass
             if self.on_line:
                 try:
@@ -239,7 +244,7 @@ class SerialLink:
                 return
             try:
                 self._drain()
-            except (OSError, serial.SerialException):
+            except (OSError, SerialException):
                 self._drop(self._lost())
 
     def update(self, state, now=None):
@@ -255,7 +260,7 @@ class SerialLink:
                 self.seq += 1
                 self.ser.write(encode(state, self.seq))
                 self.last_state, self.last_sent = state, now
-            except (OSError, serial.SerialException, serial.SerialTimeoutException):
+            except (OSError, SerialException, SerialTimeoutException):
                 self._drop(self._lost())
 
     def update_positions(self, degs, now=None):
@@ -274,7 +279,7 @@ class SerialLink:
                 self.seq += 1
                 self.ser.write(encode_pos(degs, self.seq))
                 self.last_pos, self.last_sent, self.last_state, self.last_pose = degs, now, None, None
-            except (OSError, serial.SerialException, serial.SerialTimeoutException):
+            except (OSError, SerialException, SerialTimeoutException):
                 self._drop(self._lost())
 
     def update_pose(self, pose, now=None):
@@ -293,7 +298,7 @@ class SerialLink:
                 self.seq += 1
                 self.ser.write(encode_pose(pose, self.seq))
                 self.last_pose, self.last_sent, self.last_state, self.last_pos = pose, now, None, None
-            except (OSError, serial.SerialException, serial.SerialTimeoutException):
+            except (OSError, SerialException, SerialTimeoutException):
                 self._drop(self._lost())
 
     def set_calibration(self, limits, homes):
@@ -304,7 +309,7 @@ class SerialLink:
             if self.ser is not None:
                 try:
                     self.ser.write(line.encode("ascii") + b"\n")
-                except (OSError, serial.SerialException, serial.SerialTimeoutException):
+                except (OSError, SerialException, SerialTimeoutException):
                     self._drop(self._lost())
 
     @property
@@ -324,7 +329,7 @@ class SerialLink:
             try:
                 self.ser.write(text.encode("ascii") + b"\n")
                 return True
-            except (OSError, serial.SerialException, serial.SerialTimeoutException):
+            except (OSError, SerialException, SerialTimeoutException):
                 self._drop(self._lost())
                 return False
 

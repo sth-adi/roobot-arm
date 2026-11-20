@@ -531,7 +531,7 @@ def main():
     if args.ai == "exe":
         if not args.exe:
             p.error("--ai exe needs --exe PATH (or ARM_EXE)")
-        exe_opts = {"cmd": [args.exe] + shlex.split(args.exe_args, posix=os.name != "nt"), "port": args.exe_port, "baud": args.exe_baud, "ignore_magnet": args.exe_ignore_magnet}
+        exe_opts = {"cmd": [args.exe] + [t.strip(chr(34)) for t in shlex.split(args.exe_args, posix=os.name != "nt")], "port": args.exe_port, "baud": args.exe_baud, "ignore_magnet": args.exe_ignore_magnet}
     _front["door"], _front["mode"] = make_front(args.ai, args.hub_url, exe_opts), args.ai
     print("Arm's front door: %s" % {"exe": "Sam's exe (%s, port %s, %d baud), with a virtual twin for the dashboard" % (args.exe, args.exe_port or "?", args.exe_baud), "hub": "the dashboard hub's arm at %s (the real arm follows in mirror mode when ARMED)" % args.hub_url,
                                     "virtual": "virtual arm (nothing real can move)", "off": "off"}[args.ai])

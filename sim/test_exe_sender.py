@@ -155,6 +155,20 @@ class ExeSenderTests(unittest.TestCase):
         code, out = server._door("GET", "/arm/state")
         self.assertEqual((code, out["sender"]), (200, "exe"))
 
+    def test_the_stand_in_exe_accepts_a_good_move_and_fails_an_unreachable_one_like_the_real_one_should(self):
+        fake = os.path.join(ROOT, "tools", "fake_sam_exe.py")
+        cmd = [sys.executable, fake, "{json_file}", "{baud}", "{port}", "--speedup", "100"]
+        done = []
+        LL.ExeSender(cmd, lambda: dict(HOME), port="COM5").run([step(20, 250, 200)], "j", lambda i, st: done.append(i))
+        self.assertEqual(done, [0])
+        with self.assertRaises(LL.BackendError) as cm:
+            LL.ExeSender(cmd, lambda: dict(HOME), port="COM5").run([step(900, 900, 900)], "j")
+        self.assertEqual(cm.exception.code, "EXE_FAILED")
+        self.assertIn("out of reach", cm.exception.detail)
+        with self.assertRaises(LL.BackendError) as cm:                          # a port that cannot be opened
+            LL.ExeSender(cmd + ["--fail-port", "COM9"], lambda: dict(HOME), port="COM9").run([step(20, 250, 200)], "j")
+        self.assertIn("COM9", cm.exception.detail)
+
 
 if __name__ == "__main__":
     unittest.main()

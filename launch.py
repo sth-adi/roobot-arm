@@ -70,11 +70,15 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--server-port", type=int, default=8000)
     ap.add_argument("--exe", help="drive the real arm through Sam's exe at this path (instead of mirror mode); the dashboard then shows a virtual twin of what it does")
+    ap.add_argument("--fake-exe", action="store_true", help="use tools/fake_sam_exe.py instead of the real exe (a stand-in that checks the JSON and waits as long as the move would take; nothing real moves)")
     ap.add_argument("--exe-port", default="", help="the board's COM port, passed to the exe")
     ap.add_argument("--exe-baud", type=int, default=115200)
     ap.add_argument("--exe-args", default="{json_file} {baud} {port}", help="how the exe is called after its path: {json_file}, {json}, {baud}, {port}")
     ap.add_argument("--exe-ignore-magnet", action="store_true", help="move the arm even for steps that grab/release (movement tests only)")
     a = ap.parse_args()
+    if a.fake_exe and not a.exe:
+        a.exe, a.exe_args = sys.executable, '"%s" {json_file} {baud} {port}' % os.path.join(ROOT, "tools", "fake_sam_exe.py")
+        a.exe_port = a.exe_port or "FAKE"
     py = sys.executable
     kids = []
     server_url = "http://127.0.0.1:%d" % a.server_port

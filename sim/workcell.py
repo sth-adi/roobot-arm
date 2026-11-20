@@ -132,6 +132,11 @@ class Workcell:
             self.set_magnet(self.saved_magnet[self._pending])
             self._pending = None
 
+    def forget_replay(self):
+        """A new run is about to start: forget which position the last one was aiming at. track_saved only does this on a tick that sees the replay
+        stopped, so a run started right after another (the front door sends one-pose steps back to back) would otherwise never see its first position."""
+        self._pending, self._last_idx, self.last_applied = None, None, None
+
     def run_finished(self, n):
         """A one-off run of n positions is over once the magnet action of the last one has been applied (on arrival, or when the replay
         moved on before the check saw the arrival: then a new target is already pending, which must not count as a second lap)."""

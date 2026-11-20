@@ -134,6 +134,7 @@ class Hub:
         self._prev_y = False
         self.front_busy = False                 # the AI front door has a job running: the controller is ignored until it ends (see _front_loop)
         self._front_seen, self._front_note = None, 0.0
+        self._step = {"state": "idle", "step": 0, "error": None}      # the last step the front door sent (step_start): see HubSender in lowlevel.py
         self._run_once = None
         self._esp = None                        # (state dict, time) last report of our firmware via the server's /armstate
         self._esp_run = None                    # id of the sequence the ESP is running for us
@@ -1660,7 +1661,7 @@ class Hub:
             self.sim.saved_speed[:] = SEQ.speeds_of(seq)    # per-pose speeds from the tuner (None = the damper setting)
             self.cell.saved_magnet = mag
             self.cell.reset_keys_on_lap = not run         # a one-off run starts from the world as it is: a reversed task needs the key where it was left
-            self.cell.last_applied = None
+            self.cell.forget_replay()
             self._run_once = len(saved) if run else None
             if run:
                 self.sim.start_replay(wait_arrival=True, once=True)
@@ -1672,6 +1673,45 @@ class Hub:
         """(Used to stretch waits when a real arm was following through the backend, which moved slower than the virtual one. Mirror mode moves the
         real arm itself, at the virtual arm's own pace, so there is nothing to stretch any more - kept so callers don't need to change.)"""
         return seconds
+
+    # ---- steps from the arm's front door (server.py --ai hub): the end-user page and the dashboard drive the SAME virtual arm. One pose per call, the
+    # shapes are the placeholder step message (contract.step_message). With mirror mode ARMED the board follows this virtual arm, so the real arm moves too.
+    def _step_refuse(self, code, title, detail="", hint=""):
+        return {"accepted": False, "error": {"code": code, "title": title, "detail": detail, "hint": hint}}
+
+    def step_start(self, msg):
+        t = msg.get("target") if isinstance(msg, dict) else None
+        try:
+            x, y, z, a = (float(t[k]) for k in ("x", "y", "z", "pitch"))
+            n = int(msg.get("step") or 1)
+        except (TypeError, KeyError, ValueError):
+            return self._step_refuse("BAD_REQUEST", "That is not a step the hub understands")
+        act = {"on": "grab", "off": "release", None: None}.get(msg.get("magnet"), "bad")
+        if act == "bad" or not all(math.isfinite(c) for c in (x, y, z, a)):
+            return self._step_refuse("BAD_REQUEST", "That is not a step the hub understands")
+        if self._run_once is not None or self.task.get("state") in ("working", "running") or self.trial.get("state") in ("homing", "running"):
+            return self._step_refuse("BUSY", "The arm is busy", "The hub is already moving the arm.", "Wait for it to finish, or stop it first.")
+        with self.sim_lock:
+            reachable = bool(self.sim.ik_report((x, y, z, a))["reachable"])
+        if not reachable:
+            return self._step_refuse("UNREACHABLE", "The arm cannot reach that point", "x %.0f, y %.0f, z %.0f is outside what the arm can do." % (x, y, z), "Teach a closer position.")
+        pose = {"x": x, "y": y, "z": z, "angle": a, "action": act}
+        try:
+            self.load_sequence({"format": SEQ.FORMAT, "version": SEQ.VERSION, "name": "", "poses": [pose]}, False, True)
+        except ValueError as e:
+            return self._step_refuse("REFUSED", "The hub would not run that step", str(e))
+        self._step = {"state": "moving", "step": n - 1, "n": n, "error": None}
+        return {"accepted": True}
+
+    def step_status(self):
+        s = self._step
+        if s["state"] == "moving" and self._run_once is None:
+            s["state"], s["step"] = "idle", s.get("n", s["step"])
+        return {"state": s["state"], "step": s["step"], "error": s["error"]}
+
+    def step_stop(self):
+        self._stop_now("stopped from the front door", echo=False)
+        self._step = {"state": "idle", "step": self._step.get("n", 0), "error": None}
 
     def _front_loop(self):
         """Show the front door's arm in the viewer, and keep the controller out while a job runs. The front door (server.py /arm/state) reports its busy flag
@@ -1686,6 +1726,9 @@ class Hub:
             st = got[1]
             self.front_busy = bool(st.get("busy"))
             pose = st.get("pose")
+            if st.get("sender") == "hub":               # the front door drives THIS virtual arm: its pose is ours already, nothing to show
+                time.sleep(0.1 if self.front_busy else 0.3)
+                continue
             if pose and (self.front_busy or pose != self._front_seen):
                 if self.armed:
                     if time.time() - self._front_note > 30.0:
@@ -1874,6 +1917,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, HUB.current_sequence())
         if path == "/api/state":
             return self._json(200, HUB.state_packet())
+        if path == "/api/step/status":
+            return self._json(200, HUB.step_status())
         if path == "/api/points":
             return self._json(200, HUB.points_status())
         if path == "/api/tune":
@@ -1982,6 +2027,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/arm":
                 HUB.set_armed(bool(d.get("armed")))
                 return self._json(200, {"armed": HUB.armed, "forward_control": HUB.forward_control})
+            if path == "/api/step":
+                return self._json(200, HUB.step_start(d))
+            if path == "/api/step/stop":
+                HUB.step_stop()
+                return self._json(200, {})
             if path == "/api/input":
                 st = clean_state(d)
                 ctl = HUB.emu.ctl_url()             # emulator running: sticks travel over its controller link

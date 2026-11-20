@@ -10,6 +10,9 @@ JsonSender  the JSON hand-over in the architecture sketch. PLACEHOLDER: Sam has 
             POST <url>/step {step message} -> {"accepted": true} or {"accepted": false, "error": {"code", "title", "detail"}}
             GET  <url>/status -> {"state": "idle" | "moving" | "error", "step": n, "error": {...}}
             POST <url>/stop {} -> {}
+HubSender   the same three calls, but to the dashboard hub (dashboard/hub.py: /api/step, /api/step/status, /api/step/stop). The hub's virtual arm is the
+            brain; with mirror mode ARMED the real arm's board follows it, so the end-user page moves the real arm exactly as the dashboard does.
+            hub_pose(url) gives the front door the arm's pose from the same place.
 
 (There used to be a SamSender here that drove the real arm through Sam's HTTP backend - removed now that the board does its own IK in mirror mode and
 nothing talks to that backend any more. BackendError lives here, not in a "backend_client" module, because every sender raises it, not just that one did.)
@@ -36,10 +39,10 @@ class BackendError(Exception):
         return {"code": self.code, "title": self.title, "detail": self.detail, "hint": self.hint}
 
 
-def _urllib_http(base, timeout):
+def _urllib_http(base, timeout, extra_headers=None):
     def call(method, path, body=None):
         data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(base.rstrip("/") + path, data, {"Content-Type": "application/json", "Accept": "application/json"}, method=method)
+        req = urllib.request.Request(base.rstrip("/") + path, data, dict({"Content-Type": "application/json", "Accept": "application/json"}, **(extra_headers or {})), method=method)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
@@ -55,6 +58,8 @@ def _urllib_http(base, timeout):
 
 
 class JsonSender:
+    PATHS = ("/step", "/status", "/stop")              # (send one step, ask how it is going, stop)
+
     def __init__(self, url=None, http=None, timeout=3.0, poll_s=0.1, step_timeout_s=60.0, clock=time.time, sleep=time.sleep):
         self.http = http or _urllib_http(url, timeout)
         self.poll, self.step_timeout, self.clock, self.sleep = poll_s, step_timeout_s, clock, sleep
@@ -63,7 +68,7 @@ class JsonSender:
     def stop(self):
         self._stop = True
         try:
-            self.http("POST", "/stop", {})
+            self.http("POST", self.PATHS[2], {})
         except BackendError:
             pass
 
@@ -82,7 +87,7 @@ class JsonSender:
                     msg = C.step_message(job, i + 1, len(steps), step)
                 except C.ContractError as e:
                     raise BackendError("BAD_REQUEST", "A step does not fit the message format", str(e), "")
-                ack = self.http("POST", "/step", msg)
+                ack = self.http("POST", self.PATHS[0], msg)
                 if not isinstance(ack, dict) or ack.get("accepted") is not True:
                     e = (ack or {}).get("error") if isinstance(ack, dict) else None
                     e = e if isinstance(e, dict) else {}
@@ -96,7 +101,7 @@ class JsonSender:
 
     def stop_quietly(self):
         try:
-            self.http("POST", "/stop", {})
+            self.http("POST", self.PATHS[2], {})
         except BackendError:
             pass
 
@@ -105,7 +110,7 @@ class JsonSender:
         while self.clock() < end:
             self._check()
             self.sleep(self.poll)
-            st = self.http("GET", "/status")
+            st = self.http("GET", self.PATHS[1])
             state = st.get("state") if isinstance(st, dict) else None
             if state == "error":
                 e = st.get("error") if isinstance(st.get("error"), dict) else {}
@@ -113,3 +118,24 @@ class JsonSender:
             if state == "idle" and st.get("step", n) >= n:
                 return
         raise BackendError("NOT_REACHED", "The step did not finish in time", "Step %d was not done within %.0f s." % (n, self.step_timeout), "")
+
+
+class HubSender(JsonSender):
+    """Steps go to the dashboard hub, whose virtual arm runs them (and the real arm follows in mirror mode when ARMED). url: e.g. http://127.0.0.1:8765."""
+    PATHS = ("/api/step", "/api/step/status", "/api/step/stop")
+
+    def __init__(self, url, http=None, **kw):
+        super().__init__(url, http=http or _urllib_http(url, kw.pop("timeout", 3.0), {"X-Hub": "1"}), **kw)
+
+
+def hub_pose(url, timeout=1.5, http=None):
+    """A get_pose() for the front door: the hub's virtual arm tip {"x","y","z","angle"}, or None when the hub is not reachable."""
+    call = http or _urllib_http(url, timeout, {"X-Hub": "1"})
+
+    def get_pose():
+        try:
+            p = (call("GET", "/api/state") or {}).get("pose")
+        except BackendError:
+            return None
+        return {k: p[k] for k in ("x", "y", "z", "angle")} if isinstance(p, dict) and all(isinstance(p.get(k), (int, float)) for k in ("x", "y", "z", "angle")) else None
+    return get_pose

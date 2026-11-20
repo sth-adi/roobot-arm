@@ -10,6 +10,9 @@ JsonSender  the JSON hand-over in the architecture sketch. PLACEHOLDER: Sam has 
             POST <url>/step {step message} -> {"accepted": true} or {"accepted": false, "error": {"code", "title", "detail"}}
             GET  <url>/status -> {"state": "idle" | "moving" | "error", "step": n, "error": {...}}
             POST <url>/stop {} -> {}
+ExeSender   Sam's exe: one run per step. His three inputs are the instructions JSON, the baud rate and the port; the JSON we send is his "start point and
+            end point" form (StartPoint / EndPoint {x, y, z, toolDegrees}, speed, SamplesPerMM, AngleLimits). A "twin" (a virtual arm) runs the same
+            steps alongside so the dashboard can show what the AI is doing (server.py --ai exe; the hub copies the twin's pose onto its viewer).
 HubSender   the same three calls, but to the dashboard hub (dashboard/hub.py: /api/step, /api/step/status, /api/step/stop). The hub's virtual arm is the
             brain; with mirror mode ARMED the real arm's board follows it, so the end-user page moves the real arm exactly as the dashboard does.
             hub_pose(url) gives the front door the arm's pose from the same place.
@@ -18,6 +21,13 @@ HubSender   the same three calls, but to the dashboard hub (dashboard/hub.py: /a
 nothing talks to that backend any more. BackendError lives here, not in a "backend_client" module, because every sender raises it, not just that one did.)
 """
 import json
+import math
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -139,3 +149,118 @@ def hub_pose(url, timeout=1.5, http=None):
             return None
         return {k: p[k] for k in ("x", "y", "z", "angle")} if isinstance(p, dict) and all(isinstance(p.get(k), (int, float)) for k in ("x", "y", "z", "angle")) else None
     return get_pose
+
+
+class ExeSender:
+    """Drive the real arm through Sam's exe, one run of the exe per step. UNCONFIRMED against the real exe: how it is started, what it prints and how it is
+    stopped are assumptions (see the questions in the README) and all live in ONE place: cmd, the argument template.
+      cmd           the command as a list; "{json_file}" (a temp file holding the instructions), "{json}" (the same text), "{baud}" and "{port}" are filled in.
+                    e.g. ["C:/arm/sam.exe", "{json_file}", "{baud}", "{port}"]. Exit code 0 = the move is done; anything else = it failed (its output is the detail).
+      twin          optional: a sender (VirtualArm) that runs the same steps beside the real arm; it is also where the arm's position comes from (start_pose)
+      ignore_magnet his exe has no magnet: a step that grabs or releases is refused up front unless this is true (then the arm moves, nothing is switched)
+      runner        runner(argv, timeout_s, stopped) -> (returncode, output); the default starts the process and kills it on stop() (tests pass a fake)
+    The first StartPoint is where start_pose() says the arm is: the real arm must really be there (home) when the first job starts."""
+    LIMITS_UNSET = {k: {"Min": 0, "Max": 0} for k in ("S1", "S2", "S3", "S4")}      # exactly as in Sam's example: 0/0
+
+    def __init__(self, cmd, start_pose, twin=None, baud=115200, port="", samples_per_mm=1000, ignore_magnet=False, limits=None, step_timeout_s=180.0, runner=None):
+        self.cmd, self.start_pose, self.twin, self.baud, self.port = list(cmd), start_pose, twin, baud, port
+        self.samples_per_mm, self.ignore_magnet, self.step_timeout = samples_per_mm, ignore_magnet, step_timeout_s
+        self.limits = limits or self.LIMITS_UNSET
+        self.runner = runner or self._run_process
+        self._stop, self._proc = False, None
+        self._lock = threading.Lock()
+
+    # ---- what we send ----
+    def instruction(self, start, step):
+        """Sam's start/end-point JSON for one move. start: {"x","y","z","angle"}; step: a route step (x, y, z, angle, speed ...)."""
+        return {"StartPoint": {"x": start["x"], "y": start["y"], "z": start["z"], "toolDegrees": start["angle"]},
+                "EndPoint": {"x": step["x"], "y": step["y"], "z": step["z"], "toolDegrees": step["angle"]},
+                "speed": step.get("speed"), "SamplesPerMM": self.samples_per_mm, "AngleLimits": self.limits}
+
+    @staticmethod
+    def _still(a, b):
+        return math.dist((a["x"], a["y"], a["z"]), (b["x"], b["y"], b["z"])) < 1e-6 and abs(a["angle"] - b["angle"]) < 1e-6
+
+    # ---- run / stop ----
+    def stop(self):
+        self._stop = True
+        with self._lock:
+            if self._proc and self._proc.poll() is None:
+                self._proc.kill()
+        if self.twin:
+            self.twin.stop()
+
+    def run(self, steps, job="", on_step=None):
+        if not steps:
+            raise BackendError("NO_POSES", "There is nothing to run", "", "")
+        if not self.ignore_magnet and any(s.get("action") in ("grab", "release") for s in steps):
+            raise BackendError("NO_MAGNET", "Sam's exe cannot switch the magnet", "This route grabs or releases a key.", "Agree a magnet command with Sam, or start with the magnet ignored to test the movement only.")
+        pose = self.start_pose()
+        if not isinstance(pose, dict):
+            raise BackendError("NO_POSITION", "The arm's position is not known", "", "Wait for the arm's first position report.")
+        self._stop = False
+        for i, step in enumerate(steps):
+            if self._stop:
+                raise BackendError("STOPPED", "Stopped", "", "")
+            twin_err, twin_thread = [], None
+            if self.twin:
+                def work(step=step):
+                    try:
+                        self.twin.run([step], job, None)
+                    except BackendError as e:
+                        twin_err.append(e)
+                twin_thread = threading.Thread(target=work, daemon=True)
+                twin_thread.start()
+            try:
+                if not self._still(pose, step):
+                    self._run_exe(self.instruction(pose, step))
+            except BackendError:
+                if self.twin:
+                    self.twin.stop()
+                raise
+            finally:
+                if twin_thread:
+                    twin_thread.join(self.step_timeout)
+            if twin_err and twin_err[0].code != "STOPPED":
+                raise twin_err[0]
+            pose = {k: step[k] for k in ("x", "y", "z", "angle")}
+            if on_step:
+                on_step(i, step)
+
+    def _run_exe(self, instruction):
+        text = json.dumps(instruction)
+        fd, path = tempfile.mkstemp(suffix=".json", prefix="arm_")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            argv = [a.format(json_file=path, json=text, baud=self.baud, port=self.port) for a in self.cmd]
+            try:
+                code, out = self.runner(argv, self.step_timeout, lambda: self._stop)
+            except FileNotFoundError:
+                raise BackendError("EXE_MISSING", "Sam's exe was not found", argv[0], "Check the path to the exe.")
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if self._stop:
+            raise BackendError("STOPPED", "Stopped", "", "")
+        if code is None:
+            raise BackendError("NOT_REACHED", "Sam's exe did not finish in time", "No answer within %.0f s." % self.step_timeout, "Check the arm and the cable.")
+        if code != 0:
+            raise BackendError("EXE_FAILED", "Sam's exe reported an error", ("exit code %s: %s" % (code, (out or "").strip()[-300:])), "Check the port, the baud rate and that nothing else is using the port.")
+
+    def _run_process(self, argv, timeout_s, stopped):
+        with self._lock:
+            self._proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            proc = self._proc
+        try:
+            out, _ = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return None, ""
+        finally:
+            with self._lock:
+                self._proc = None
+        return proc.returncode, out

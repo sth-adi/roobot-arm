@@ -110,7 +110,7 @@ def describe(prev, cur):
 
 
 class Hub:
-    def __init__(self, server_url, send_speed=False):
+    def __init__(self, server_url, send_speed=False, serial=True):
         self.server = server_url.rstrip("/")
         self.send_speed = send_speed            # off: packets reach the arm exactly as the stock UWE-RArm firmware expects
         self.stop = threading.Event()
@@ -147,7 +147,7 @@ class Hub:
         self.packet_times = collections.deque(maxlen=400)
         self.stream_ok = False
         # board / serial link
-        self.link = SerialLink()
+        self.link = SerialLink(enabled=serial)      # serial=False: leave the COM port alone (Sam's exe has it)
         self.link.on_line = self._board_line
         self.link.on_event = lambda text: self.log("hub", text)      # why a WiFi connection was dropped
         self.board = {"pos": None, "wifi": None, "source": None, "last_line_t": None}
@@ -2222,10 +2222,11 @@ def main():
     ap.add_argument("--no-https", action="store_true", help="with --lan, do not also serve HTTPS on port+1 (the phone's microphone needs it)")
     ap.add_argument("--send-speed", action="store_true",
                     help="also send the damper to the arm as maxSpeed (needs the modified firmware in firmware/rarm)")
+    ap.add_argument("--no-serial", action="store_true", help="never open the COM port (use when Sam's exe drives the board: only one program can hold the port)")
     ap.add_argument("--mirror", action="store_true", help="start with mirror mode on (the board follows the virtual arm, doing its own IK)")
     args = ap.parse_args()
     global LAN_TOKEN
-    HUB = Hub(args.server, send_speed=args.send_speed)
+    HUB = Hub(args.server, send_speed=args.send_speed, serial=not args.no_serial)
     if args.mirror:
         HUB.mirror["on"] = True          # the board follows the virtual arm (with board IK when its sketch supports it) whenever the output is ARMED
         HUB.log("hub", "mirror mode ON at start (--mirror): the real arm follows the virtual arm whenever the output is ARMED")

@@ -48,13 +48,14 @@ dispatched directly and never calls the AI. The "/arm/" prefix names that shared
   moves; with mirror mode ARMED the real arm's board follows it, so this page and the dashboard both move the real arm. Positions are saved in
   .boxes.json. --ai virtual moves a pretend arm of its own only (demo layout, nothing real can move); --ai off disables the routes.
 
-Run:  python server.py [--host 0.0.0.0] [--port 8000] [--forward-url http://host:port/path] [--ai hub|virtual|off] [--hub-url http://127.0.0.1:8765]
+Run:  python server.py [--host 0.0.0.0] [--port 8000] [--forward-url http://host:port/path] [--ai exe|hub|virtual|off] [--hub-url http://127.0.0.1:8765]
 """
 import argparse
 import hashlib
 import json
 import os
 import socket
+import shlex
 import sys
 import threading
 import time
@@ -255,7 +256,7 @@ def _forward_once(last_count, neutral_sent):
     return last_count, neutral_sent
 
 
-def make_front(mode, hub_url="http://127.0.0.1:8765"):
+def make_front(mode, hub_url="http://127.0.0.1:8765", exe=None):
     """Build the arm's front door. hub: steps run on the dashboard hub's virtual arm (the real arm follows it in mirror mode when ARMED), boxes are saved
     in .boxes.json. virtual: a pretend arm and a demo layout of boxes (nothing real can move). Returns None for 'off'.
     (There used to be a 'backend' mode that drove the real arm through Sam's HTTP backend - removed now that the board does its own IK in mirror mode.)"""
@@ -263,6 +264,15 @@ def make_front(mode, hub_url="http://127.0.0.1:8765"):
         return None
     sys.path.insert(0, os.path.join(ROOT, "dashboard"))
     import interface
+    if mode == "exe":
+        import boxes
+        import lowlevel
+        import virtual
+        twin = virtual.VirtualArm()                  # shown on the dashboard (the hub copies its pose); also where the arm's position comes from
+        exe = exe or {}
+        sender = lowlevel.ExeSender(exe["cmd"], twin.get_pose, twin=twin, baud=exe.get("baud", 115200), port=exe.get("port", ""),
+                                    ignore_magnet=exe.get("ignore_magnet", False))
+        return interface.Frontdoor(boxes.Store(), sender, twin.get_pose)
     if mode == "hub":
         import boxes
         import lowlevel
@@ -507,12 +517,23 @@ def main():
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--forward-url", default=os.environ.get("FORWARD_URL"),
                    help="also POST each received state to this URL (env: FORWARD_URL)")
-    p.add_argument("--ai", choices=("hub", "virtual", "off"), default="virtual",
-                   help="the arm's front door: hub = run steps on the dashboard hub's arm (the real arm follows in mirror mode), virtual = a pretend arm (default), off = disabled")
+    p.add_argument("--ai", choices=("exe", "hub", "virtual", "off"), default="virtual",
+                   help="the arm's front door: exe = drive the real arm through Sam's exe (a virtual twin runs beside it for the dashboard), hub = run steps on the dashboard "
+                        "hub's arm (the real arm follows in mirror mode), virtual = a pretend arm (default), off = disabled")
+    p.add_argument("--exe", help="path to Sam's exe, for --ai exe (env: ARM_EXE)", default=os.environ.get("ARM_EXE"))
+    p.add_argument("--exe-port", default=os.environ.get("ARM_PORT", ""), help="the board's COM port, passed to the exe")
+    p.add_argument("--exe-baud", type=int, default=115200, help="baud rate passed to the exe")
+    p.add_argument("--exe-args", default="{json_file} {baud} {port}", help="how the exe is called after its path: {json_file}, {json}, {baud}, {port}")
+    p.add_argument("--exe-ignore-magnet", action="store_true", help="move the arm even for steps that grab/release (his exe has no magnet command): movement tests only")
     p.add_argument("--hub-url", default=os.environ.get("HUB_URL", "http://127.0.0.1:8765"), help="the dashboard hub, for --ai hub (env: HUB_URL)")
     args = p.parse_args()
-    _front["door"], _front["mode"] = make_front(args.ai, args.hub_url), args.ai
-    print("Arm's front door: %s" % {"hub": "the dashboard hub's arm at %s (the real arm follows in mirror mode when ARMED)" % args.hub_url,
+    exe_opts = None
+    if args.ai == "exe":
+        if not args.exe:
+            p.error("--ai exe needs --exe PATH (or ARM_EXE)")
+        exe_opts = {"cmd": [args.exe] + shlex.split(args.exe_args, posix=os.name != "nt"), "port": args.exe_port, "baud": args.exe_baud, "ignore_magnet": args.exe_ignore_magnet}
+    _front["door"], _front["mode"] = make_front(args.ai, args.hub_url, exe_opts), args.ai
+    print("Arm's front door: %s" % {"exe": "Sam's exe (%s, port %s, %d baud), with a virtual twin for the dashboard" % (args.exe, args.exe_port or "?", args.exe_baud), "hub": "the dashboard hub's arm at %s (the real arm follows in mirror mode when ARMED)" % args.hub_url,
                                     "virtual": "virtual arm (nothing real can move)", "off": "off"}[args.ai])
     if args.forward_url:
         _fwd["url"] = args.forward_url

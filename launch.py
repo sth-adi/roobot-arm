@@ -69,6 +69,11 @@ def main():
     ap.add_argument("--no-open", action="store_true")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--server-port", type=int, default=8000)
+    ap.add_argument("--exe", help="drive the real arm through Sam's exe at this path (instead of mirror mode); the dashboard then shows a virtual twin of what it does")
+    ap.add_argument("--exe-port", default="", help="the board's COM port, passed to the exe")
+    ap.add_argument("--exe-baud", type=int, default=115200)
+    ap.add_argument("--exe-args", default="{json_file} {baud} {port}", help="how the exe is called after its path: {json_file}, {json}, {baud}, {port}")
+    ap.add_argument("--exe-ignore-magnet", action="store_true", help="move the arm even for steps that grab/release (movement tests only)")
     a = ap.parse_args()
     py = sys.executable
     kids = []
@@ -92,7 +97,13 @@ def main():
         if up(server_url + "/health") or up(server_url + "/state"):
             print("input server already running on :%d" % a.server_port)
         else:
-            kids.append(subprocess.Popen([py, os.path.join(ROOT, "server.py"), "--ai", "hub", "--hub-url", hub_url], cwd=ROOT))
+            if a.exe:                                   # Sam's exe route: it holds the COM port, so the hub must not (no mirror mode)
+                server_cmd = [py, os.path.join(ROOT, "server.py"), "--ai", "exe", "--exe", a.exe, "--exe-port", a.exe_port, "--exe-baud", str(a.exe_baud), "--exe-args", a.exe_args]
+                if a.exe_ignore_magnet:
+                    server_cmd.append("--exe-ignore-magnet")
+            else:
+                server_cmd = [py, os.path.join(ROOT, "server.py"), "--ai", "hub", "--hub-url", hub_url]
+            kids.append(subprocess.Popen(server_cmd, cwd=ROOT))
             for _ in range(30):
                 if up(server_url + "/health"):
                     break
@@ -114,7 +125,7 @@ def main():
         if up(hub_url + "/api/status"):
             print("hub already running: opening it")
         else:
-            cmd = [py, os.path.join(ROOT, "dashboard", "hub.py"), "--no-open", "--port", str(a.port), "--server", server_url, "--mirror"]
+            cmd = [py, os.path.join(ROOT, "dashboard", "hub.py"), "--no-open", "--port", str(a.port), "--server", server_url] + (["--no-serial"] if a.exe else ["--mirror"])
             if not a.local_only:
                 cmd.append("--lan")
             kids.append(subprocess.Popen(cmd, cwd=ROOT))

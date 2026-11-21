@@ -62,7 +62,8 @@ class ExeSenderTests(unittest.TestCase):
         self.assertEqual(msg["EndPoint"], {"x": 10, "y": 250, "z": 200, "toolDegrees": 0.0})
         self.assertEqual(r.calls[1][1]["StartPoint"], {"x": 10, "y": 250, "z": 200, "toolDegrees": 0.0})      # each move starts where the last one ended
         self.assertEqual((r.calls[1][1]["EndPoint"]["toolDegrees"], r.calls[1][1]["speed"]), (-90, 10))
-        self.assertEqual(sorted(msg), ["AngleLimits", "EndPoint", "SamplesPerMM", "StartPoint", "speed"])
+        self.assertEqual(sorted(msg), ["AngleLimits", "EndPoint", "SamplesPerMM", "StartPoint", "Tool", "speed"])
+        self.assertEqual(msg["Tool"], 0)
         self.assertEqual(msg["AngleLimits"]["S3"], {"Min": 0, "Max": 0})
 
     def test_the_temp_file_is_removed_afterwards(self):
@@ -79,17 +80,10 @@ class ExeSenderTests(unittest.TestCase):
         sender(Recorder(), twin).run([step(10, 250, 200), step(10, 250, 150)], "j")
         self.assertEqual([(t["x"], t["z"]) for t in twin.ran], [(10, 200), (10, 150)])
 
-    def test_a_magnet_step_is_refused_up_front_and_nothing_moves(self):
-        r, twin = Recorder(), FakeTwin()
-        with self.assertRaises(LL.BackendError) as cm:
-            sender(r, twin).run([step(10, 250, 200), step(10, 250, 150, action="grab")], "j")
-        self.assertEqual(cm.exception.code, "NO_MAGNET")
-        self.assertEqual((r.calls, twin.ran), ([], []))
-
-    def test_with_the_magnet_ignored_the_arm_moves_and_a_move_in_place_does_not_call_the_exe(self):
+    def test_the_magnet_goes_in_as_Tool_0_or_1_and_a_grab_in_place_is_still_a_run(self):
         r = Recorder()
-        sender(r, ignore_magnet=True).run([step(10, 250, 200), step(10, 250, 200, action="grab")], "j")
-        self.assertEqual(len(r.calls), 1)
+        sender(r).run([step(10, 250, 200), step(10, 250, 150), step(10, 250, 150, action="grab"), step(10, 250, 200), step(10, 250, 150), step(10, 250, 150, action="release")], "j")
+        self.assertEqual([m["Tool"] for _, m in r.calls], [0, 0, 1, 1, 1, 0])
 
     def test_a_failing_exe_ends_the_run_with_its_output_and_stops_the_twin(self):
         twin = FakeTwin()

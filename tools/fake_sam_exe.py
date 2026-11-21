@@ -71,8 +71,11 @@ def main():
             plan = planner.plan(start, end, speed_mm_s=speed)
         except planner.PlanError as e:
             fail("%s: %s" % (e.title, e.detail))
+        tool = msg.get("Tool", 0)
+        if tool not in (0, 1, True, False):
+            fail("Tool must be 0 or 1")
         duration = plan["duration"]
-        what = "line %s -> %s at %g mm/s (%d samples)" % (tuple(round(v, 1) for v in start[:3]), tuple(round(v, 1) for v in end[:3]), speed, plan["steps"])
+        what = "line %s -> %s at %g mm/s (%d samples), magnet %s" % (tuple(round(v, 1) for v in start[:3]), tuple(round(v, 1) for v in end[:3]), speed, plan["steps"], "ON" if tool else "off")
     else:
         fail("the instructions must be a list of angles or an object with StartPoint and EndPoint")
     print("fake exe: %s on %s at %d baud, about %.1f s" % (what, a.port, a.baud, duration))

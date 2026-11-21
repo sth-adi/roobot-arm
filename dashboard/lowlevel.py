@@ -157,25 +157,27 @@ class ExeSender:
       cmd           the command as a list; "{json_file}" (a temp file holding the instructions), "{json}" (the same text), "{baud}" and "{port}" are filled in.
                     e.g. ["C:/arm/sam.exe", "{json_file}", "{baud}", "{port}"]. Exit code 0 = the move is done; anything else = it failed (its output is the detail).
       twin          optional: a sender (VirtualArm) that runs the same steps beside the real arm; it is also where the arm's position comes from (start_pose)
-      ignore_magnet his exe has no magnet: a step that grabs or releases is refused up front unless this is true (then the arm moves, nothing is switched)
+      magnet        Sam: the magnet is one more top-level field in the JSON, "Tool": 0 (off) or 1 (on). Each run carries the state it should be in AFTER that move
+                    (grab -> 1, release -> 0, starts at 0); a grab/release in place is still a run (start = end). His hardware is not built yet.
       runner        runner(argv, timeout_s, stopped) -> (returncode, output); the default starts the process and kills it on stop() (tests pass a fake)
     The first StartPoint is where start_pose() says the arm is: the real arm must really be there (home) when the first job starts."""
     LIMITS_UNSET = {k: {"Min": 0, "Max": 0} for k in ("S1", "S2", "S3", "S4")}      # exactly as in Sam's example: 0/0
 
-    def __init__(self, cmd, start_pose, twin=None, baud=115200, port="", samples_per_mm=1000, ignore_magnet=False, limits=None, step_timeout_s=180.0, runner=None):
+    def __init__(self, cmd, start_pose, twin=None, baud=115200, port="", samples_per_mm=1000, limits=None, step_timeout_s=180.0, runner=None):
         self.cmd, self.start_pose, self.twin, self.baud, self.port = list(cmd), start_pose, twin, baud, port
-        self.samples_per_mm, self.ignore_magnet, self.step_timeout = samples_per_mm, ignore_magnet, step_timeout_s
+        self.samples_per_mm, self.step_timeout = samples_per_mm, step_timeout_s
+        self.tool = 0                                  # the magnet state we last asked for (0 off, 1 on)
         self.limits = limits or self.LIMITS_UNSET
         self.runner = runner or self._run_process
         self._stop, self._proc = False, None
         self._lock = threading.Lock()
 
     # ---- what we send ----
-    def instruction(self, start, step):
+    def instruction(self, start, step, tool=0):
         """Sam's start/end-point JSON for one move. start: {"x","y","z","angle"}; step: a route step (x, y, z, angle, speed ...)."""
         return {"StartPoint": {"x": start["x"], "y": start["y"], "z": start["z"], "toolDegrees": start["angle"]},
                 "EndPoint": {"x": step["x"], "y": step["y"], "z": step["z"], "toolDegrees": step["angle"]},
-                "speed": step.get("speed"), "SamplesPerMM": self.samples_per_mm, "AngleLimits": self.limits}
+                "speed": step.get("speed"), "SamplesPerMM": self.samples_per_mm, "AngleLimits": self.limits, "Tool": tool}
 
     @staticmethod
     def _still(a, b):
@@ -193,8 +195,6 @@ class ExeSender:
     def run(self, steps, job="", on_step=None):
         if not steps:
             raise BackendError("NO_POSES", "There is nothing to run", "", "")
-        if not self.ignore_magnet and any(s.get("action") in ("grab", "release") for s in steps):
-            raise BackendError("NO_MAGNET", "Sam's exe cannot switch the magnet", "This route grabs or releases a key.", "Agree a magnet command with Sam, or start with the magnet ignored to test the movement only.")
         pose = self.start_pose()
         if not isinstance(pose, dict):
             raise BackendError("NO_POSITION", "The arm's position is not known", "", "Wait for the arm's first position report.")
@@ -212,8 +212,10 @@ class ExeSender:
                 twin_thread = threading.Thread(target=work, daemon=True)
                 twin_thread.start()
             try:
-                if not self._still(pose, step):
-                    self._run_exe(self.instruction(pose, step))
+                tool = {"grab": 1, "release": 0}.get(step.get("action"), self.tool)
+                if tool != self.tool or not self._still(pose, step):
+                    self._run_exe(self.instruction(pose, step, tool))
+                self.tool = tool
             except BackendError:
                 if self.twin:
                     self.twin.stop()

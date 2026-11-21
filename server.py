@@ -270,8 +270,7 @@ def make_front(mode, hub_url="http://127.0.0.1:8765", exe=None):
         import virtual
         twin = virtual.VirtualArm()                  # shown on the dashboard (the hub copies its pose); also where the arm's position comes from
         exe = exe or {}
-        sender = lowlevel.ExeSender(exe["cmd"], twin.get_pose, twin=twin, baud=exe.get("baud", 115200), port=exe.get("port", ""),
-                                    ignore_magnet=exe.get("ignore_magnet", False))
+        sender = lowlevel.ExeSender(exe["cmd"], twin.get_pose, twin=twin, baud=exe.get("baud", 115200), port=exe.get("port", ""))
         return interface.Frontdoor(boxes.Store(), sender, twin.get_pose)
     if mode == "hub":
         import boxes
@@ -524,14 +523,13 @@ def main():
     p.add_argument("--exe-port", default=os.environ.get("ARM_PORT", ""), help="the board's COM port, passed to the exe")
     p.add_argument("--exe-baud", type=int, default=115200, help="baud rate passed to the exe")
     p.add_argument("--exe-args", default="{json_file} {baud} {port}", help="how the exe is called after its path: {json_file}, {json}, {baud}, {port}")
-    p.add_argument("--exe-ignore-magnet", action="store_true", help="move the arm even for steps that grab/release (his exe has no magnet command): movement tests only")
     p.add_argument("--hub-url", default=os.environ.get("HUB_URL", "http://127.0.0.1:8765"), help="the dashboard hub, for --ai hub (env: HUB_URL)")
     args = p.parse_args()
     exe_opts = None
     if args.ai == "exe":
         if not args.exe:
             p.error("--ai exe needs --exe PATH (or ARM_EXE)")
-        exe_opts = {"cmd": [args.exe] + [t.strip(chr(34)) for t in shlex.split(args.exe_args, posix=os.name != "nt")], "port": args.exe_port, "baud": args.exe_baud, "ignore_magnet": args.exe_ignore_magnet}
+        exe_opts = {"cmd": [args.exe] + [t.strip(chr(34)) for t in shlex.split(args.exe_args, posix=os.name != "nt")], "port": args.exe_port, "baud": args.exe_baud}
     _front["door"], _front["mode"] = make_front(args.ai, args.hub_url, exe_opts), args.ai
     print("Arm's front door: %s" % {"exe": "Sam's exe (%s, port %s, %d baud), with a virtual twin for the dashboard" % (args.exe, args.exe_port or "?", args.exe_baud), "hub": "the dashboard hub's arm at %s (the real arm follows in mirror mode when ARMED)" % args.hub_url,
                                     "virtual": "virtual arm (nothing real can move)", "off": "off"}[args.ai])

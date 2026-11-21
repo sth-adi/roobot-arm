@@ -74,7 +74,6 @@ def main():
     ap.add_argument("--exe-port", default="", help="the board's COM port, passed to the exe")
     ap.add_argument("--exe-baud", type=int, default=115200)
     ap.add_argument("--exe-args", default="{json_file} {baud} {port}", help="how the exe is called after its path: {json_file}, {json}, {baud}, {port}")
-    ap.add_argument("--exe-ignore-magnet", action="store_true", help="move the arm even for steps that grab/release (movement tests only)")
     a = ap.parse_args()
     if a.fake_exe and not a.exe:
         a.exe, a.exe_args = sys.executable, '"%s" {json_file} {baud} {port}' % os.path.join(ROOT, "tools", "fake_sam_exe.py")
@@ -103,8 +102,6 @@ def main():
         else:
             if a.exe:                                   # Sam's exe route: it holds the COM port, so the hub must not (no mirror mode)
                 server_cmd = [py, os.path.join(ROOT, "server.py"), "--ai", "exe", "--exe", a.exe, "--exe-port", a.exe_port, "--exe-baud", str(a.exe_baud), "--exe-args", a.exe_args]
-                if a.exe_ignore_magnet:
-                    server_cmd.append("--exe-ignore-magnet")
             else:
                 server_cmd = [py, os.path.join(ROOT, "server.py"), "--ai", "hub", "--hub-url", hub_url]
             kids.append(subprocess.Popen(server_cmd, cwd=ROOT))
